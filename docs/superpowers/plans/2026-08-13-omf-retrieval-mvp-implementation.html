@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CREFLE OMF Retrieval MVP 상세 구현 계획</title>
+<link rel="stylesheet" href="./crefle-doc/crefle-doc.css">
+<style>
+  :root { --doc-running-title: 'OMF Retrieval MVP 상세 구현 계획'; }
+</style>
+</head>
+
+<body class="doc doc-numbered">
+<header class="doc-cover">
+  <p class="eyebrow">CREFLE · 상세 구현 계획</p>
+  <h1>OMF Retrieval MVP 상세 구현 계획</h1>
+  <p class="lede">승인된 검색 플랫폼 설계를 실제 파일·실패 테스트·검증 명령·커밋과 사용자 확인 지점으로 전환한 개발 실행 기준이다.</p>
+
+  <table data-document-info>
+    <caption>문서 정보</caption>
+    <tbody>
+      <tr><th>작성자</th><td>CREFLE Inc. CTO 김정규</td></tr>
+      <tr><th>작성일</th><td>2026-08-13</td></tr>
+      <tr><th>작성시간</th><td>15:50 KST</td></tr>
+      <tr><th>문서 버전</th><td>1.0</td></tr>
+      <tr><th>열람 대상</th><td>프로젝트 관련자</td></tr>
+      <tr><th>상태</th><td>최종 승인 · 개발 착수 가능</td></tr>
+    </tbody>
+  </table>
+</header>
+
+<h2>문서 관계와 결론</h2>
+
+<div class="callout">
+  <p><strong>정본과 열람본.</strong> 같은 경로의 <code>2026-08-13-omf-retrieval-mvp-implementation.md</code>가 1,500여 행의 실행 정본이다. 이 HTML은 프로젝트 관련자가 단계·책임·게이트를 빠르게 검토하기 위한 파생 열람본이다. 구현 시에는 Markdown의 파일 목록, 실패 테스트, 예상 결과와 검증 명령을 따른다.</p>
+</div>
+
+<p>구현은 <strong>18개 논리적 작업</strong>을 5개 승인 단계로 진행한다. 각 기능은 실패 테스트에서 시작하고, PostgreSQL 통합은 실제 pgvector 컨테이너에서, 최종 품질·성능은 지정 서버의 RTX 4090 GPU 0에서 검증한다. 단계 결과를 공유하고 사용자 확인을 받은 뒤 다음 단계로 이동한다.</p>
+
+<div class="kpi">
+  <div><span class="big">18</span><span class="lbl">논리적 구현<br>작업</span></div>
+  <div><span class="big">5</span><span class="lbl">사용자 승인<br>게이트</span></div>
+  <div><span class="big">3일</span><span class="lbl">MVP 학습·구현<br>목표</span></div>
+</div>
+
+<h2>목표와 범위</h2>
+
+<blockquote>
+  <p>OMF 문서의 고정 Git commit에서 관련 원문을 찾아, 다시 확인 가능한 근거 좌표와 함께 전달한다.</p>
+</blockquote>
+
+<table>
+  <caption>구현 범위 경계</caption>
+  <thead>
+    <tr><th>포함</th><th>제외</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Git snapshot·Markdown 선별·계층 파싱·Parent–Child chunk</td>
+      <td>LLM 요약·분석·생성</td>
+    </tr>
+    <tr>
+      <td>Qwen embedding·pg_trgm·정확 vector·RRF</td>
+      <td>리랭커·ANN·ParadeDB</td>
+    </tr>
+    <tr>
+      <td>근거 인용·행·경로·commit·hash·버전·결정 상태</td>
+      <td>전체 문서 반환 API</td>
+    </tr>
+    <tr>
+      <td>FastAPI 검색·Typer 운영 CLI·Bearer source 권한</td>
+      <td>Admin HTTP API·MCP·Codex function tool</td>
+    </tr>
+    <tr>
+      <td>원자 색인 전환·직전 성공본 rollback·RAG 검색 평가</td>
+      <td>자동 backup/restore·Grafana·Prometheus</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>구현 구조</h2>
+
+<figure>
+<pre><code>interfaces.api ─────┐
+interfaces.cli ─────┼──► application use cases ──► domain
+                    │          │
+                    │          ├── search
+                    │          ├── indexing
+                    │          ├── evaluation
+                    │          └── admin
+                    │
+                    └──────────────► infrastructure
+                                      ├── PostgreSQL
+                                      ├── Qwen embedding
+                                      ├── Git · Markdown
+                                      └── JSON log · audit</code></pre>
+  <figcaption>모듈러 모놀리스 의존성 방향</figcaption>
+</figure>
+
+<table>
+  <caption>주요 구현 경계와 대표 파일</caption>
+  <thead>
+    <tr><th>경계</th><th>책임</th><th>대표 파일</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Domain</th><td>상태·버전·근거·권한 불변 규칙</td><td><code>domain/models.py</code>, <code>domain/policies.py</code></td></tr>
+    <tr><th>Indexing</th><td>snapshot부터 ready·active 전환까지</td><td><code>application/indexing/service.py</code></td></tr>
+    <tr><th>Search</th><td>권한 선필터, 후보, RRF, evidence grouping</td><td><code>application/search/service.py</code></td></tr>
+    <tr><th>Evaluation</th><td>골드셋과 검색 전용 출시 게이트</td><td><code>application/evaluation/runner.py</code></td></tr>
+    <tr><th>Database</th><td>SQLAlchemy repository와 PostgreSQL 검색 SQL</td><td><code>infrastructure/database/</code></td></tr>
+    <tr><th>Embedding</th><td>고정 Qwen revision과 GPU 0 inference</td><td><code>infrastructure/embedding/</code></td></tr>
+    <tr><th>Source</th><td>안전한 Git archive, Markdown line map, chunk</td><td><code>infrastructure/source/</code></td></tr>
+    <tr><th>Interfaces</th><td>FastAPI 계약과 Typer 검색·운영 명령</td><td><code>interfaces/api/</code>, <code>interfaces/cli/</code></td></tr>
+  </tbody>
+</table>
+
+<h2>고정 기술 기준</h2>
+
+<table>
+  <caption>재현 가능한 runtime baseline</caption>
+  <thead>
+    <tr><th>항목</th><th>확정값</th><th>잠금 방식</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Python</th><td>3.12</td><td><code>.python-version</code>, project range</td></tr>
+    <tr><th>의존성</th><td>uv 0.12.3 · <code>pyproject.toml</code></td><td><code>uv.lock</code></td></tr>
+    <tr><th>PyTorch</th><td>2.11.0 · CUDA 12.8</td><td>Linux cu128 explicit index</td></tr>
+    <tr><th>Application base</th><td><code>pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime</code></td><td><code>sha256:eee11b…ef2be</code></td></tr>
+    <tr><th>PostgreSQL</th><td><code>pgvector/pgvector:0.8.6-pg18-trixie</code></td><td><code>sha256:1963bc…9026</code></td></tr>
+    <tr><th>Embedding</th><td>Qwen3-Embedding-0.6B · 1024차원</td><td><code>97b0c614…65b3</code></td></tr>
+    <tr><th>API·CLI</th><td>FastAPI · Uvicorn · Typer</td><td>직접 범위 + lock</td></tr>
+    <tr><th>DB adapter</th><td>SQLAlchemy sync · Alembic · Psycopg · pgvector</td><td>직접 범위 + lock</td></tr>
+    <tr><th>품질 도구</th><td>pytest · pytest-cov · Ruff</td><td>dev group + lock</td></tr>
+  </tbody>
+</table>
+
+<p>macOS는 CPU/MPS PyTorch를, Linux x86_64 운영 image는 cu128을 사용한다. PyTorch index는 explicit source로 제한하여 다른 package가 CUDA index에서 잘못 해결되는 것을 막는다. 운영 image에는 model과 secret을 포함하지 않는다.</p>
+
+<h2>설계에서 구현 규칙으로 구체화한 항목</h2>
+
+<div class="callout callout-warning">
+  <p><strong>계획 승인 시 함께 확정할 세부 규칙.</strong> 아래 내용은 설계의 방향을 바꾸지 않지만, 구현자가 임의로 판단하지 않도록 이번 계획에서 구체화한 값이다.</p>
+</div>
+
+<table>
+  <caption>구체화된 구현 규칙</caption>
+  <thead>
+    <tr><th>항목</th><th>규칙</th><th>보수적 처리</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>행 좌표</th><td>1-based inclusive</td><td>markdown-it source map에서 원본 slice</td></tr>
+    <tr><th>과거본</th><td><code>/versions/</code> path만 historical</td><td>이름의 v1·v2만으로 관계 추론 금지</td></tr>
+    <tr><th>문서 상태</th><td>파일명·상단 구조화 metadata·신뢰도 표</td><td>미확정·불확정 등 부정 표현 제외</td></tr>
+    <tr><th>문서 관계</th><td><code>omf-relations.json</code>의 명시적 path·행</td><td>supersedes·conflict 자동 추론 금지</td></tr>
+    <tr><th>내용 hash</th><td>Git archive UTF-8 bytes 그대로 SHA-256</td><td>개행 정규화 금지</td></tr>
+    <tr><th>설정 hash</th><td>정렬된 canonical JSON SHA-256</td><td>parser·chunk·model revision 포함</td></tr>
+    <tr><th>API token</th><td>key ID + 256-bit random secret</td><td>DB에는 SHA-256과 상태만</td></tr>
+    <tr><th>질의 audit</th><td>별도 secret의 HMAC-SHA256</td><td>dictionary 추측과 원문 저장 방지</td></tr>
+    <tr><th>Ready API</th><td>active Bearer token 필수</td><td>public 무인증 노출 금지</td></tr>
+    <tr><th>Model 준비</th><td>고정 revision을 cache에 사전 준비</td><td>API runtime은 offline mode</td></tr>
+  </tbody>
+</table>
+
+<p>DB 비밀번호 외에 <code>/opt/omf-retrieval/secrets/audit_hmac_key</code>를 mode 600으로 추가한다. 이는 audit DB의 질의 hash가 추측 가능한 일반 SHA-256이 되는 문제를 막기 위한 보안 보강이다.</p>
+
+<h2>단계별 실행 흐름</h2>
+
+<div class="process-flow-scroll">
+  <table class="process-flow">
+    <caption>5단계 구현·검증·승인 흐름</caption>
+    <thead>
+      <tr><th scope="col">단계</th><th scope="col">Code·DB</th><th scope="col">검증</th><th scope="col">사용자 확인</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row"><strong>A · 기반</strong><small>작업 1~6</small></th>
+        <td data-transition="enter"><span class="process-flow-transition">시작</span><div class="process-flow-items">Project · Domain · Schema · Git · Parser · Chunk</div></td>
+        <td><div class="process-flow-items">unit · PostgreSQL migration · source integration</div></td>
+        <td><div class="process-flow-items">test 수 · coverage · migration 공유</div></td>
+      </tr>
+      <tr>
+        <th scope="row"><strong>B · 검색 절편</strong><small>작업 7~12</small></th>
+        <td><div class="process-flow-items">Embedding · Index · Activation · Auth · Search · API/CLI</div></td>
+        <td><div class="process-flow-items">fake model vertical slice · 계약 · 권한 누출 test</div></td>
+        <td><div class="process-flow-items">sample evidence response 검토</div></td>
+      </tr>
+      <tr>
+        <th scope="row"><strong>C · 제품화</strong><small>작업 13~15</small></th>
+        <td><div class="process-flow-items">Evaluation · Audit · Docker · Compose</div></td>
+        <td><div class="process-flow-items">품질 metric fixture · log redaction · image contract</div></td>
+        <td><div class="process-flow-items">image size · Compose · 보안 기준 검토</div></td>
+      </tr>
+      <tr>
+        <th scope="row"><strong>D · 운영 검증</strong><small>작업 16~17</small></th>
+        <td><div class="process-flow-items">Buildx push · Deploy · Full index · Gold evaluation</div></td>
+        <td><div class="process-flow-items">GPU E2E · rollback · 품질 · 성능</div></td>
+        <td><div class="process-flow-items">외부 변경 전 승인 · gold 사람 검토</div></td>
+      </tr>
+      <tr>
+        <th scope="row"><strong>E · 인수</strong><small>작업 18</small></th>
+        <td data-transition="exit"><span class="process-flow-transition">종료</span><div class="process-flow-items">Runbook · 전체 gate · 범위 누출 검토</div></td>
+        <td><div class="process-flow-items">digest · test · metric · network evidence</div></td>
+        <td><div class="process-flow-items">최종 승인</div></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>18개 작업 지도</h2>
+
+<table>
+  <caption>작업·대표 산출물·핵심 검증·커밋</caption>
+  <thead>
+    <tr><th class="num">#</th><th>작업</th><th>대표 산출물</th><th>핵심 Red/Green</th><th>Commit scope</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="num">1</td><th>Python 기반</th><td><code>pyproject.toml</code>, <code>uv.lock</code></td><td>package import와 Ruff</td><td>build(project)</td></tr>
+    <tr><td class="num">2</td><th>Domain·설정·hash</th><td><code>domain/</code>, <code>settings.py</code></td><td>canonical hash·production guard</td><td>feat(domain)</td></tr>
+    <tr><td class="num">3</td><th>DB schema</th><td>13 tables · Alembic</td><td>extension·constraint·down/up</td><td>feat(database)</td></tr>
+    <tr><td class="num">4</td><th>Git source</th><td>OMF profile · archive adapter</td><td>dirty commit·path traversal·exclude</td><td>feat(source)</td></tr>
+    <tr><td class="num">5</td><th>Markdown parser</th><td>section tree · metadata</td><td>heading·table·line map</td><td>feat(parser)</td></tr>
+    <tr><td class="num">6</td><th>Parent–Child chunk</th><td>deterministic chunker</td><td>400/600/64·atomic 800</td><td>feat(indexing)</td></tr>
+    <tr><td class="num">7</td><th>Qwen embedding</th><td>Provider · model prepare</td><td>query-only instruction·dimension</td><td>feat(embedding)</td></tr>
+    <tr><td class="num">8</td><th>증분 색인</th><td>index orchestrator</td><td>duplicate reuse·changed-only</td><td>feat(indexing)</td></tr>
+    <tr><td class="num">9</td><th>원자 전환</th><td>activation · rollback</td><td>advisory lock·failure isolation</td><td>feat(indexing)</td></tr>
+    <tr><td class="num">10</td><th>인증·권한</th><td>token · grant · HMAC</td><td>token 원문 미저장·선필터</td><td>feat(auth)</td></tr>
+    <tr><td class="num">11</td><th>Hybrid search</th><td>candidate SQL · RRF · evidence</td><td>top 50·parent 최고 score</td><td>feat(search)</td></tr>
+    <tr><td class="num">12</td><th>API·CLI</th><td>3 endpoints · Typer commands</td><td>ok·no_evidence·401/403/409/503</td><td>feat(api)</td></tr>
+    <tr><td class="num">13</td><th>RAG 평가</th><td>gold JSON · 7 metrics</td><td>손계산 fixture·100% gates</td><td>feat(evaluation)</td></tr>
+    <tr><td class="num">14</td><th>관측·감사</th><td>allowlist JSON logger</td><td>query·token·excerpt 부재</td><td>feat(observability)</td></tr>
+    <tr><td class="num">15</td><th>Container</th><td>Dockerfile · Compose</td><td>digest·GPU 0·private DB</td><td>build(container)</td></tr>
+    <tr><td class="num">16</td><th>불변 배포</th><td>build/push/deploy scripts</td><td>SHA tag·registry/runtime digest</td><td>build(deploy)</td></tr>
+    <tr><td class="num">17</td><th>Server acceptance</th><td>GPU E2E · benchmark</td><td>gold·p95·rollback·provenance</td><td>test(acceptance)</td></tr>
+    <tr><td class="num">18</td><th>운영 인계</th><td>runbook · troubleshooting</td><td>전체 gate·범위 누출 검사</td><td>docs(operations)</td></tr>
+  </tbody>
+</table>
+
+<h2>TDD와 검증 사다리</h2>
+
+<figure>
+<pre><code>가장 작은 실패 test
+        │  예상 원인으로 실패 확인
+        ▼
+최소 구현 ──► 해당 test green
+        │
+        ▼
+관련 unit 전체 ──► 실제 PostgreSQL integration
+        │
+        ▼
+API·CLI contract ──► linux/amd64 image
+        │
+        ▼
+RTX 4090 server E2E ──► Gold 품질 ──► 성능 ──► 운영 인수</code></pre>
+  <figcaption>외부 환경에 가까워질수록 앞 단계 증거를 누적하는 검증 순서</figcaption>
+</figure>
+
+<table>
+  <caption>테스트 계층과 외부 의존성</caption>
+  <thead>
+    <tr><th>계층</th><th>사용 자원</th><th>금지 사항</th><th>합격 기준</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Unit</th><td>fake tokenizer·embedding·repository</td><td>network·GPU·실제 OMF 수정</td><td>핵심 정책 분기 전부</td></tr>
+    <tr><th>Integration</th><td>실제 pgvector Compose·임시 Git</td><td>Testcontainers</td><td>migration·검색 SQL·transaction</td></tr>
+    <tr><th>Contract</th><td>FastAPI TestClient·Typer runner</td><td>내부 stack/path 노출</td><td>설계 응답·exit code 일치</td></tr>
+    <tr><th>Image</th><td>Buildx linux/amd64</td><td>model·secret 포함</td><td>digest·user·GPU runtime</td></tr>
+    <tr><th>Server</th><td>phoebe · GPU 0 · OMF fixed commit</td><td>GPU 1·dirty source</td><td>색인·검색·failure·rollback</td></tr>
+    <tr><th>Quality</th><td>승인된 30개 gold</td><td>hold-out tuning·LLM judge gate</td><td>정량·100% 기준 전부</td></tr>
+  </tbody>
+</table>
+
+<h2>데이터와 검색 구현 gate</h2>
+
+<table>
+  <caption>13개 table의 구현 검증</caption>
+  <thead>
+    <tr><th>묶음</th><th>Table</th><th>필수 invariant</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Source·Run</th><td><code>source_profiles</code>, <code>index_configs</code>, <code>index_runs</code></td><td>active pointer·config hash·commit SHA</td></tr>
+    <tr><th>Content</th><td><code>document_contents</code>, <code>document_occurrences</code></td><td>content hash unique·run/path unique·모든 origin</td></tr>
+    <tr><th>Parse</th><td><code>document_parses</code>, <code>sections</code>, <code>chunks</code></td><td>config reuse·행 재현·trigram GIN</td></tr>
+    <tr><th>Vector</th><td><code>chunk_embeddings</code></td><td>model/revision/dimension·vector_dims check·ANN 없음</td></tr>
+    <tr><th>Relation</th><td><code>document_relations</code></td><td>명시적 source path·행 근거만</td></tr>
+    <tr><th>Security</th><td><code>api_clients</code>, <code>client_source_grants</code></td><td>secret 원문 없음·candidate 전 grant</td></tr>
+    <tr><th>Audit</th><td><code>search_audit_events</code></td><td>HMAC·ID·지연만, query/excerpt 없음</td></tr>
+  </tbody>
+</table>
+
+<figure>
+<pre><code>Bearer·source grant
+        │ 후보 전에 강제
+        ▼
+authorized occurrences ──► unique chunks
+        │                         │
+        ├── pg_trgm Top 50        ├── cosine exact Top 50
+        └──────────┬──────────────┘
+                   ▼
+            RRF k=60 · 1.0/1.0
+                   ▼
+       parent grouping · 최고 child rank
+                   ▼
+        provenance 검증 · limit · audit</code></pre>
+  <figcaption>권한 밖 문서의 존재와 점수까지 노출하지 않는 검색 흐름</figcaption>
+</figure>
+
+<h2>평가와 출시 기준</h2>
+
+<table>
+  <caption>30개 골드 질문 구성</caption>
+  <thead>
+    <tr><th>유형</th><th class="num">수</th><th>검증 초점</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>단일 근거</th><td class="num">8</td><td>첫 직접 근거 순위</td></tr>
+    <tr><th>복수 필수 근거</th><td class="num">6</td><td>필수 근거 전부 회수</td></tr>
+    <tr><th>식별자·API·UI·데이터 모델</th><td class="num">4</td><td>keyword와 정확 path</td></tr>
+    <tr><th>현재·과거·버전</th><td class="num">4</td><td>version scope</td></tr>
+    <tr><th>충돌·소유권</th><td class="num">4</td><td>양쪽 근거와 owner</td></tr>
+    <tr><th>근거 없음</th><td class="num">4</td><td>추측 근거 0</td></tr>
+  </tbody>
+  <tfoot>
+    <tr><th>합계</th><td class="num"><strong>30</strong></td><td>20 tuning · 10 hold-out</td></tr>
+  </tfoot>
+</table>
+
+<table>
+  <caption>출시 정량 기준</caption>
+  <thead>
+    <tr><th>지표</th><th>기준</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Evidence Recall@5</th><td class="num">≥ 0.85</td></tr>
+    <tr><th>Evidence Recall@10</th><td class="num">≥ 0.95</td></tr>
+    <tr><th>All-required Evidence@10</th><td class="num">≥ 0.85</td></tr>
+    <tr><th>nDCG@10</th><td class="num">≥ 0.85</td></tr>
+    <tr><th>MRR@10</th><td class="num">≥ 0.90</td></tr>
+    <tr><th>Context Precision</th><td class="num">≥ 0.80</td></tr>
+    <tr><th>Duplicate Evidence Ratio</th><td class="num">≤ 0.10</td></tr>
+  </tbody>
+</table>
+
+<p>provenance, 권한 누출, 과거본 선택, 충돌 노출, no-evidence, duplicate origins는 평균이 아니라 100% 통과해야 한다. 사람의 gold 검토 전에는 품질 완료로 표시하지 않는다.</p>
+
+<h2>3일 실행 배치</h2>
+
+<table>
+  <caption>목표 일정과 절단 기준</caption>
+  <thead>
+    <tr><th>일자</th><th>우선 구현</th><th>하루 종료 증거</th><th>시간 부족 시 유지할 절단선</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>1일차</th><td>작업 1~6 · 기반·DB·source·parser·chunk</td><td>실제 migration과 deterministic chunk test</td><td>관측·운영 편의보다 provenance 정확성 우선</td></tr>
+    <tr><th>2일차</th><td>작업 7~12 · embedding·index·auth·search·API/CLI</td><td>fake provider 기반 인증 검색 수직 절편</td><td>Admin HTTP·비동기화·추가 endpoint 금지</td></tr>
+    <tr><th>3일차</th><td>작업 13~18 · 평가·container·server acceptance·인계</td><td>고정 image·GPU index·gold/성능 report</td><td>백업·dashboard·리랭커는 2차 유지</td></tr>
+  </tbody>
+</table>
+
+<div class="callout callout-warning">
+  <p><strong>일정의 객관적 위험.</strong> 30개 gold의 사람 검토와 중앙 Gateway·방화벽 변경은 순수 코드 작성과 독립적인 외부 입력이다. 3일 안에 코드가 준비되어도 이 승인이나 운영값이 늦으면 운영 출시 완료는 지연된다. 이 경우 품질 기준을 낮추지 않고 해당 gate에서 정지한다.</p>
+</div>
+
+<h2>배포 구조와 정지 조건</h2>
+
+<figure>
+<pre><code>Mac arm64
+  │ Buildx linux/amd64 · git SHA tag · push
+  ▼
+hub.crefle.com/crefle-ai/omf-retrieval:git-sha@digest
+  │ pull · digest 확인
+  ▼
+phoebe-onpremise-test
+  ├── API · GPU physical 0 → container cuda:0
+  ├── Admin CLI · same image
+  └── PostgreSQL 18 + pgvector · host port 없음
+        ▲
+        │ private HTTP
+기존 중앙 Nginx Gateway · TLS · host reverse proxy</code></pre>
+  <figcaption>추가 Nginx 없이 기존 Gateway 뒤에 배포하는 불변 image 흐름</figcaption>
+</figure>
+
+<table>
+  <caption>운영 배포 전에 필요한 값</caption>
+  <thead>
+    <tr><th>입력</th><th>용도</th><th>없을 때</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>서비스 FQDN</th><td>Gateway host routing</td><td>deploy 실행 중지</td></tr>
+    <tr><th>Gateway private IP</th><td>server firewall allowlist</td><td>network 변경 중지</td></tr>
+    <tr><th>Backend private IP·port</th><td>FastAPI bind·upstream</td><td>Compose 배포 중지</td></tr>
+    <tr><th>OMF Git remote·인증</th><td>host read-only clone</td><td>index 실행 중지</td></tr>
+    <tr><th>Initial API client</th><td>ready·search smoke test</td><td>외부 계약 검증 중지</td></tr>
+    <tr><th>Firewall 변경 승인 주체</th><td>Gateway-only 접근</td><td>외부 변경 중지</td></tr>
+  </tbody>
+</table>
+
+<h2>완료 정의</h2>
+
+<div class="callout callout-success">
+  <p><strong>완료는 코드 작성이 아니라 검증 증거다.</strong> 아래 조건이 전부 충족되고 사용자가 최종 승인해야 MVP 구현을 완료로 표시한다.</p>
+</div>
+
+<ul>
+  <li>승인된 REST·CLI·DB·검색·권한 계약 구현</li>
+  <li>unit·integration·contract test와 Domain·Application coverage 80% 이상</li>
+  <li>실제 PostgreSQL 18 + pgvector 0.8.6 migration·검색·transaction 통과</li>
+  <li>OMF 고정 commit의 최초·증분·실패 격리·rollback E2E 통과</li>
+  <li>승인된 30개 gold의 정량 기준과 100% gate 통과</li>
+  <li>RTX 4090 GPU 0의 p95·오류율·초기 색인 시간 통과</li>
+  <li>Gateway HTTPS, private bind, DB 비노출, source grant 선필터 확인</li>
+  <li>application image·DB image·model·source·config의 digest와 hash 기록</li>
+  <li>query·token·evidence 원문이 log·audit·image에 존재하지 않음</li>
+  <li>runbook·배포·장애 처리 문서와 검증 결과 인계</li>
+</ul>
+
+<h2>승인된 계획 사항</h2>
+
+<ol>
+  <li>18개 작업과 5개 사용자 확인 지점</li>
+  <li><code>/versions/</code>만 historical로 보는 보수적 version 규칙</li>
+  <li>명시적 sidecar만 supersedes·potential conflict로 저장하는 규칙</li>
+  <li>API token SHA-256과 질의 audit HMAC-SHA256의 분리</li>
+  <li><code>audit_hmac_key</code> secret file 추가</li>
+  <li>인증된 client만 readiness를 호출하는 정책</li>
+  <li>운영 전 <code>model prepare</code> CLI로 고정 revision을 cache하는 방식</li>
+  <li>단계 A부터 순차 구현하고 각 단계 결과를 확인받는 진행 방식</li>
+</ol>
+
+<p><small>이 열람본은 같은 디렉터리의 CREFLE 문서 공통 asset bundle을 사용하며 네트워크 asset을 사용하지 않는다.</small></p>
+
+</body>
+</html>
