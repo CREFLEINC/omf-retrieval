@@ -7,11 +7,18 @@
 | 문서 항목 | 값 |
 |---|---|
 | 작성자 | CREFLE Inc. CTO 김정규 |
-| 작성일시 | 2026-08-13 15:50 KST |
-| 문서 버전 | 1.0 |
+| 작성일시 | 2026-08-14 17:08 KST |
+| 문서 버전 | 1.1 |
 | 열람 대상 | 프로젝트 관련자 |
 | 기준 설계 | <code>docs/design/2026-08-13-omf-retrieval-mvp-system-design.html</code> v1.0 |
 | 상태 | 최종 승인 · 개발 착수 가능 |
+
+## 개정 이력
+
+| 버전 | 작성일시 | 변경 | 작성자 |
+|---|---|---|---|
+| 1.1 | 2026-08-14 17:08 KST | 작업 1의 RED를 import 오류가 아닌 구현 부재에 따른 assertion 실패로 재구성 | CREFLE Inc. CTO 김정규 |
+| 1.0 | 2026-08-13 15:50 KST | 최초 승인본 | CREFLE Inc. CTO 김정규 |
 
 ## 1. 목표
 
@@ -171,24 +178,126 @@ MVP는 근거 검색까지만 담당한다. LLM 요약·분석, MCP, Codex funct
 - 생성: <code>README.md</code>
 - 생성: <code>src/omf_retrieval/__init__.py</code>
 - 생성: 설계의 목표 package별 <code>__init__.py</code>
+- 생성: <code>src/omf_retrieval/interfaces/cli/main.py</code>의 최소 Typer <code>app</code> 뼈대; 작업 12에서 확장
 - 테스트: <code>tests/unit/test_package.py</code>
 
-**1.1 실패하는 import test 작성**
+**1.1 프로젝트·package 구조 존재 계약 test 작성**
+
+~~~python
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).parents[2]
+REQUIRED_PATHS = (
+    "pyproject.toml",
+    ".python-version",
+    "README.md",
+    "src/omf_retrieval/__init__.py",
+    "src/omf_retrieval/domain/__init__.py",
+    "src/omf_retrieval/application/__init__.py",
+    "src/omf_retrieval/application/search/__init__.py",
+    "src/omf_retrieval/application/indexing/__init__.py",
+    "src/omf_retrieval/application/evaluation/__init__.py",
+    "src/omf_retrieval/application/admin/__init__.py",
+    "src/omf_retrieval/interfaces/__init__.py",
+    "src/omf_retrieval/interfaces/api/__init__.py",
+    "src/omf_retrieval/interfaces/api/routes/__init__.py",
+    "src/omf_retrieval/interfaces/cli/__init__.py",
+    "src/omf_retrieval/infrastructure/__init__.py",
+    "src/omf_retrieval/infrastructure/database/__init__.py",
+    "src/omf_retrieval/infrastructure/embedding/__init__.py",
+    "src/omf_retrieval/infrastructure/source/__init__.py",
+    "src/omf_retrieval/infrastructure/observability/__init__.py",
+)
+
+
+def test_project_structure_exists() -> None:
+    missing = [
+        path for path in REQUIRED_PATHS if not (PROJECT_ROOT / path).is_file()
+    ]
+
+    assert missing == []
+~~~
+
+**1.2 구조 계약 RED 확인**
+
+실행:
+
+~~~bash
+uv run --isolated --with pytest==9.1.1 \
+  pytest tests/unit/test_package.py::test_project_structure_exists -q
+~~~
+
+예상: test collection은 성공하고, 누락된 경로 목록 때문에 assertion이 실패한다. import·문법·fixture 오류는 RED로 인정하지 않는다.
+
+**1.3 최소 프로젝트·package 뼈대 작성과 GREEN 확인**
+
+- <code>pyproject.toml</code>, <code>.python-version</code>, <code>README.md</code>를 만든다.
+- 목표 package 경계마다 빈 <code>__init__.py</code>를 만든다.
+- 이 단계의 <code>pyproject.toml</code>에는 승인된 build backend, Python 범위, 운영·개발 직접 의존성과 Ruff 설정을 기록하되 console script는 아직 등록하지 않는다.
+- 1.2의 test를 다시 실행해 구조 존재 계약이 통과하는지 확인한다.
+
+**1.4 import 가능한 package의 version 동작 계약 test 작성**
 
 ~~~python
 def test_package_exposes_version() -> None:
-    from omf_retrieval import __version__
+    import omf_retrieval
 
-    assert __version__ == "0.1.0"
+    assert getattr(omf_retrieval, "__version__", None) == "0.1.0"
 ~~~
 
-**1.2 실패 확인**
+**1.5 version 계약 RED와 최소 GREEN 확인**
 
-실행: <code>uv run pytest tests/unit/test_package.py -q</code>
+실행: <code>uv run pytest tests/unit/test_package.py::test_package_exposes_version -q</code>
 
-예상: package가 없어 <code>ModuleNotFoundError</code>.
+예상 RED: package import는 성공하고 <code>__version__</code> 값이 없어 assertion이 실패한다.
 
-**1.3 최소 package와 project metadata 작성**
+최소 구현으로 <code>src/omf_retrieval/__init__.py</code>에 <code>__version__ = "0.1.0"</code>을 추가한 뒤 같은 test가 통과하는지 확인한다.
+
+**1.6 console script metadata 계약 test 작성**
+
+기존 test module의 import 구역에 <code>entry_points</code>와 <code>typer</code>를 추가한다.
+
+~~~python
+from importlib.metadata import entry_points
+
+import typer
+
+
+def test_console_script_targets_typer_app() -> None:
+    scripts = [
+        entry_point
+        for entry_point in entry_points(group="console_scripts")
+        if entry_point.name == "omf-retrieval"
+    ]
+
+    assert [entry_point.value for entry_point in scripts] == [
+        "omf_retrieval.interfaces.cli.main:app"
+    ]
+
+    app = scripts[0].load()
+    assert isinstance(app, typer.Typer)
+~~~
+
+**1.7 console script 계약 RED와 최소 GREEN 확인**
+
+실행: <code>uv run pytest tests/unit/test_package.py::test_console_script_targets_typer_app -q</code>
+
+예상 RED: project metadata 조회는 성공하고 등록된 <code>omf-retrieval</code> script가 없어 첫 번째 목록 assertion이 실패한다. <code>scripts[0].load()</code>는 이 assertion 뒤에 있으므로 최초 RED에서 실행되지 않으며 import 오류를 실패 근거로 사용하지 않는다.
+
+- <code>pyproject.toml</code>에 <code>omf-retrieval = omf_retrieval.interfaces.cli.main:app</code> entry point를 하나만 등록한다.
+- <code>src/omf_retrieval/interfaces/cli/main.py</code>에 <code>app = typer.Typer()</code>인 import 가능한 최소 Typer <code>app</code>을 만든다.
+- 같은 test를 다시 실행해 entry point 이름·target이 정확히 일치하고, <code>load()</code>가 성공하며 실제 <code>typer.Typer</code> 객체가 반환되는지 확인한다.
+
+**1.8 Unit test 사례와 예상 결과 확인**
+
+| 계약 | 정상 사례 | 경계·실패 사례와 예상 결과 |
+|---|---|---|
+| 구조 존재 | 모든 필수 경로가 file이면 빈 누락 목록으로 통과 | 하나 이상의 경로가 없으면 해당 경로가 누락 목록에 남아 assertion 실패 |
+| package version | import가 성공하고 값이 정확히 <code>0.1.0</code>이면 통과 | import는 성공하지만 값이 없거나 다르면 assertion 실패 |
+| console script | 같은 이름의 entry point가 하나이고 target이 정확하며 <code>load()</code> 결과가 <code>typer.Typer</code>이면 통과 | entry point가 없거나 중복되거나 target이 다르면 첫 목록 assertion 실패; target은 맞지만 반환 객체의 유형이 다르면 두 번째 assertion 실패; import 자체가 실패하면 유효한 RED가 아닌 test 오류 |
+
+**1.9 project metadata 세부 기준 확인**
 
 - build backend는 표준 wheel을 만들 수 있는 uv build backend를 사용한다.
 - script entry point는 <code>omf-retrieval = omf_retrieval.interfaces.cli.main:app</code> 하나만 둔다.
@@ -196,7 +305,7 @@ def test_package_exposes_version() -> None:
 - Python 범위는 <code>&gt;=3.12,&lt;3.13</code>으로 고정한다.
 - <code>torch==2.11.0</code>을 직접 선언하고 Linux x86_64 marker에는 explicit <code>https://download.pytorch.org/whl/cu128</code> source를 연결한다.
 
-**1.4 잠금 파일 생성 및 재현 확인**
+**1.10 잠금 파일 생성 및 재현 확인**
 
 실행:
 
@@ -206,15 +315,15 @@ uv sync --frozen
 uv run pytest tests/unit/test_package.py -q
 ~~~
 
-예상: 1 passed.
+예상: 세 계약 test가 모두 통과한다.
 
-**1.5 Ruff gate 구성**
+**1.11 Ruff gate 구성**
 
 - line length 88
 - import sorting, unused import, common bug rules 활성화
-- <code>ruff format --check</code>와 <code>ruff check</code> 모두 통과
+- <code>uv run ruff format --check .</code>와 <code>uv run ruff check .</code> 모두 통과
 
-**1.6 commit**
+**1.12 commit**
 
 ~~~bash
 git add pyproject.toml uv.lock .python-version README.md src tests/unit/test_package.py
@@ -938,7 +1047,7 @@ git commit -m "feat(search): 하이브리드 검색과 근거 그룹화 구현"
 - 생성: <code>src/omf_retrieval/interfaces/api/schemas.py</code>
 - 생성: <code>src/omf_retrieval/interfaces/api/routes/search.py</code>
 - 생성: <code>src/omf_retrieval/interfaces/api/routes/health.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/main.py</code>
+- 확장: <code>src/omf_retrieval/interfaces/cli/main.py</code>
 - 생성: <code>src/omf_retrieval/interfaces/cli/search.py</code>
 - 생성: <code>src/omf_retrieval/interfaces/cli/indexing.py</code>
 - 생성: <code>src/omf_retrieval/interfaces/cli/evaluation.py</code>

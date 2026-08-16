@@ -20,9 +20,9 @@
     <caption>문서 정보</caption>
     <tbody>
       <tr><th>작성자</th><td>CREFLE Inc. CTO 김정규</td></tr>
-      <tr><th>작성일</th><td>2026-08-13</td></tr>
-      <tr><th>작성시간</th><td>15:50 KST</td></tr>
-      <tr><th>문서 버전</th><td>1.0</td></tr>
+      <tr><th>작성일</th><td>2026-08-14</td></tr>
+      <tr><th>작성시간</th><td>17:08 KST</td></tr>
+      <tr><th>문서 버전</th><td>1.1</td></tr>
       <tr><th>열람 대상</th><td>프로젝트 관련자</td></tr>
       <tr><th>상태</th><td>최종 승인 · 개발 착수 가능</td></tr>
     </tbody>
@@ -214,7 +214,7 @@ interfaces.cli ─────┼──► application use cases ──► domai
     <tr><th class="num">#</th><th>작업</th><th>대표 산출물</th><th>핵심 Red/Green</th><th>Commit scope</th></tr>
   </thead>
   <tbody>
-    <tr><td class="num">1</td><th>Python 기반</th><td><code>pyproject.toml</code>, <code>uv.lock</code></td><td>package import와 Ruff</td><td>build(project)</td></tr>
+    <tr><td class="num">1</td><th>Python 기반</th><td><code>pyproject.toml</code>, <code>uv.lock</code></td><td>구조·version·CLI load assertion과 Ruff</td><td>build(project)</td></tr>
     <tr><td class="num">2</td><th>Domain·설정·hash</th><td><code>domain/</code>, <code>settings.py</code></td><td>canonical hash·production guard</td><td>feat(domain)</td></tr>
     <tr><td class="num">3</td><th>DB schema</th><td>13 tables · Alembic</td><td>extension·constraint·down/up</td><td>feat(database)</td></tr>
     <tr><td class="num">4</td><th>Git source</th><td>OMF profile · archive adapter</td><td>dirty commit·path traversal·exclude</td><td>feat(source)</td></tr>
@@ -234,6 +234,24 @@ interfaces.cli ─────┼──► application use cases ──► domai
     <tr><td class="num">18</td><th>운영 인계</th><td>runbook · troubleshooting</td><td>전체 gate·범위 누출 검사</td><td>docs(operations)</td></tr>
   </tbody>
 </table>
+
+<h3>작업 1의 assertion 기반 RED/GREEN</h3>
+
+<p>작업 1은 test 오류를 실패 근거로 사용하지 않는다. 각 RED에서 test collection과 필요한 import·metadata 조회는 성공하고, 아직 구현하지 않은 계약을 비교하는 assertion만 실패해야 한다. CLI의 최초 RED는 entry point 목록 assertion에서 멈추므로 <code>load()</code>를 실행하지 않는다.</p>
+
+<table>
+  <caption>Python 프로젝트 기반의 세 단계 TDD 계약</caption>
+  <thead>
+    <tr><th>순서</th><th>관찰할 계약</th><th>RED</th><th>최소 GREEN</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>1</th><td><code>Path.is_file()</code> 기반 프로젝트·package 구조</td><td>누락 경로 목록을 비교하는 assertion 실패</td><td>project 파일과 package별 <code>__init__.py</code> 생성</td></tr>
+    <tr><th>2</th><td>import 가능한 package의 <code>__version__ == "0.1.0"</code></td><td><code>getattr(..., None)</code> 값 비교 assertion 실패</td><td>package version 상수 추가</td></tr>
+    <tr><th>3</th><td><code>importlib.metadata</code>의 <code>omf-retrieval</code> console script, target, load 가능한 Typer 객체</td><td><code>scripts[0].load()</code> 전에 entry point 목록 비교 assertion 실패</td><td>단일 script metadata와 import 가능한 실제 <code>typer.Typer</code> 객체 추가</td></tr>
+  </tbody>
+</table>
+
+<p>세 계약이 모두 통과한 뒤 <code>uv lock</code>, <code>uv sync --frozen</code>, 전체 package test, <code>ruff format --check</code>, <code>ruff check</code> 순서로 재현성과 품질 gate를 확인한다. 제품 범위·직접 의존성·산출물·최종 commit message는 v1.0과 동일하다.</p>
 
 <h2>TDD와 검증 사다리</h2>
 
@@ -425,6 +443,19 @@ phoebe-onpremise-test
   <li>운영 전 <code>model prepare</code> CLI로 고정 revision을 cache하는 방식</li>
   <li>단계 A부터 순차 구현하고 각 단계 결과를 확인받는 진행 방식</li>
 </ol>
+
+<h2>개정 이력</h2>
+
+<table>
+  <caption>개정 이력</caption>
+  <thead>
+    <tr><th>버전</th><th>작성일시</th><th>변경</th><th>작성자</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>v1.1</th><td>2026-08-14 17:08 KST</td><td>작업 1의 RED를 import 오류가 아닌 구현 부재에 따른 assertion 실패로 재구성</td><td>CREFLE Inc. CTO 김정규</td></tr>
+    <tr><th>v1.0</th><td>2026-08-13 15:50 KST</td><td>최초 승인본</td><td>CREFLE Inc. CTO 김정규</td></tr>
+  </tbody>
+</table>
 
 <p><small>이 열람본은 같은 디렉터리의 CREFLE 문서 공통 asset bundle을 사용하며 네트워크 asset을 사용하지 않는다.</small></p>
 
