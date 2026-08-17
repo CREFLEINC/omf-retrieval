@@ -183,7 +183,7 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 - MVP 시스템 설계 정본은
   `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v1.0이다.
 - 상세 구현 계획 정본은
-  `docs/superpowers/plans/2026-08-13-omf-retrieval-mvp-implementation.md` v1.0이며,
+  `docs/superpowers/plans/2026-08-13-omf-retrieval-mvp-implementation.md` v1.1이며,
   상태는 **최종 승인 · 개발 착수 가능**이다.
 - 이전 세션의 미확정 목록과 설계 재개 절차는 더 이상 현재 상태가 아니다. 구현 시
   위 두 정본의 범위, 정지 조건, 단계별 사용자 확인 지점과 테스트 설계를 따른다.
