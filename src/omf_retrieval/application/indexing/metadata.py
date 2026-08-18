@@ -11,9 +11,11 @@ _ISO_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 _FILENAME_DATE_PATTERN = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})(?=$|[-_])")
 _VERSION_PATTERN = re.compile(r"v(?P<version>\d+(?:\.\d+)*)")
 _FILENAME_VERSION_PATTERN = re.compile(
-    r"(?:^|[-_.()\[\]\s])v(?P<version>\d+(?:\.\d+)*)(?=$|[-_.()\[\]\s])"
+    r"(?:^|[-_])v(?P<version>\d+(?:\.\d+)*)(?=$|[-_])"
 )
 _MARKDOWN_TITLE_PATTERN = re.compile(r"^ {0,3}#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
+_FENCE_OPEN_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*$")
 _CONFIRMED_FILENAME_MARKERS = ("확정기록", "결정서")
 _NEGATIVE_CONFIRMED_MARKERS = ("미확정", "불확정", "확정 전")
 _DRAFT_MARKERS = ("초안", "제안안", "가설", "진행메모")
@@ -44,12 +46,13 @@ def extract_metadata(
     _require_exact_inputs(source_path=source_path, first_lines=first_lines)
     path_parts = _canonical_path_parts(source_path)
     top_lines = first_lines[:_TOP_LINE_LIMIT]
+    metadata_lines = _metadata_lines(top_lines)
     filename_stem = path_parts[-1].removesuffix(".md")
-    document_date = _document_date(top_lines, filename_stem=filename_stem)
-    version = _document_version(top_lines, filename_stem=filename_stem)
+    document_date = _document_date(metadata_lines, filename_stem=filename_stem)
+    version = _document_version(metadata_lines, filename_stem=filename_stem)
     decision_state = _decision_state(
         filename_stem=filename_stem,
-        lines=top_lines,
+        lines=metadata_lines,
     )
     return DocumentMetadata(
         document_date=document_date,
@@ -88,6 +91,87 @@ def _is_physical_line(line: str) -> bool:
         if line_without_ending.endswith("\r"):
             line_without_ending = line_without_ending[:-1]
     return "\n" not in line_without_ending and "\r" not in line_without_ending
+
+
+def _metadata_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
+    metadata_lines: list[str] = []
+    fence_character: str | None = None
+    fence_length = 0
+    in_html_comment = False
+
+    for line in lines:
+        line_content = line.rstrip("\r\n")
+        if fence_character is not None:
+            close_match = _FENCE_CLOSE_PATTERN.fullmatch(line_content)
+            if close_match is not None:
+                closing_fence = close_match.group("fence")
+                if (
+                    closing_fence[0] == fence_character
+                    and len(closing_fence) >= fence_length
+                ):
+                    fence_character = None
+                    fence_length = 0
+            continue
+
+        if in_html_comment:
+            in_html_comment = _html_comment_remains_open(
+                line_content, already_open=True
+            )
+            continue
+
+        if _is_indented_code_line(line_content):
+            continue
+
+        open_match = _FENCE_OPEN_PATTERN.fullmatch(line_content)
+        if open_match is not None:
+            opening_fence = open_match.group("fence")
+            info = open_match.group("info")
+            if opening_fence[0] == "~" or "`" not in info:
+                fence_character = opening_fence[0]
+                fence_length = len(opening_fence)
+                continue
+
+        if "<!--" in line_content:
+            in_html_comment = _html_comment_remains_open(
+                line_content, already_open=False
+            )
+            continue
+
+        metadata_lines.append(line)
+
+    return tuple(metadata_lines)
+
+
+def _is_indented_code_line(line: str) -> bool:
+    indentation_columns = 0
+    for character in line:
+        if character == " ":
+            indentation_columns += 1
+        elif character == "\t":
+            indentation_columns += 4 - indentation_columns % 4
+        else:
+            break
+        if indentation_columns >= 4:
+            return True
+    return False
+
+
+def _html_comment_remains_open(line: str, *, already_open: bool) -> bool:
+    cursor = 0
+    if already_open:
+        closing_index = line.find("-->", cursor)
+        if closing_index < 0:
+            return True
+        cursor = closing_index + len("-->")
+
+    while True:
+        opening_index = line.find("<!--", cursor)
+        if opening_index < 0:
+            return False
+        closing_index = line.find("-->", opening_index + len("<!--"))
+        if closing_index < 0:
+            return True
+        cursor = closing_index + len("-->")
 
 
 def _canonical_path_parts(source_path: str) -> tuple[str, ...]:

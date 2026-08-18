@@ -121,7 +121,7 @@ def test_date_reads_physical_line_40_but_not_line_41() -> None:
             ("버전: version 1",),
             "2.5",
         ),
-        ("docs/research/spec-(v3.4).md", (), "3.4"),
+        ("docs/research/spec-v3.4.md", (), "3.4"),
         ("docs/research/2026-07-14-only-date.md", (), None),
         ("docs/research/rev1.2-not-explicit.md", (), None),
         ("docs/research/upper-V1.md", (), None),
@@ -504,3 +504,209 @@ def test_validation_errors_do_not_echo_rejected_input(
         extract_metadata(source_path, first_lines)
 
     assert secret not in str(error_info.value)
+
+
+def test_fenced_structured_state_is_not_document_metadata() -> None:
+    """A metadata-shaped line inside a fenced block cannot confirm a document."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata(
+        "docs/research/operation.md",
+        ("```yaml", "상태: 확정", "```"),
+    )
+
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    [
+        (
+            "```yaml",
+            "작성일: 2024-02-29",
+            "버전: v9.1",
+            "상태: 확정",
+            "```",
+        ),
+        (
+            "   ~~~metadata",
+            "작성일: 2024-02-29",
+            "버전: v9.1",
+            "상태: 확정",
+            "   ~~~",
+        ),
+        ("```yaml", "작성일: 2024-02-29", "버전: v9.1", "상태: 확정"),
+        (
+            "<!--",
+            "작성일: 2024-02-29",
+            "버전: v9.1",
+            "상태: 확정",
+            "-->",
+        ),
+        ("<!--", "작성일: 2024-02-29", "버전: v9.1", "상태: 확정"),
+        (
+            "    작성일: 2024-02-29",
+            "\t버전: v9.1",
+            "    상태: 확정",
+        ),
+        (
+            "> 작성일: 2024-02-29",
+            "> 버전: v9.1",
+            "> 상태: 확정",
+        ),
+        (
+            "`작성일: 2024-02-29`",
+            "`버전: v9.1`",
+            "`상태: 확정`",
+        ),
+    ],
+)
+def test_non_metadata_markdown_regions_hide_all_structured_signals(
+    first_lines: tuple[str, ...],
+) -> None:
+    """Code, comments, blockquotes, and inline code cannot supply metadata."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.document_date is None
+    assert metadata.version is None
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    [
+        ("```", "# 운영 정책 초안", "```"),
+        ("~~~", "# 운영 정책 제안안", "~~~"),
+        ("<!--", "# 운영 정책 가설", "-->"),
+        ("<!-- # 운영 정책 초안 -->",),
+        ("    # 운영 정책 진행메모",),
+        ("> # 운영 정책 초안",),
+        ("`# 운영 정책 초안`",),
+    ],
+)
+def test_non_metadata_markdown_regions_hide_draft_headings(
+    first_lines: tuple[str, ...],
+) -> None:
+    """A heading-shaped line outside document flow cannot set draft state."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+def test_fence_requires_a_matching_close_of_at_least_the_opener_length() -> None:
+    """Short, mismatched, or suffixed fence lines do not expose hidden metadata."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata(
+        "docs/research/operation.md",
+        (
+            "````yaml",
+            "작성일: 2024-02-29",
+            "```",
+            "~~~",
+            "```` trailing text",
+            "버전: v9.1",
+            "상태: 확정",
+            "````",
+            "작성일: 2026-07-14",
+            "버전: v2.0",
+            "상태: 확정",
+        ),
+    )
+
+    assert metadata.document_date == date(2026, 7, 14)
+    assert metadata.version == "2.0"
+    assert metadata.decision_state is DecisionState.CONFIRMED
+
+
+@pytest.mark.parametrize(
+    "excluded_lines",
+    [
+        ("```", "작성일: 2024-02-29", "버전: v9.1", "상태: 확정", "```"),
+        ("<!-- 주석 시작", "작성일: 2024-02-29", "버전: v9.1", "상태: 확정", "-->"),
+    ],
+)
+def test_valid_metadata_after_an_excluded_region_is_still_read(
+    excluded_lines: tuple[str, ...],
+) -> None:
+    """Closing a code or comment region resumes metadata recognition."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata(
+        "docs/research/operation.md",
+        (
+            *excluded_lines,
+            "작성일: 2026-07-14",
+            "버전: v1.2.3",
+            "상태: [확정]",
+        ),
+    )
+
+    assert metadata.document_date == date(2026, 7, 14)
+    assert metadata.version == "1.2.3"
+    assert metadata.decision_state is DecisionState.CONFIRMED
+
+
+def test_block_filter_does_not_shift_the_physical_line_40_boundary() -> None:
+    """Discarding block syntax cannot pull original line 41 into the top window."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.domain.enums import DecisionState
+
+    lines = ("```", "```", *("" for _ in range(38)), "상태: 확정")
+
+    metadata = extract_metadata("docs/research/operation.md", lines)
+
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+def test_malformed_filename_version_with_repeated_dot_fails_closed() -> None:
+    """A malformed v token cannot be partially accepted as an earlier version."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+
+    metadata = extract_metadata("docs/research/spec-v1..2.md", ())
+
+    assert metadata.version is None
+
+
+@pytest.mark.parametrize(
+    ("source_path", "expected_version"),
+    [
+        ("docs/research/v1.2.3.md", "1.2.3"),
+        ("docs/research/spec-v1.2.3.md", "1.2.3"),
+        ("docs/research/spec-v1.2.3-final.md", "1.2.3"),
+        ("docs/research/spec_v1.2.3_final.md", "1.2.3"),
+        ("docs/research/spec-v1.2.extra.md", None),
+        ("docs/research/spec-v1.2beta.md", None),
+        ("docs/research/spec-(v1.2).md", None),
+        ("docs/research/spec v1.2.md", None),
+    ],
+)
+def test_filename_version_requires_hyphen_underscore_or_end_boundaries(
+    source_path: str,
+    expected_version: str | None,
+) -> None:
+    """Explicit filename version tokens use only approved token boundaries."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+
+    assert extract_metadata(source_path, ()).version == expected_version
+
+
+def test_invalid_structured_version_still_uses_valid_filename_after_filtering() -> None:
+    """Fail-closed structured parsing preserves the approved filename fallback."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+
+    metadata = extract_metadata(
+        "docs/research/spec-v2.4.md",
+        ("버전: v1..9",),
+    )
+
+    assert metadata.version == "2.4"
