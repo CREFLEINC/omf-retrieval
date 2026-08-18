@@ -1,10 +1,20 @@
 """Unit tests for conservative occurrence metadata extraction."""
 
+import json
 from dataclasses import FrozenInstanceError
 from datetime import date
 from importlib.util import find_spec
+from pathlib import Path
 
 import pytest
+
+from omf_retrieval.application.indexing.ports import ArchiveFile, SourceSnapshot
+from omf_retrieval.domain.enums import RelationType
+from omf_retrieval.domain.models import LineRange
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+OMF_RELATIONS_PATH = PROJECT_ROOT / "config/source_profiles/omf-relations.json"
+VALID_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 class StringSubclass(str):
@@ -13,6 +23,62 @@ class StringSubclass(str):
 
 class TupleSubclass(tuple[object, ...]):
     """Represent an invalid tuple subclass at an exact-type boundary."""
+
+
+class IntSubclass(int):
+    """Represent an invalid integer subclass at an exact-type boundary."""
+
+
+class LineRangeSubclass(LineRange):
+    """Represent an invalid line-range subclass at an exact-type boundary."""
+
+
+class SourceSnapshotSubclass(SourceSnapshot):
+    """Represent an invalid snapshot subclass at an exact-type boundary."""
+
+
+def _source_snapshot(*files: tuple[str, bytes]) -> SourceSnapshot:
+    return SourceSnapshot(
+        commit_sha=VALID_COMMIT_SHA,
+        archive_files=tuple(
+            ArchiveFile(source_path=source_path, content=content)
+            for source_path, content in sorted(files)
+        ),
+    )
+
+
+def _valid_relation_entry(**overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "from_source_path": "docs/planning/new.md",
+        "to_source_path": "docs/planning/old.md",
+        "relation_type": "supersedes",
+        "evidence_source_path": "docs/planning/evidence.md",
+        "evidence_line_start": 1,
+        "evidence_line_end": 1,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _relation_payload(*entries: object) -> str:
+    return json.dumps({"relations": list(entries)}, ensure_ascii=False)
+
+
+def _relation_snapshot() -> SourceSnapshot:
+    return _source_snapshot(
+        ("docs/planning/evidence-2.md", b"Second evidence.\n"),
+        ("docs/planning/evidence.md", b"Evidence.\n"),
+        ("docs/planning/new.md", b"New.\n"),
+        ("docs/planning/old.md", b"Old.\n"),
+    )
+
+
+def _relation_snapshot_with_evidence(content: bytes) -> SourceSnapshot:
+    return _source_snapshot(
+        ("docs/planning/evidence.md", content),
+        ("docs/planning/new.md", b"New.\n"),
+        ("docs/planning/old.md", b"Old.\n"),
+    )
 
 
 def test_extracts_approved_explicit_metadata_example() -> None:
@@ -710,3 +776,610 @@ def test_invalid_structured_version_still_uses_valid_filename_after_filtering() 
     )
 
     assert metadata.version == "2.4"
+
+
+def test_committed_empty_relation_sidecar_parses_to_an_immutable_empty_tuple() -> None:
+    """The reserved committed container is the valid empty relation contract."""
+    from omf_retrieval.application.indexing import metadata as metadata_module
+
+    parser = getattr(metadata_module, "parse_relation_sidecar", None)
+
+    assert callable(parser), "relation sidecar parser must exist"
+    assert (
+        parser(OMF_RELATIONS_PATH.read_text(encoding="utf-8"), _source_snapshot()) == ()
+    )
+
+
+def test_supersedes_relation_preserves_new_to_old_direction_and_evidence() -> None:
+    """A valid explicit supersession maps new-to-old with source evidence."""
+    from omf_retrieval.application.indexing import metadata as metadata_module
+
+    parser = getattr(metadata_module, "parse_relation_sidecar", None)
+    relation_type = getattr(metadata_module, "DocumentRelationSpec", None)
+
+    assert callable(parser), "relation sidecar parser must exist"
+    assert callable(relation_type), "relation DTO must exist"
+    snapshot = _source_snapshot(
+        ("docs/planning/new.md", b"# New\nReplaces the old policy.\n"),
+        ("docs/planning/versions/old.md", b"# Old\n"),
+    )
+    payload = """{
+      "relations": [
+        {
+          "from_source_path": "docs/planning/new.md",
+          "to_source_path": "docs/planning/versions/old.md",
+          "relation_type": "supersedes",
+          "evidence_source_path": "docs/planning/new.md",
+          "evidence_line_start": 1,
+          "evidence_line_end": 2
+        }
+      ]
+    }"""
+
+    assert parser(payload, snapshot) == (
+        relation_type(
+            from_source_path="docs/planning/new.md",
+            to_source_path="docs/planning/versions/old.md",
+            relation_type=RelationType.SUPERSEDES,
+            evidence_source_path="docs/planning/new.md",
+            evidence_line_range=LineRange(line_start=1, line_end=2),
+        ),
+    )
+
+
+def test_relation_parser_preserves_input_order_direction_and_third_party_evidence() -> (
+    None
+):
+    """Both relation enums retain input order and an independent evidence path."""
+    from omf_retrieval.application.indexing.metadata import (
+        DocumentRelationSpec,
+        parse_relation_sidecar,
+    )
+
+    snapshot = _source_snapshot(
+        ("docs/planning/a.md", b"# A\n"),
+        ("docs/planning/evidence.md", b"Context\nConflict stated.\nSupport.\n"),
+        ("docs/planning/new.md", b"# New\n"),
+        ("docs/planning/old.md", b"# Old\n"),
+        ("uiux/z.md", b"# Z\n"),
+    )
+    payload = """{
+      "relations": [
+        {
+          "from_source_path": "uiux/z.md",
+          "to_source_path": "docs/planning/a.md",
+          "relation_type": "potential_conflict",
+          "evidence_source_path": "docs/planning/evidence.md",
+          "evidence_line_start": 2,
+          "evidence_line_end": 3
+        },
+        {
+          "from_source_path": "docs/planning/new.md",
+          "to_source_path": "docs/planning/old.md",
+          "relation_type": "supersedes",
+          "evidence_source_path": "docs/planning/evidence.md",
+          "evidence_line_start": 1,
+          "evidence_line_end": 1
+        }
+      ]
+    }"""
+
+    relations = parse_relation_sidecar(payload, snapshot)
+
+    assert relations == (
+        DocumentRelationSpec(
+            from_source_path="uiux/z.md",
+            to_source_path="docs/planning/a.md",
+            relation_type=RelationType.POTENTIAL_CONFLICT,
+            evidence_source_path="docs/planning/evidence.md",
+            evidence_line_range=LineRange(line_start=2, line_end=3),
+        ),
+        DocumentRelationSpec(
+            from_source_path="docs/planning/new.md",
+            to_source_path="docs/planning/old.md",
+            relation_type=RelationType.SUPERSEDES,
+            evidence_source_path="docs/planning/evidence.md",
+            evidence_line_range=LineRange(line_start=1, line_end=1),
+        ),
+    )
+    assert type(relations) is tuple
+    assert [relation.relation_type for relation in relations] == [
+        RelationType.POTENTIAL_CONFLICT,
+        RelationType.SUPERSEDES,
+    ]
+    assert not hasattr(relations[0], "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        relations[0].from_source_path = "docs/planning/a.md"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{",
+        "[]",
+        "null",
+        '{"relations": {}}',
+        '{"relations": null}',
+        '{"relations": [[]]}',
+        '{"relations": [null]}',
+    ],
+)
+def test_relation_sidecar_rejects_malformed_or_wrong_json_shapes(payload: str) -> None:
+    """Malformed JSON and non-object/list/entry shapes fail closed."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(payload, _relation_snapshot())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{}",
+        '{"relations": [], "extra": true}',
+        '{"relations": [], "relations": []}',
+        _relation_payload(
+            {
+                key: value
+                for key, value in _valid_relation_entry().items()
+                if key != "evidence_line_end"
+            }
+        ),
+        _relation_payload({**_valid_relation_entry(), "extra": True}),
+        """{
+          "relations": [{
+            "from_source_path": "docs/planning/new.md",
+            "from_source_path": "docs/planning/new.md",
+            "to_source_path": "docs/planning/old.md",
+            "relation_type": "supersedes",
+            "evidence_source_path": "docs/planning/evidence.md",
+            "evidence_line_start": 1,
+            "evidence_line_end": 1
+          }]
+        }""",
+    ],
+    ids=[
+        "missing-root-key",
+        "unknown-root-key",
+        "duplicate-root-key",
+        "missing-entry-key",
+        "unknown-entry-key",
+        "duplicate-entry-key",
+    ],
+)
+def test_relation_sidecar_requires_exact_unique_root_and_entry_keys(
+    payload: str,
+) -> None:
+    """Missing, unknown, and duplicate JSON keys cannot alter the contract."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(payload, _relation_snapshot())
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("from_source_path", 1),
+        ("to_source_path", ["docs/planning/old.md"]),
+        ("relation_type", True),
+        ("evidence_source_path", {"path": "docs/planning/evidence.md"}),
+        ("evidence_line_start", "1"),
+        ("evidence_line_end", 1.0),
+        ("relation_type", "conflict"),
+        ("relation_type", "SUPERSEDES"),
+    ],
+)
+def test_relation_sidecar_rejects_wrong_value_types_and_unknown_relation_types(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    """Every relation value has one exact JSON type and two enum values."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(_valid_relation_entry(**{field_name: invalid_value})),
+            _relation_snapshot(),
+        )
+
+
+def test_relation_paths_are_canonicalized_before_snapshot_membership_checks() -> None:
+    """Normalizable POSIX paths become the snapshot's canonical coordinates."""
+    from omf_retrieval.application.indexing.metadata import parse_relation_sidecar
+
+    payload = _relation_payload(
+        _valid_relation_entry(
+            from_source_path="./docs//planning/new.md",
+            to_source_path="docs/./planning//old.md",
+            evidence_source_path="./docs/planning//evidence.md",
+        )
+    )
+
+    relation = parse_relation_sidecar(payload, _relation_snapshot())[0]
+
+    assert relation.from_source_path == "docs/planning/new.md"
+    assert relation.to_source_path == "docs/planning/old.md"
+    assert relation.evidence_source_path == "docs/planning/evidence.md"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_path"),
+    [
+        ("from_source_path", "/docs/planning/new.md"),
+        ("to_source_path", "docs/planning/../old.md"),
+        ("evidence_source_path", "docs\\planning\\evidence.md"),
+        ("from_source_path", ""),
+    ],
+)
+def test_relation_sidecar_rejects_unsafe_paths(
+    field_name: str,
+    invalid_path: str,
+) -> None:
+    """Unsafe relation coordinates never enter snapshot matching."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(_valid_relation_entry(**{field_name: invalid_path})),
+            _relation_snapshot(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["from_source_path", "to_source_path", "evidence_source_path"],
+)
+def test_every_relation_path_must_exist_in_the_same_filtered_snapshot(
+    field_name: str,
+) -> None:
+    """Endpoints and evidence cannot refer outside the supplied snapshot."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(
+                _valid_relation_entry(**{field_name: "docs/planning/missing.md"})
+            ),
+            _relation_snapshot(),
+        )
+
+
+def test_relation_sidecar_rejects_a_self_relation_after_canonicalization() -> None:
+    """One document cannot relate to itself through an alternate path spelling."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(
+                _valid_relation_entry(to_source_path="./docs//planning/new.md")
+            ),
+            _relation_snapshot(),
+        )
+
+
+def test_relation_sidecar_rejects_an_exact_duplicate() -> None:
+    """The same explicit relation entry can appear at most once."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    duplicate = _valid_relation_entry()
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(duplicate, duplicate),
+            _relation_snapshot(),
+        )
+
+
+def test_potential_conflict_rejects_a_reverse_direction_duplicate() -> None:
+    """A potential conflict is one undirected relation despite input direction."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    forward = _valid_relation_entry(relation_type="potential_conflict")
+    reverse = _valid_relation_entry(
+        from_source_path="docs/planning/old.md",
+        to_source_path="docs/planning/new.md",
+        relation_type="potential_conflict",
+        evidence_source_path="docs/planning/evidence-2.md",
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(forward, reverse),
+            _relation_snapshot(),
+        )
+
+
+def test_reversed_supersedes_entries_remain_two_directional_relations() -> None:
+    """Supersession direction is explicit and is neither inferred nor collapsed."""
+    from omf_retrieval.application.indexing.metadata import parse_relation_sidecar
+
+    forward = _valid_relation_entry()
+    reverse = _valid_relation_entry(
+        from_source_path="docs/planning/old.md",
+        to_source_path="docs/planning/new.md",
+        evidence_source_path="docs/planning/evidence-2.md",
+    )
+
+    relations = parse_relation_sidecar(
+        _relation_payload(forward, reverse),
+        _relation_snapshot(),
+    )
+
+    assert [
+        (relation.from_source_path, relation.to_source_path) for relation in relations
+    ] == [
+        ("docs/planning/new.md", "docs/planning/old.md"),
+        ("docs/planning/old.md", "docs/planning/new.md"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("content", "line_start", "line_end"),
+    [
+        (b"one\r\n\r\nthree\r\n", 2, 3),
+        (b"one\n", 1, 1),
+        (b"one\ntwo", 2, 2),
+        (b"\n\n", 2, 2),
+    ],
+    ids=["crlf-and-blank", "final-newline", "no-final-newline", "blank-lines"],
+)
+def test_evidence_range_uses_physical_markdown_lines(
+    content: bytes,
+    line_start: int,
+    line_end: int,
+) -> None:
+    """CRLF, blank lines, and final-newline state retain physical coordinates."""
+    from omf_retrieval.application.indexing.metadata import parse_relation_sidecar
+
+    relation = parse_relation_sidecar(
+        _relation_payload(
+            _valid_relation_entry(
+                evidence_line_start=line_start,
+                evidence_line_end=line_end,
+            )
+        ),
+        _relation_snapshot_with_evidence(content),
+    )[0]
+
+    assert relation.evidence_line_range == LineRange(
+        line_start=line_start,
+        line_end=line_end,
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "line_start", "line_end"),
+    [
+        (b"one\n", 0, 1),
+        (b"one\ntwo\n", 2, 1),
+        (b"one\n", 1, 2),
+        (b"one\n", 2, 2),
+        (b"one\n", True, 1),
+        (b"one\n", 1, False),
+    ],
+    ids=[
+        "zero",
+        "reversed",
+        "end-out-of-range",
+        "start-out-of-range",
+        "boolean-start",
+        "boolean-end",
+    ],
+)
+def test_relation_sidecar_rejects_invalid_or_out_of_document_evidence_ranges(
+    content: bytes,
+    line_start: object,
+    line_end: object,
+) -> None:
+    """Evidence is an exact one-based inclusive range inside its document."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(
+                _valid_relation_entry(
+                    evidence_line_start=line_start,
+                    evidence_line_end=line_end,
+                )
+            ),
+            _relation_snapshot_with_evidence(content),
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"\xffinvalid UTF-8"],
+    ids=["empty-document", "invalid-utf8"],
+)
+def test_relation_sidecar_rejects_unmappable_evidence_documents(content: bytes) -> None:
+    """Empty or non-UTF-8 evidence cannot supply a source line."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(_valid_relation_entry()),
+            _relation_snapshot_with_evidence(content),
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        StringSubclass(_relation_payload(_valid_relation_entry())),
+        b'{"relations": []}',
+        1,
+    ],
+)
+def test_relation_parser_rejects_nonexact_payload_types(payload: object) -> None:
+    """Only an exact built-in string can cross the public JSON boundary."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(payload, _relation_snapshot())  # type: ignore[arg-type]
+
+
+def test_relation_parser_rejects_a_snapshot_subclass() -> None:
+    """Snapshot identity uses the exact immutable Task 4 public DTO."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    snapshot = SourceSnapshotSubclass(
+        commit_sha=VALID_COMMIT_SHA,
+        archive_files=_relation_snapshot().archive_files,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(_valid_relation_entry()),
+            snapshot,
+        )
+
+
+@pytest.mark.parametrize(
+    "constructor",
+    [
+        lambda: _document_relation_spec(
+            from_source_path=StringSubclass("docs/planning/new.md")
+        ),
+        lambda: _document_relation_spec(from_source_path="./docs/planning/new.md"),
+        lambda: _document_relation_spec(relation_type="supersedes"),
+        lambda: _document_relation_spec(
+            evidence_line_range=LineRangeSubclass(line_start=1, line_end=1)
+        ),
+        lambda: _document_relation_spec(
+            evidence_line_range=LineRange(
+                line_start=IntSubclass(1),
+                line_end=1,
+            )
+        ),
+        lambda: _document_relation_spec(
+            evidence_line_range=LineRange(line_start=True, line_end=1)
+        ),
+        lambda: _document_relation_spec(to_source_path="docs/planning/new.md"),
+    ],
+)
+def test_relation_dto_rejects_noncanonical_or_nonexact_values(
+    constructor: object,
+) -> None:
+    """The frozen result cannot be directly constructed with weaker value types."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+    )
+
+    with pytest.raises(RelationSidecarValidationError):
+        constructor()  # type: ignore[operator]
+
+
+def test_relation_errors_do_not_echo_payload_paths_or_evidence_bytes() -> None:
+    """Validation diagnostics expose neither rejected JSON nor source content."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    secret_path = "docs/planning/classified-token.md"
+    secret_content = b"classified-evidence-bytes"
+    payload = _relation_payload(
+        _valid_relation_entry(
+            evidence_source_path=secret_path,
+            evidence_line_start=2,
+            evidence_line_end=2,
+        )
+    )
+    snapshot = _source_snapshot(
+        ("docs/planning/new.md", b"New.\n"),
+        ("docs/planning/old.md", b"Old.\n"),
+        (secret_path, secret_content),
+    )
+
+    with pytest.raises(RelationSidecarValidationError) as error_info:
+        parse_relation_sidecar(payload, snapshot)
+
+    error_message = str(error_info.value)
+    assert secret_path not in error_message
+    assert secret_content.decode() not in error_message
+    assert payload not in error_message
+
+
+def test_relation_errors_discard_rejected_exception_context() -> None:
+    """Malformed JSON cannot remain reachable through a validation error chain."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    payload = '{"relations": ["classified-payload"'
+
+    with pytest.raises(RelationSidecarValidationError) as error_info:
+        parse_relation_sidecar(payload, _relation_snapshot())
+
+    assert payload not in str(error_info.value)
+    assert error_info.value.__cause__ is None
+    assert error_info.value.__context__ is None
+
+
+def test_relation_parsing_is_deterministic_and_never_infers_relations() -> None:
+    """Repeated explicit input is stable and document names create no relation."""
+    from omf_retrieval.application.indexing.metadata import parse_relation_sidecar
+
+    snapshot = _relation_snapshot()
+    payload = _relation_payload(
+        _valid_relation_entry(relation_type="potential_conflict")
+    )
+
+    first = parse_relation_sidecar(payload, snapshot)
+    second = parse_relation_sidecar(payload, snapshot)
+
+    assert first == second
+    assert type(first) is tuple
+    assert parse_relation_sidecar('{"relations": []}', snapshot) == ()
+
+
+def _document_relation_spec(**overrides: object) -> object:
+    from omf_retrieval.application.indexing.metadata import DocumentRelationSpec
+
+    values: dict[str, object] = {
+        "from_source_path": "docs/planning/new.md",
+        "to_source_path": "docs/planning/old.md",
+        "relation_type": RelationType.SUPERSEDES,
+        "evidence_source_path": "docs/planning/evidence.md",
+        "evidence_line_range": LineRange(line_start=1, line_end=1),
+    }
+    values.update(overrides)
+    return DocumentRelationSpec(**values)  # type: ignore[arg-type]
