@@ -1,6 +1,6 @@
 """Deterministic source-backed parent-child chunking."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from omf_retrieval.application.indexing.hashing import chunk_hash, config_hash
@@ -34,14 +34,7 @@ class _AtomicUnit:
     warning_line_end: int
 
 
-_TOKEN_COUNTER_FAILURES = (
-    ArithmeticError,
-    LookupError,
-    OSError,
-    RuntimeError,
-    TypeError,
-    ValueError,
-)
+_TOKEN_COUNTER_FAILED = object()
 
 
 class ParentChildChunker:
@@ -57,11 +50,12 @@ class ParentChildChunker:
         if (
             type(tokenizer_descriptor) is not TokenizerDescriptor
             or type(config) is not ChunkConfig
-            or not callable(getattr(token_counter, "encode", None))
-            or not callable(getattr(token_counter, "offsets", None))
         ):
             raise ValueError("Invalid chunker input contract")
-        self._token_counter = token_counter
+        token_counter_methods = _token_counter_methods(token_counter)
+        if token_counter_methods is None:
+            raise ValueError("Invalid chunker input contract")
+        self._encode, self._offsets = token_counter_methods
         self._config = config
         self._config_hash = chunk_config_identity_hash(config, tokenizer_descriptor)
 
@@ -307,9 +301,8 @@ class ParentChildChunker:
 
     def _token_offsets(self, text: str) -> tuple[tuple[int, int], ...]:
         tokens = self._encoded_tokens(text)
-        try:
-            result = self._token_counter.offsets(text)
-        except _TOKEN_COUNTER_FAILURES:
+        result = _call_token_counter(self._offsets, text)
+        if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if (
             not isinstance(result, Sequence)
@@ -336,9 +329,8 @@ class ParentChildChunker:
         return tuple(offsets)
 
     def _encoded_tokens(self, text: str) -> tuple[int, ...]:
-        try:
-            result = self._token_counter.encode(text)
-        except _TOKEN_COUNTER_FAILURES:
+        result = _call_token_counter(self._encode, text)
+        if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if (
             not isinstance(result, Sequence)
@@ -348,6 +340,26 @@ class ParentChildChunker:
         ):
             raise ValueError("Token counter returned malformed data") from None
         return tuple(result)
+
+
+def _token_counter_methods(
+    token_counter: object,
+) -> tuple[Callable[[str], object], Callable[[str], object]] | None:
+    try:
+        encode = getattr(token_counter, "encode", None)
+        offsets = getattr(token_counter, "offsets", None)
+    except Exception:
+        return None
+    if not callable(encode) or not callable(offsets):
+        return None
+    return encode, offsets
+
+
+def _call_token_counter(operation: Callable[[str], object], text: str) -> object:
+    try:
+        return operation(text)
+    except Exception:
+        return _TOKEN_COUNTER_FAILED
 
 
 def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:

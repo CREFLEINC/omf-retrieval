@@ -92,6 +92,50 @@ class _RaisingTokenCounter(_FakeTokenCounter):
         raise RuntimeError("secret-tokenizer-detail")
 
 
+class _SecretTokenizerException(Exception):
+    """Represent an adapter-specific ordinary exception outside any allowlist."""
+
+
+class _EncodeFailureCounter(_FakeTokenCounter):
+    def __init__(self, error_type: type[BaseException]) -> None:
+        self._error_type = error_type
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        raise self._error_type("secret-encode-detail")
+
+
+class _OffsetFailureCounter(_FakeTokenCounter):
+    def __init__(self, error_type: type[BaseException]) -> None:
+        self._error_type = error_type
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        raise self._error_type("secret-offset-detail")
+
+
+class _EncodePropertyFailureCounter:
+    def __init__(self, error_type: type[BaseException]) -> None:
+        self._error_type = error_type
+
+    @property
+    def encode(self) -> object:
+        raise self._error_type("secret-encode-property-detail")
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return ()
+
+
+class _OffsetPropertyFailureCounter:
+    def __init__(self, error_type: type[BaseException]) -> None:
+        self._error_type = error_type
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return ()
+
+    @property
+    def offsets(self) -> object:
+        raise self._error_type("secret-offset-property-detail")
+
+
 def _descriptor() -> TokenizerDescriptor:
     return TokenizerDescriptor(
         model_name="model",
@@ -527,6 +571,99 @@ def test_token_counter_exceptions_are_sanitized_without_chaining() -> None:
     assert str(caught.value) == "Token counter failed"
     assert caught.value.__cause__ is None
     assert "secret-tokenizer-detail" not in str(caught.value)
+
+
+def _assert_sanitized_tokenizer_error(
+    error: ValueError, *, expected_message: str
+) -> None:
+    rendered = f"{type(error).__name__}: {error!r}: {error}"
+    assert str(error) == expected_message
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert "_SecretTokenizerException" not in rendered
+    assert "secret-" not in rendered
+
+
+def test_custom_encode_exception_is_sanitized_without_context() -> None:
+    """A custom adapter exception must not leak class, message, or context."""
+    with pytest.raises(ValueError) as caught:
+        _chunker(_EncodeFailureCounter(_SecretTokenizerException)).split(
+            _section("# Secret\nbody\n"), parser_version="parser-v1"
+        )
+
+    _assert_sanitized_tokenizer_error(
+        caught.value, expected_message="Token counter failed"
+    )
+
+
+def test_custom_offsets_exception_is_sanitized_without_context() -> None:
+    """A custom offset exception must not expose source-bearing adapter details."""
+    with pytest.raises(ValueError) as caught:
+        _chunker(_OffsetFailureCounter(_SecretTokenizerException)).split(
+            _section("s" * 601), parser_version="parser-v1"
+        )
+
+    _assert_sanitized_tokenizer_error(
+        caught.value, expected_message="Token counter failed"
+    )
+
+
+def test_constructor_encode_property_exception_is_sanitized_without_context() -> None:
+    """Inspecting an encode property must sanitize any ordinary exception."""
+    with pytest.raises(ValueError) as caught:
+        _chunker_type()(
+            _EncodePropertyFailureCounter(_SecretTokenizerException),
+            _descriptor(),
+            ChunkConfig(),
+        )
+
+    _assert_sanitized_tokenizer_error(
+        caught.value, expected_message="Invalid chunker input contract"
+    )
+
+
+def test_constructor_offsets_property_exception_is_sanitized_without_context() -> None:
+    """Inspecting an offsets property must sanitize any ordinary exception."""
+    with pytest.raises(ValueError) as caught:
+        _chunker_type()(
+            _OffsetPropertyFailureCounter(_SecretTokenizerException),
+            _descriptor(),
+            ChunkConfig(),
+        )
+
+    _assert_sanitized_tokenizer_error(
+        caught.value, expected_message="Invalid chunker input contract"
+    )
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize(
+    "phase",
+    ["constructor-encode", "constructor-offsets", "runtime-encode", "runtime-offsets"],
+)
+def test_non_exception_base_exceptions_are_never_sanitized(
+    phase: str, error_type: type[BaseException]
+) -> None:
+    """Cancellation and process-control signals must cross every error boundary."""
+    if phase == "constructor-encode":
+        counter = _EncodePropertyFailureCounter(error_type)
+        with pytest.raises(error_type):
+            _chunker_type()(counter, _descriptor(), ChunkConfig())
+        return
+    if phase == "constructor-offsets":
+        counter = _OffsetPropertyFailureCounter(error_type)
+        with pytest.raises(error_type):
+            _chunker_type()(counter, _descriptor(), ChunkConfig())
+        return
+    if phase == "runtime-encode":
+        chunker = _chunker(_EncodeFailureCounter(error_type))
+        with pytest.raises(error_type):
+            chunker.split(_section("# A\nbody\n"), parser_version="parser-v1")
+        return
+
+    chunker = _chunker(_OffsetFailureCounter(error_type))
+    with pytest.raises(error_type):
+        chunker.split(_section("s" * 601), parser_version="parser-v1")
 
 
 def test_chunk_contract_exposes_stable_version_and_default_config() -> None:
