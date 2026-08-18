@@ -14,22 +14,46 @@ SAFE_TEST_DATABASE_HOST = "127.0.0.1"
 SAFE_TEST_DATABASE_PORT = 55432
 SAFE_TEST_DATABASE_USER = "omf_retrieval_test"
 SAFE_TEST_DATABASE_PREFIX = "omf_retrieval_test"
+ALLOWED_TEST_DATABASE_QUERY_KEYS = frozenset({"application_name"})
+
+
+def _database_name_is_safe(database_name: object) -> bool:
+    return isinstance(database_name, str) and (
+        database_name == SAFE_TEST_DATABASE_PREFIX
+        or database_name.startswith(f"{SAFE_TEST_DATABASE_PREFIX}_")
+    )
+
+
+def _validate_effective_connect_arguments(parsed_url: URL) -> None:
+    dialect = parsed_url.get_dialect()()
+    positional_arguments, keyword_arguments = dialect.create_connect_args(parsed_url)
+    database_name = keyword_arguments.get(
+        "dbname",
+        keyword_arguments.get("database"),
+    )
+    if positional_arguments or (
+        keyword_arguments.get("host") != SAFE_TEST_DATABASE_HOST
+        or keyword_arguments.get("port") != SAFE_TEST_DATABASE_PORT
+        or keyword_arguments.get("user") != SAFE_TEST_DATABASE_USER
+        or not _database_name_is_safe(database_name)
+    ):
+        raise ValueError("Unsafe effective test database target")
 
 
 def validate_test_database_url(database_url: str | URL) -> URL:
     """Validate that a URL can only target the isolated local test database."""
     parsed_url = make_url(database_url)
-    database_name = parsed_url.database or ""
-    database_is_safe = database_name == SAFE_TEST_DATABASE_PREFIX or (
-        database_name.startswith(f"{SAFE_TEST_DATABASE_PREFIX}_")
-    )
+    unsupported_query_keys = set(parsed_url.query) - ALLOWED_TEST_DATABASE_QUERY_KEYS
+    if unsupported_query_keys:
+        raise ValueError("Unsafe test database URL query option")
     if (
         parsed_url.host != SAFE_TEST_DATABASE_HOST
         or parsed_url.port != SAFE_TEST_DATABASE_PORT
         or parsed_url.username != SAFE_TEST_DATABASE_USER
-        or not database_is_safe
+        or not _database_name_is_safe(parsed_url.database)
     ):
         raise ValueError("Unsafe test database URL: isolated test identity required")
+    _validate_effective_connect_arguments(parsed_url)
     return parsed_url
 
 
@@ -56,8 +80,7 @@ def assert_safe_test_connection(connection: Connection) -> None:
     database_name, database_user = connection.execute(
         text("SELECT current_database(), current_user")
     ).one()
-    database_is_safe = database_name == SAFE_TEST_DATABASE_PREFIX or (
-        database_name.startswith(f"{SAFE_TEST_DATABASE_PREFIX}_")
-    )
-    if database_user != SAFE_TEST_DATABASE_USER or not database_is_safe:
+    if database_user != SAFE_TEST_DATABASE_USER or not _database_name_is_safe(
+        database_name
+    ):
         raise ValueError("Unsafe live test database identity: destructive SQL blocked")

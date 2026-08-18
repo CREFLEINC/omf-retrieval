@@ -272,6 +272,11 @@ def test_safe_test_database_environment_override_is_used(
 
     try:
         assert engine.url == make_url(override_url)
+        with engine.connect() as connection:
+            application_name = connection.execute(
+                text("SHOW application_name")
+            ).scalar_one()
+        assert application_name == "safe-override"
     finally:
         engine.dispose()
 
@@ -310,6 +315,75 @@ def test_unsafe_test_database_url_is_rejected_before_engine_creation(
     monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
 
     with pytest.raises(ValueError, match="Unsafe test database URL"):
+        create_test_engine()
+
+    engine_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("query_key", "query_value"),
+    [
+        ("host", "database.internal"),
+        ("hostaddr", "127.0.0.2"),
+        ("port", "5432"),
+        ("dbname", "production"),
+        ("database", "production"),
+        ("user", "postgres"),
+        ("service", "production"),
+        ("unknown_target", "production"),
+    ],
+)
+def test_query_target_override_is_rejected_before_engine_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    query_key: str,
+    query_value: str,
+) -> None:
+    """Reject every query option except the approved application name."""
+    monkeypatch.setenv(
+        TEST_DATABASE_ENV,
+        f"{DEFAULT_TEST_DATABASE_URL}?{query_key}={query_value}",
+    )
+    engine_constructor = Mock()
+    monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
+
+    with pytest.raises(ValueError, match="Unsafe test database URL query"):
+        create_test_engine()
+
+    engine_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("argument_name", "argument_value"),
+    [
+        ("host", "database.internal"),
+        ("port", 5432),
+        ("user", "postgres"),
+        ("dbname", "production"),
+    ],
+)
+def test_unsafe_effective_connect_argument_is_rejected_before_engine_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    argument_name: str,
+    argument_value: str | int,
+) -> None:
+    """Validate the dialect's effective target, not only URL authority text."""
+    effective_arguments: dict[str, str | int] = {
+        "host": "127.0.0.1",
+        "port": 55432,
+        "user": "omf_retrieval_test",
+        "dbname": "omf_retrieval_test",
+    }
+    effective_arguments[argument_name] = argument_value
+    dialect_class = make_url(DEFAULT_TEST_DATABASE_URL).get_dialect()
+    monkeypatch.setattr(
+        dialect_class,
+        "create_connect_args",
+        lambda _dialect, _url: ([], effective_arguments),
+    )
+    engine_constructor = Mock()
+    monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
+
+    with pytest.raises(ValueError, match="Unsafe effective test database target"):
         create_test_engine()
 
     engine_constructor.assert_not_called()
