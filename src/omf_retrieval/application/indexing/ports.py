@@ -1,4 +1,4 @@
-"""Application contracts for immutable source snapshots."""
+"""Application contracts for immutable source snapshots and parsed Markdown."""
 
 import re
 from dataclasses import dataclass
@@ -12,6 +12,46 @@ class SourceSnapshotValidationError(ValueError):
 
 class MarkdownStructureValidationError(ValueError):
     """Raised when immutable parsed-Markdown values are invalid."""
+
+
+def split_physical_lines(source: str) -> tuple[str, ...]:
+    """Split source at Markdown physical-line boundaries and retain endings.
+
+    Args:
+        source: Exact source string whose CR, LF, and CRLF boundaries are split.
+
+    Returns:
+        Immutable source slices whose concatenation exactly reproduces ``source``.
+        Unicode separators other than CR and LF remain inside their source line.
+
+    Raises:
+        MarkdownStructureValidationError: If ``source`` is not an exact string.
+    """
+    if type(source) is not str:
+        raise MarkdownStructureValidationError(
+            "Physical-line source must be an exact string"
+        )
+
+    lines: list[str] = []
+    line_start = 0
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character == "\r":
+            index += 1
+            if index < len(source) and source[index] == "\n":
+                index += 1
+            lines.append(source[line_start:index])
+            line_start = index
+        elif character == "\n":
+            index += 1
+            lines.append(source[line_start:index])
+            line_start = index
+        else:
+            index += 1
+    if line_start < len(source):
+        lines.append(source[line_start:])
+    return tuple(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +131,18 @@ class SourceSnapshotProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ParsedBlock:
-    """Represent one source-mapped Markdown block and its mapped children."""
+    """Represent one source-mapped Markdown block and its mapped children.
+
+    Args:
+        kind: Non-empty block kind such as ``paragraph`` or ``table_row``.
+        raw_text: Exact source slice covered by this block.
+        line_start: One-based inclusive first source line.
+        line_end: One-based inclusive last source line.
+        children: Exact immutable child blocks contained by this block's range.
+
+    Raises:
+        MarkdownStructureValidationError: If a type or source range is invalid.
+    """
 
     kind: str
     raw_text: str
@@ -127,7 +178,22 @@ class ParsedBlock:
 
 @dataclass(frozen=True, slots=True)
 class ParsedSection:
-    """Represent one heading-delimited Markdown section."""
+    """Represent one heading-delimited Markdown section.
+
+    Args:
+        ordinal: Zero-based deterministic section position.
+        parent_ordinal: Earlier parent section position, or ``None`` at the top.
+        level: Markdown heading level, or zero for a synthetic root.
+        heading: Raw inline heading content, or ``None`` for a synthetic root.
+        heading_path: Immutable ancestor-to-current heading text path.
+        body: Exact source after the heading and before the next section.
+        line_start: One-based inclusive first section line, including its heading.
+        line_end: One-based inclusive last section line.
+        blocks: Exact immutable top-level blocks within the section body.
+
+    Raises:
+        MarkdownStructureValidationError: If hierarchy, type, or range is invalid.
+    """
 
     ordinal: int
     parent_ordinal: int | None
@@ -198,7 +264,15 @@ class ParsedSection:
 
 @dataclass(frozen=True, slots=True)
 class ParsedMarkdown:
-    """Represent deterministic immutable output from a Markdown parser."""
+    """Represent deterministic immutable output from a Markdown parser.
+
+    Args:
+        parser_version: Non-empty identifier for the parser behavior contract.
+        sections: Exact immutable sections in sequential ordinal order.
+
+    Raises:
+        MarkdownStructureValidationError: If identity or section order is invalid.
+    """
 
     parser_version: str
     sections: tuple[ParsedSection, ...]
@@ -225,10 +299,20 @@ class ParsedMarkdown:
 
 
 class MarkdownParser(Protocol):
-    """Parse Markdown source into immutable source-mapped sections."""
+    """Define deterministic Markdown parsing without storage-layer identifiers."""
 
     def parse(self, source: str) -> ParsedMarkdown:
-        """Return deterministic structure for the original Markdown source."""
+        """Parse an exact source string into immutable source-mapped sections.
+
+        Args:
+            source: Original Markdown text whose line endings must be retained.
+
+        Returns:
+            Deterministic parsed sections and block source maps.
+
+        Raises:
+            MarkdownStructureValidationError: If ``source`` is not an exact string.
+        """
 
 
 def _require_inclusive_line_range(

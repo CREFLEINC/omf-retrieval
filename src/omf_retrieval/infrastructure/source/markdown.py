@@ -9,6 +9,7 @@ from omf_retrieval.application.indexing.ports import (
     ParsedBlock,
     ParsedMarkdown,
     ParsedSection,
+    split_physical_lines,
 )
 
 PARSER_VERSION = "markdown-it-py-4.2.0-omf-v1"
@@ -57,17 +58,25 @@ _BLOCK_KIND_BY_TOKEN = {
 
 
 class MarkdownItParser:
-    """Parse CommonMark plus tables while preserving original line slices."""
+    """Parse CommonMark plus tables while preserving physical source lines."""
 
     def __init__(self) -> None:
         """Create the approved Markdown parser configuration."""
         self._parser = MarkdownIt("commonmark").enable("table")
 
     def parse(self, source: str) -> ParsedMarkdown:
-        """Return heading-delimited sections for Markdown source."""
-        if type(source) is not str:
-            raise ValueError("Markdown source must be an exact string")
-        source_lines = source.splitlines(keepends=True)
+        """Parse Markdown into heading sections and mapped block trees.
+
+        Args:
+            source: Exact Markdown source using CR, LF, or CRLF physical lines.
+
+        Returns:
+            Immutable sections whose raw block slices preserve the input text.
+
+        Raises:
+            MarkdownStructureValidationError: If ``source`` is not an exact string.
+        """
+        source_lines = split_physical_lines(source)
         tokens = self._parser.parse(source)
         headings = _top_level_headings(tokens)
         sections: list[ParsedSection] = []
@@ -158,7 +167,7 @@ def _top_level_headings(tokens: list[Token]) -> tuple[_Heading, ...]:
 
 
 def _mapped_blocks(
-    tokens: list[Token], source_lines: list[str]
+    tokens: list[Token], source_lines: tuple[str, ...]
 ) -> tuple[ParsedBlock, ...]:
     roots: list[_BlockBuilder] = []
     open_blocks: list[_BlockBuilder] = []
@@ -186,7 +195,7 @@ def _mapped_blocks(
 
 def _section_blocks(
     top_level_blocks: tuple[ParsedBlock, ...],
-    source_lines: list[str],
+    source_lines: tuple[str, ...],
     *,
     line_start: int,
     line_end: int,
@@ -212,7 +221,9 @@ def _section_blocks(
     return tuple(blocks)
 
 
-def _raw_gap(source_lines: list[str], line_start: int, line_end: int) -> ParsedBlock:
+def _raw_gap(
+    source_lines: tuple[str, ...], line_start: int, line_end: int
+) -> ParsedBlock:
     raw_text = "".join(source_lines[line_start - 1 : line_end])
     return ParsedBlock(
         kind="blank" if not raw_text.strip() else "raw",

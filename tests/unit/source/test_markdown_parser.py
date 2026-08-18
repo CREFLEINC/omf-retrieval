@@ -252,6 +252,81 @@ def test_parser_preserves_final_line_without_newline_and_is_deterministic() -> N
     )
 
 
+@pytest.mark.parametrize(
+    "separator",
+    ["\u2028", "\u0085", "\v", "\f"],
+    ids=["line-separator", "next-line", "vertical-tab", "form-feed"],
+)
+def test_non_markdown_separators_stay_inside_one_heading_line(separator: str) -> None:
+    """Generic splitlines must not create fake lines outside Markdown's grammar."""
+    source = f"# A{separator}body\n"
+
+    section = _markdown_module().MarkdownItParser().parse(source).sections[0]
+
+    assert (
+        section.heading,
+        section.body,
+        section.line_start,
+        section.line_end,
+        section.blocks,
+    ) == (f"A{separator}body", "", 1, 1, ())
+    assert f"# {section.heading}\n{section.body}" == source
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_lines"),
+    [
+        ("", ()),
+        ("last", ("last",)),
+        ("last\n", ("last\n",)),
+        ("last\r", ("last\r",)),
+        ("last\r\n", ("last\r\n",)),
+        ("a\r\nb\rc\nlast", ("a\r\n", "b\r", "c\n", "last")),
+        ("a\u2028b\u0085c\vd\fe", ("a\u2028b\u0085c\vd\fe",)),
+    ],
+)
+def test_physical_line_splitter_keeps_only_cr_lf_boundaries(
+    source: str, expected_lines: tuple[str, ...]
+) -> None:
+    """Using Python's broader splitlines would desynchronize Markdown token maps."""
+    splitter = getattr(ports, "split_physical_lines", None)
+    assert callable(splitter), "Public physical-line splitter must exist"
+
+    lines = splitter(source)
+
+    assert lines == expected_lines
+    assert type(lines) is tuple
+    assert "".join(lines) == source
+
+
+def test_physical_line_splitter_rejects_subclass_without_exposing_source() -> None:
+    """The shared application boundary rejects ambiguous strings fail closed."""
+    splitter = getattr(ports, "split_physical_lines", None)
+    assert callable(splitter), "Public physical-line splitter must exist"
+    secret_source = StringSubclass("OMF-SPLITTER-SECRET\u2028")
+
+    with pytest.raises(ports.MarkdownStructureValidationError) as error:
+        splitter(secret_source)
+
+    assert str(secret_source) not in str(error.value)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"], ids=["lf", "cr", "crlf"])
+def test_parser_maps_markdown_cr_and_lf_boundaries(newline: str) -> None:
+    """Changing physical-line boundaries must not shift markdown-it token maps."""
+    source = f"# A{newline}body{newline}"
+
+    section = _markdown_module().MarkdownItParser().parse(source).sections[0]
+
+    assert (
+        section.heading,
+        section.body,
+        section.line_start,
+        section.line_end,
+    ) == ("A", f"body{newline}", 1, 2)
+    assert "".join(block.raw_text for block in section.blocks) == section.body
+
+
 def test_parsed_values_are_frozen_slotted_and_recursively_immutable() -> None:
     """Mutable parser output could make indexed coordinates nondeterministic."""
     child = ports.ParsedBlock("paragraph", "body\n", 2, 2, ())
