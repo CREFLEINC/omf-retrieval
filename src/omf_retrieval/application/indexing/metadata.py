@@ -187,7 +187,7 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _load_relation_json(payload: str) -> tuple[bool, object]:
     try:
         return True, json.loads(payload, object_pairs_hook=_unique_json_object)
-    except (json.JSONDecodeError, _DuplicateJsonKey):
+    except (ValueError, RecursionError):
         return False, None
 
 

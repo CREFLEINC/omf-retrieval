@@ -1354,6 +1354,50 @@ def test_relation_errors_discard_rejected_exception_context() -> None:
     assert error_info.value.__context__ is None
 
 
+@pytest.mark.parametrize(
+    ("payload", "forbidden_fragments"),
+    [
+        (
+            '{"relations": [], "unknown": ' + "1234567890" * 500 + "}",
+            ("1234567890", "Exceeds the limit", "5000 digits"),
+        ),
+        (
+            "[" * 10_000 + '"classified-deep-json"' + "]" * 10_000,
+            ("classified-deep-json", "maximum recursion depth"),
+        ),
+    ],
+    ids=["oversized-integer", "excessive-nesting"],
+)
+def test_relation_json_decoder_failures_use_the_sanitized_public_error(
+    payload: str,
+    forbidden_fragments: tuple[str, ...],
+) -> None:
+    """Decoder resource failures cannot escape or retain rejected JSON."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    validation_error: RelationSidecarValidationError | None = None
+    try:
+        parse_relation_sidecar(payload, _relation_snapshot())
+    except RelationSidecarValidationError as error:
+        validation_error = error
+    except (ValueError, RecursionError):
+        pass
+
+    assert validation_error is not None, "decoder failures must use the public error"
+    assert str(validation_error) == (
+        "Relation sidecar must be valid duplicate-free JSON"
+    )
+    assert payload not in str(validation_error)
+    assert all(
+        fragment not in str(validation_error) for fragment in forbidden_fragments
+    )
+    assert validation_error.__cause__ is None
+    assert validation_error.__context__ is None
+
+
 def test_relation_parsing_is_deterministic_and_never_infers_relations() -> None:
     """Repeated explicit input is stable and document names create no relation."""
     from omf_retrieval.application.indexing.metadata import parse_relation_sidecar
