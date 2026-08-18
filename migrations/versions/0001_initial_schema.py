@@ -40,7 +40,8 @@ def upgrade() -> None:
         ),
         sa.Column("active_index_run_id", postgresql.UUID(), nullable=True),
         sa.CheckConstraint(
-            "btrim(source_key) <> ''", name="ck_source_profiles_source_key_non_blank"
+            "source_key ~ '[^[:space:]]'",
+            name="ck_source_profiles_source_key_non_blank",
         ),
         sa.CheckConstraint(
             "jsonb_typeof(include_patterns) = 'array'",
@@ -175,7 +176,7 @@ def upgrade() -> None:
         sa.Column("decision_state", sa.Text(), nullable=False),
         sa.Column("owner_domain", sa.Text(), nullable=False),
         sa.CheckConstraint(
-            "btrim(source_path) <> ''",
+            "source_path ~ '[^[:space:]]'",
             name="ck_document_occurrences_source_path_non_blank",
         ),
         sa.CheckConstraint(
@@ -215,7 +216,7 @@ def upgrade() -> None:
         sa.Column("parser_version", sa.Text(), nullable=False),
         sa.Column("chunk_config_hash", sa.String(length=64), nullable=False),
         sa.CheckConstraint(
-            "btrim(parser_version) <> ''",
+            "parser_version ~ '[^[:space:]]'",
             name="ck_document_parses_parser_version_non_blank",
         ),
         sa.CheckConstraint(
@@ -323,11 +324,11 @@ def upgrade() -> None:
             name="ck_chunk_embeddings_config_hash_sha256",
         ),
         sa.CheckConstraint(
-            "btrim(model_name) <> ''",
+            "model_name ~ '[^[:space:]]'",
             name="ck_chunk_embeddings_model_name_non_blank",
         ),
         sa.CheckConstraint(
-            "btrim(model_revision) <> ''",
+            "model_revision ~ '[^[:space:]]'",
             name="ck_chunk_embeddings_model_revision_non_blank",
         ),
         sa.CheckConstraint(
@@ -366,7 +367,7 @@ def upgrade() -> None:
             name="ck_document_relations_relation_type",
         ),
         sa.CheckConstraint(
-            "btrim(evidence_source_path) <> ''",
+            "evidence_source_path ~ '[^[:space:]]'",
             name="ck_document_relations_evidence_source_path_non_blank",
         ),
         sa.CheckConstraint(
@@ -421,7 +422,9 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint("btrim(name) <> ''", name="ck_api_clients_name_non_blank"),
+        sa.CheckConstraint(
+            "name ~ '[^[:space:]]'", name="ck_api_clients_name_non_blank"
+        ),
         sa.CheckConstraint(
             "char_length(key_id) = 16", name="ck_api_clients_key_id_length"
         ),
@@ -490,7 +493,7 @@ def upgrade() -> None:
         sa.Column("rrf_ms", sa.Integer(), nullable=False),
         sa.Column("total_ms", sa.Integer(), nullable=False),
         sa.CheckConstraint(
-            "btrim(request_id) <> ''",
+            "request_id ~ '[^[:space:]]'",
             name="ck_search_audit_events_request_id_non_blank",
         ),
         sa.CheckConstraint(

@@ -300,6 +300,94 @@ INVALID_VALUE_UPDATES = (
     ),
 )
 
+NON_BLANK_COLUMNS = (
+    pytest.param(
+        "source_profiles",
+        "source_key",
+        "source_id",
+        "ck_source_profiles_source_key_non_blank",
+        id="source-key",
+    ),
+    pytest.param(
+        "document_occurrences",
+        "source_path",
+        "occurrence_id",
+        "ck_document_occurrences_source_path_non_blank",
+        id="source-path",
+    ),
+    pytest.param(
+        "document_parses",
+        "parser_version",
+        "parse_id",
+        "ck_document_parses_parser_version_non_blank",
+        id="parser-version",
+    ),
+    pytest.param(
+        "chunk_embeddings",
+        "model_name",
+        "embedding_id",
+        "ck_chunk_embeddings_model_name_non_blank",
+        id="model-name",
+    ),
+    pytest.param(
+        "chunk_embeddings",
+        "model_revision",
+        "embedding_id",
+        "ck_chunk_embeddings_model_revision_non_blank",
+        id="model-revision",
+    ),
+    pytest.param(
+        "document_relations",
+        "evidence_source_path",
+        "relation_id",
+        "ck_document_relations_evidence_source_path_non_blank",
+        id="evidence-source-path",
+    ),
+    pytest.param(
+        "api_clients",
+        "name",
+        "client_id",
+        "ck_api_clients_name_non_blank",
+        id="client-name",
+    ),
+    pytest.param(
+        "search_audit_events",
+        "request_id",
+        "audit_id",
+        "ck_search_audit_events_request_id_non_blank",
+        id="request-id",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("whitespace_name", "whitespace"),
+    (("space", " "), ("tab", "\t"), ("newline", "\n")),
+)
+@pytest.mark.parametrize(
+    ("table_name", "column_name", "id_name", "constraint_name"),
+    NON_BLANK_COLUMNS,
+)
+def test_non_blank_values_reject_all_whitespace(
+    database_connection: Connection,
+    table_name: str,
+    column_name: str,
+    id_name: str,
+    constraint_name: str,
+    whitespace_name: str,
+    whitespace: str,
+) -> None:
+    """Every non-blank field rejects space, tab, and newline-only values."""
+    identifiers = _seed_valid_graph(database_connection)
+
+    with pytest.raises(IntegrityError) as error, database_connection.begin_nested():
+        database_connection.execute(
+            text(f"UPDATE {table_name} SET {column_name} = :value WHERE id = :row_id"),
+            {"row_id": identifiers[id_name], "value": whitespace},
+        )
+
+    assert error.value.orig.diag.constraint_name == constraint_name
+
 
 @pytest.mark.parametrize(("table_name", "assignment", "id_name"), INVALID_VALUE_UPDATES)
 def test_invalid_values_are_rejected(
@@ -497,10 +585,18 @@ def test_cross_source_active_pointer_is_rejected(
         )
 
 
-@pytest.mark.parametrize("cross_snapshot_target", ("from", "to", "evidence"))
+@pytest.mark.parametrize(
+    ("cross_snapshot_target", "constraint_name"),
+    (
+        ("from", "fk_document_relations_from_occurrence"),
+        ("to", "fk_document_relations_to_occurrence"),
+        ("evidence", "fk_document_relations_evidence_occurrence"),
+    ),
+)
 def test_cross_run_relations_are_rejected(
     database_connection: Connection,
     cross_snapshot_target: str,
+    constraint_name: str,
 ) -> None:
     """Relation occurrences and evidence must belong to the declared run."""
     identifiers = _seed_valid_graph(database_connection)
@@ -515,7 +611,7 @@ def test_cross_run_relations_are_rejected(
     else:
         evidence_source_path = "docs/other.md"
 
-    with pytest.raises(IntegrityError), database_connection.begin_nested():
+    with pytest.raises(IntegrityError) as error, database_connection.begin_nested():
         database_connection.execute(
             text(
                 "INSERT INTO document_relations "
@@ -532,6 +628,38 @@ def test_cross_run_relations_are_rejected(
                 "evidence_path": evidence_source_path,
             },
         )
+
+    assert error.value.orig.diag.constraint_name == constraint_name
+
+
+def test_same_run_potential_conflict_relation_is_allowed(
+    database_connection: Connection,
+) -> None:
+    """A potential-conflict relation succeeds when all targets share its run."""
+    identifiers = _seed_valid_graph(database_connection)
+
+    relation_id = uuid4()
+    database_connection.execute(
+        text(
+            "INSERT INTO document_relations "
+            "(id, run_id, from_occurrence_id, to_occurrence_id, relation_type, "
+            "evidence_source_path, evidence_line_start, evidence_line_end) VALUES "
+            "(:id, :run_id, :from_id, :to_id, 'potential_conflict', "
+            "'docs/a.md', 1, 1)"
+        ),
+        {
+            "id": relation_id,
+            "run_id": identifiers["run_id"],
+            "from_id": identifiers["occurrence_id"],
+            "to_id": identifiers["other_occurrence_id"],
+        },
+    )
+    relation_type = database_connection.execute(
+        text("SELECT relation_type FROM document_relations WHERE id = :id"),
+        {"id": relation_id},
+    ).scalar_one()
+
+    assert relation_type == "potential_conflict"
 
 
 def test_cross_parse_section_parent_is_rejected(

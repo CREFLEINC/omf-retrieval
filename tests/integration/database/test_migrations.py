@@ -1,20 +1,23 @@
 """Integration tests for the PostgreSQL migration lifecycle."""
 
-import os
-from collections.abc import Iterator
-
 import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, create_engine, make_url, text
-
-TEST_DATABASE_URL = (
-    "postgresql+psycopg://omf_retrieval_test:omf_retrieval_test@"
-    "127.0.0.1:55432/omf_retrieval_test"
+from database_test_utils import (
+    DEFAULT_TEST_DATABASE_URL,
+    create_test_engine,
 )
+from schema_expectations import (
+    EXPECTED_CHECK_CONSTRAINTS,
+    EXPECTED_EXPLICIT_INDEXES,
+    EXPECTED_KEY_CONSTRAINTS,
+    EXPECTED_NON_ID_DEFAULTS,
+)
+from sqlalchemy import Connection, make_url, text
+
 REQUIRED_EXTENSIONS = {"pg_trgm", "vector"}
-OVERRIDE_DATABASE_URL = f"{TEST_DATABASE_URL}?application_name=override-fixture"
+OVERRIDE_DATABASE_URL = f"{DEFAULT_TEST_DATABASE_URL}?application_name=override-fixture"
 APPLICATION_TABLES = {
     "api_clients",
     "chunk_embeddings",
@@ -157,135 +160,6 @@ EXPECTED_COLUMNS = {
         "total_ms integer required",
     },
 }
-EXPECTED_CONSTRAINTS = {
-    *(f"pk_{table_name}" for table_name in APPLICATION_TABLES),
-    "ck_api_clients_key_id_length",
-    "ck_api_clients_name_non_blank",
-    "ck_api_clients_status",
-    "ck_api_clients_token_hash_length",
-    "ck_chunk_embeddings_config_hash_sha256",
-    "ck_chunk_embeddings_dimension_positive",
-    "ck_chunk_embeddings_model_name_non_blank",
-    "ck_chunk_embeddings_model_revision_non_blank",
-    "ck_chunk_embeddings_status_ready",
-    "ck_chunk_embeddings_vector_dimension",
-    "ck_chunks_chunk_hash_sha256",
-    "ck_chunks_line_range",
-    "ck_chunks_ordinal_nonnegative",
-    "ck_chunks_token_count_nonnegative",
-    "ck_document_contents_byte_size_matches_content",
-    "ck_document_contents_byte_size_nonnegative",
-    "ck_document_contents_content_hash_sha256",
-    "ck_document_occurrences_decision_state",
-    "ck_document_occurrences_owner_domain",
-    "ck_document_occurrences_source_path_non_blank",
-    "ck_document_occurrences_version_scope",
-    "ck_document_parses_chunk_config_hash_sha256",
-    "ck_document_parses_parser_version_non_blank",
-    "ck_document_relations_evidence_line_range",
-    "ck_document_relations_evidence_source_path_non_blank",
-    "ck_document_relations_relation_type",
-    "ck_index_configs_chunk_config_object",
-    "ck_index_configs_config_hash_sha256",
-    "ck_index_configs_embedding_config_object",
-    "ck_index_configs_parser_config_object",
-    "ck_index_configs_rrf_config_object",
-    "ck_index_configs_tokenizer_config_object",
-    "ck_index_runs_commit_sha_git",
-    "ck_index_runs_stats_object",
-    "ck_index_runs_status",
-    "ck_search_audit_events_commit_sha_git",
-    "ck_search_audit_events_embedding_ms_nonnegative",
-    "ck_search_audit_events_filters_object",
-    "ck_search_audit_events_keyword_ms_nonnegative",
-    "ck_search_audit_events_query_hmac_length",
-    "ck_search_audit_events_request_id_non_blank",
-    "ck_search_audit_events_result_count_nonnegative",
-    "ck_search_audit_events_rrf_ms_nonnegative",
-    "ck_search_audit_events_status",
-    "ck_search_audit_events_total_ms_nonnegative",
-    "ck_search_audit_events_vector_ms_nonnegative",
-    "ck_sections_level_range",
-    "ck_sections_line_range",
-    "ck_sections_ordinal_nonnegative",
-    "ck_source_profiles_exclude_patterns_array",
-    "ck_source_profiles_include_patterns_array",
-    "ck_source_profiles_source_key_non_blank",
-    "fk_chunk_embeddings_chunk_id",
-    "fk_chunks_section_id",
-    "fk_client_source_grants_client_id",
-    "fk_client_source_grants_source_profile_id",
-    "fk_document_occurrences_content_id",
-    "fk_document_occurrences_run_id",
-    "fk_document_parses_content_id",
-    "fk_document_relations_evidence_occurrence",
-    "fk_document_relations_from_occurrence",
-    "fk_document_relations_run_id",
-    "fk_document_relations_to_occurrence",
-    "fk_index_runs_index_config_id",
-    "fk_index_runs_source_profile_id",
-    "fk_search_audit_events_client_id",
-    "fk_search_audit_events_source_profile_id",
-    "fk_sections_parse_id",
-    "fk_sections_parse_id_parent_section_id",
-    "fk_source_profiles_active_index_run",
-    "uq_api_clients_key_id",
-    "uq_chunk_embeddings_chunk_id_config_hash",
-    "uq_chunks_section_id_ordinal",
-    "uq_document_contents_content_hash",
-    "uq_document_occurrences_run_id_id",
-    "uq_document_occurrences_run_id_source_path",
-    "uq_document_parses_content_parser_chunk_config",
-    "uq_index_configs_config_hash",
-    "uq_index_runs_source_profile_id_id",
-    "uq_sections_parse_id_id",
-    "uq_sections_parse_id_ordinal",
-    "uq_source_profiles_source_key",
-}
-EXPLICIT_INDEXES = {
-    "ix_chunks_search_text_trgm",
-    "ix_client_source_grants_source_profile_id",
-    "ix_document_occurrences_content_id",
-    "ix_document_relations_evidence",
-    "ix_document_relations_from",
-    "ix_document_relations_to",
-    "ix_index_runs_index_config_id",
-    "ix_index_runs_source_status",
-    "ix_search_audit_events_client_id",
-    "ix_search_audit_events_source_profile_id",
-    "ix_sections_parent_section_id",
-    "ix_source_profiles_active_index_run_id",
-}
-EXPECTED_FK_DELETE_ACTIONS = {
-    "fk_chunk_embeddings_chunk_id": "c",
-    "fk_chunks_section_id": "c",
-    "fk_client_source_grants_client_id": "c",
-    "fk_client_source_grants_source_profile_id": "r",
-    "fk_document_occurrences_content_id": "r",
-    "fk_document_occurrences_run_id": "c",
-    "fk_document_parses_content_id": "c",
-    "fk_document_relations_evidence_occurrence": "c",
-    "fk_document_relations_from_occurrence": "c",
-    "fk_document_relations_run_id": "c",
-    "fk_document_relations_to_occurrence": "c",
-    "fk_index_runs_index_config_id": "r",
-    "fk_index_runs_source_profile_id": "r",
-    "fk_search_audit_events_client_id": "r",
-    "fk_search_audit_events_source_profile_id": "r",
-    "fk_sections_parse_id": "c",
-    "fk_sections_parse_id_parent_section_id": "c",
-    "fk_source_profiles_active_index_run": "r",
-}
-
-
-@pytest.fixture
-def database_connection() -> Iterator[Connection]:
-    """Yield a live connection to the isolated integration-test database."""
-    database_url = os.getenv("OMF_RETRIEVAL_DATABASE_URL", TEST_DATABASE_URL)
-    engine = create_engine(database_url)
-    with engine.connect() as connection:
-        yield connection
-    engine.dispose()
 
 
 def _installed_extensions(connection: Connection) -> set[str]:
@@ -321,13 +195,13 @@ def test_database_connection_prefers_environment_url(
 ) -> None:
     """The integration fixture follows the Alembic database URL override."""
     monkeypatch.setenv("OMF_RETRIEVAL_DATABASE_URL", OVERRIDE_DATABASE_URL)
-    connection_iterator = database_connection.__wrapped__()
-    connection = next(connection_iterator)
+    engine = create_test_engine()
 
     try:
-        assert connection.engine.url == make_url(OVERRIDE_DATABASE_URL)
+        with engine.connect() as connection:
+            assert connection.engine.url == make_url(OVERRIDE_DATABASE_URL)
     finally:
-        connection_iterator.close()
+        engine.dispose()
 
 
 def test_required_extensions_are_installed(database_connection: Connection) -> None:
@@ -401,45 +275,97 @@ def test_uuid_identifiers_have_no_database_default(
 def test_constraint_and_explicit_index_catalog_is_exact(
     database_connection: Connection,
 ) -> None:
-    """All database constraints and explicit indexes have stable approved names."""
-    constraint_names = set(
-        database_connection.execute(
-            text(
-                "SELECT con.conname FROM pg_constraint con "
-                "JOIN pg_class rel ON rel.oid = con.conrelid "
-                "JOIN pg_namespace n ON n.oid = rel.relnamespace "
-                "WHERE n.nspname = 'public' AND rel.relname <> 'alembic_version' "
-                "AND con.contype <> 'n'"
+    """Constraint and index structure exactly matches the approved physical model."""
+    constraint_rows = database_connection.execute(
+        text(
+            "SELECT con.conname, rel.relname, con.contype, "
+            "ARRAY(SELECT att.attname FROM unnest(con.conkey) WITH ORDINALITY "
+            "AS key(attnum, ord) JOIN pg_attribute att "
+            "ON att.attrelid = con.conrelid AND att.attnum = key.attnum "
+            "ORDER BY key.ord), ref.relname, "
+            "ARRAY(SELECT att.attname FROM unnest(con.confkey) WITH ORDINALITY "
+            "AS key(attnum, ord) JOIN pg_attribute att "
+            "ON att.attrelid = con.confrelid AND att.attnum = key.attnum "
+            "ORDER BY key.ord), "
+            "CASE WHEN con.contype = 'f' THEN con.confdeltype::text END, "
+            "pg_get_constraintdef(con.oid, true) "
+            "FROM pg_constraint con "
+            "JOIN pg_class rel ON rel.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+            "LEFT JOIN pg_class ref ON ref.oid = con.confrelid "
+            "WHERE n.nspname = 'public' AND rel.relname <> 'alembic_version' "
+            "AND con.contype <> 'n'"
+        )
+    ).all()
+    key_constraints = {}
+    check_constraints = {}
+    for (
+        name,
+        table_name,
+        constraint_type,
+        source_columns,
+        referenced_table,
+        referenced_columns,
+        delete_action,
+        definition,
+    ) in constraint_rows:
+        if constraint_type == "c":
+            check_constraints[name] = (
+                table_name,
+                tuple(source_columns),
+                definition,
             )
-        ).scalars()
-    )
-    index_names = set(
-        database_connection.execute(
-            text(
-                "SELECT idx.relname FROM pg_index i "
-                "JOIN pg_class idx ON idx.oid = i.indexrelid "
-                "JOIN pg_class rel ON rel.oid = i.indrelid "
-                "JOIN pg_namespace n ON n.oid = rel.relnamespace "
-                "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
-                "WHERE n.nspname = 'public' AND rel.relname <> 'alembic_version' "
-                "AND con.oid IS NULL"
+        else:
+            key_constraints[name] = (
+                table_name,
+                constraint_type,
+                tuple(source_columns),
+                referenced_table,
+                tuple(referenced_columns),
+                delete_action,
             )
-        ).scalars()
-    )
-    foreign_key_delete_actions = dict(
-        database_connection.execute(
-            text(
-                "SELECT conname, confdeltype FROM pg_constraint con "
-                "JOIN pg_class rel ON rel.oid = con.conrelid "
-                "JOIN pg_namespace n ON n.oid = rel.relnamespace "
-                "WHERE n.nspname = 'public' AND con.contype = 'f'"
-            )
-        ).all()
-    )
 
-    assert constraint_names == EXPECTED_CONSTRAINTS
-    assert index_names == EXPLICIT_INDEXES
-    assert foreign_key_delete_actions == EXPECTED_FK_DELETE_ACTIONS
+    index_rows = database_connection.execute(
+        text(
+            "SELECT idx.relname, rel.relname, am.amname, "
+            "ARRAY(SELECT pg_get_indexdef(i.indexrelid, position, true) "
+            "FROM generate_series(1, i.indnkeyatts) position), "
+            "ARRAY(SELECT opc.opcname FROM unnest(i.indclass::oid[]) "
+            "WITH ORDINALITY classes(opcoid, ord) "
+            "JOIN pg_opclass opc ON opc.oid = classes.opcoid "
+            "WHERE classes.ord <= i.indnkeyatts ORDER BY classes.ord) "
+            "FROM pg_index i "
+            "JOIN pg_class idx ON idx.oid = i.indexrelid "
+            "JOIN pg_class rel ON rel.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+            "JOIN pg_am am ON am.oid = idx.relam "
+            "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
+            "WHERE n.nspname = 'public' AND rel.relname <> 'alembic_version' "
+            "AND con.oid IS NULL"
+        )
+    ).all()
+    indexes = {
+        name: (table_name, method, tuple(columns), tuple(opclasses))
+        for name, table_name, method, columns, opclasses in index_rows
+    }
+
+    default_rows = database_connection.execute(
+        text(
+            "SELECT table_name, column_name, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name <> 'alembic_version' "
+            "AND column_name <> 'id' AND column_default IS NOT NULL"
+        )
+    ).all()
+    defaults = {
+        (table_name, column_name): default
+        for table_name, column_name, default in default_rows
+    }
+
+    assert key_constraints == EXPECTED_KEY_CONSTRAINTS
+    assert check_constraints == EXPECTED_CHECK_CONSTRAINTS
+    assert indexes == EXPECTED_EXPLICIT_INDEXES
+    assert defaults == EXPECTED_NON_ID_DEFAULTS
 
 
 def test_trigram_gin_index_exists_and_ann_indexes_do_not(
