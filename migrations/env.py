@@ -6,7 +6,9 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import MetaData, engine_from_config, pool
+from sqlalchemy import engine_from_config, pool
+
+from omf_retrieval.infrastructure.database.models import Base
 
 config = context.config
 
@@ -17,8 +19,7 @@ database_url = os.getenv("OMF_RETRIEVAL_DATABASE_URL")
 if database_url is not None:
     config.set_main_option("sqlalchemy.url", database_url)
 
-# Task 3B will replace the empty metadata with the approved application schema.
-target_metadata = MetaData()
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
