@@ -485,14 +485,6 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
     """Removing argv, cwd, no-lock env, or shell=False violates source isolation."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
     repo, commit_a, _ = _make_two_commit_repo(tmp_path)
-    selected_object_ids = [
-        _git(repo, "rev-parse", f"{commit_a}:{source_path}")
-        for source_path in (
-            "docs/planning/nested/plan.md",
-            "docs/research/direct.md",
-            "uiux/spec.md",
-        )
-    ]
     real_run = subprocess.run
     real_popen = subprocess.Popen
     observed_calls: list[tuple[list[str], dict[str, Any]]] = []
@@ -536,13 +528,16 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
     assert [call[0] for call in observed_process_calls] == [
         ["git", "archive", "--format=tar", commit_a],
         ["git", "ls-tree", "-r", "-z", "--full-tree", commit_a],
-        *[["git", "cat-file", "blob", object_id] for object_id in selected_object_ids],
+        ["git", "cat-file", "--batch"],
     ]
     all_calls = [*observed_calls, *observed_process_calls]
     assert all(type(argv) is list for argv, _ in all_calls)
     assert all(kwargs["cwd"] == repo for _, kwargs in all_calls)
     assert all(kwargs["shell"] is False for _, kwargs in all_calls)
     assert all(kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0" for _, kwargs in all_calls)
+    batch_kwargs = observed_process_calls[-1][1]
+    assert batch_kwargs["stdin"] is subprocess.PIPE
+    assert batch_kwargs["stdout"] is subprocess.PIPE
 
 
 def test_snapshot_rejects_an_actual_git_symlink_member(tmp_path: Path) -> None:
@@ -1206,6 +1201,44 @@ def test_sparse_pax_metadata_is_rejected_before_tarfile_parsing(
     assert list(temp_parent.iterdir()) == []
 
 
+def test_solaris_extended_header_is_rejected_before_tarfile_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Solaris X header cannot bypass the supported PAX parser and cap."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    archive_bytes = _raw_tar(
+        _raw_tar_entry(
+            "solaris-pax",
+            tarfile.SOLARIS_XHDTYPE,
+            _pax_record("path", "../../escape.md"),
+        ),
+        _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+    )
+
+    def unexpected_tarfile_parse(*_: Any, **__: Any) -> None:
+        raise AssertionError("Solaris extended header reached tarfile")
+
+    monkeypatch.setattr(module.tarfile, "open", unexpected_tarfile_parse)
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "extended header" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
 def _metadata_archive(kind: str) -> bytes:
     if kind == "local-pax":
         return _tar_bytes(
@@ -1377,16 +1410,49 @@ def test_pax_payload_reads_are_chunked_and_metadata_is_bounded(
     assert list(temp_parent.iterdir()) == []
 
 
-def test_pax_metadata_cap_is_derived_from_approved_file_limit(
+def test_standard_pax_metadata_budget_is_independent_of_included_file_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PAX allocation inherits an approved resource bound, not a new setting."""
+    """A small included-file limit cannot redefine the private PAX budget."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
     repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     payload = _pax_record("comment", "x" * 2_000)
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax_global_header", tarfile.XGLTYPE, payload),
+        _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+    )
+
+    snapshot, caught_error = _captured_result(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_file_bytes": 1_024},
+        )
+    )
+
+    assert caught_error is None
+    assert isinstance(snapshot, SourceSnapshot)
+    assert snapshot.archive_files == ()
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_standard_pax_metadata_has_a_private_four_mib_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large x/g header is bounded independently from an 8 MiB file limit."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    payload = _pax_record("comment", "x" * (4 * 1024 * 1024))
     archive_bytes = _raw_tar(
         _raw_tar_entry("pax_global_header", tarfile.XGLTYPE, payload),
         _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
@@ -1400,13 +1466,35 @@ def test_pax_metadata_cap_is_derived_from_approved_file_limit(
             commit_sha=commit_sha,
             archive_bytes=archive_bytes,
             temp_parent=temp_parent,
-            provider_options={"max_file_bytes": 1_024},
+            provider_options={"max_file_bytes": 8 * 1024 * 1024},
         )
     )
 
     assert type(caught_error) is module.GitArchiveSnapshotError
     assert "metadata limit" in str(caught_error).lower()
     assert list(temp_parent.iterdir()) == []
+
+
+def test_real_git_pax_archive_accepts_an_exact_one_byte_file_limit(
+    tmp_path: Path,
+) -> None:
+    """Git's global PAX comment is independent of a valid one-byte source file."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(
+        tmp_path, source_path="docs/research/one.md", content=b"x"
+    )
+
+    snapshot, caught_error = _captured_result(
+        lambda: module.GitArchiveSnapshotProvider(
+            _omf_test_profile(), max_file_bytes=1
+        ).snapshot(repo, commit_sha)
+    )
+
+    assert caught_error is None
+    assert snapshot == SourceSnapshot(
+        commit_sha=commit_sha,
+        archive_files=(ArchiveFile("docs/research/one.md", b"x"),),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1462,6 +1550,273 @@ def test_regular_file_tree_conflicts_are_rejected_globally(
     assert type(caught_error) is module.GitArchiveSnapshotError
     assert "tree conflict" in str(caught_error).lower()
     assert list(temp_parent.iterdir()) == []
+
+
+class _BatchInput:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        write_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._write_error = write_error
+        self._close_error = close_error
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, content: bytes) -> int:
+        self._events.append("stdin-write")
+        if self._write_error is not None:
+            raise self._write_error
+        self.writes.append(content)
+        return len(content)
+
+    def flush(self) -> None:
+        self._events.append("stdin-flush")
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._events.append("stdin-close")
+            if self._close_error is not None:
+                raise self._close_error
+
+
+class _BatchOutput:
+    def __init__(
+        self,
+        events: list[str],
+        response: bytes,
+        *,
+        read_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._response = bytearray(response)
+        self._read_error = read_error
+        self._close_error = close_error
+        self.read_sizes: list[int] = []
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        self._events.append(f"stdout-read:{size}")
+        self.read_sizes.append(size)
+        if self._read_error is not None:
+            raise self._read_error
+        content = bytes(self._response[:size])
+        del self._response[:size]
+        return content
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._events.append("stdout-close")
+            if self._close_error is not None:
+                raise self._close_error
+
+
+class _ControlledBatchProcess:
+    def __init__(
+        self,
+        *,
+        response: bytes,
+        return_code: int = 0,
+        timeout_once: bool = False,
+        read_error: Exception | None = None,
+        write_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self.events: list[str] = []
+        self.stdin = _BatchInput(
+            self.events,
+            write_error=write_error,
+            close_error=close_error,
+        )
+        self.stdout = _BatchOutput(
+            self.events,
+            response,
+            read_error=read_error,
+            close_error=close_error,
+        )
+        self._return_code = return_code
+        self._timeout_once = timeout_once
+        self._reaped = False
+
+    def poll(self) -> int | None:
+        self.events.append("poll")
+        return self._return_code if self._reaped else None
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+
+    def kill(self) -> None:
+        self.events.append("kill")
+
+    def wait(self, timeout: int | None = None) -> int:
+        self.events.append(f"wait:{timeout}")
+        if timeout is not None and self._timeout_once:
+            self._timeout_once = False
+            raise subprocess.TimeoutExpired(["git", "cat-file", "--batch"], timeout)
+        self._reaped = True
+        return self._return_code
+
+
+def _install_controlled_batch_process(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process: _ControlledBatchProcess,
+) -> list[dict[str, Any]]:
+    real_popen = subprocess.Popen
+    observed_batch_kwargs: list[dict[str, Any]] = []
+
+    def routed_popen(argv: list[str], **kwargs: Any) -> Any:
+        if argv == ["git", "cat-file", "--batch"]:
+            observed_batch_kwargs.append(kwargs.copy())
+            return process
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "Popen", routed_popen)
+    return observed_batch_kwargs
+
+
+@pytest.mark.parametrize(
+    "protocol_fault",
+    [
+        "identity",
+        "type",
+        "size",
+        "one-over",
+        "terminator",
+        "truncated",
+        "trailing",
+        "exit",
+    ],
+)
+def test_cat_file_batch_protocol_failures_are_sanitized_and_cleaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol_fault: str,
+) -> None:
+    """Malformed identity, type, size, framing, or exit status fails closed."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(
+        tmp_path, source_path="docs/research/one.md", content=b"x"
+    )
+    object_id = _git(repo, "rev-parse", f"{commit_sha}:docs/research/one.md")
+    responses = {
+        "identity": f"{'f' * 40} blob 1\n".encode() + b"x\n",
+        "type": f"{object_id} tree 1\n".encode() + b"x\n",
+        "size": f"{object_id} blob nope\n".encode(),
+        "one-over": f"{object_id} blob 2\n".encode() + b"xx\n",
+        "terminator": f"{object_id} blob 1\n".encode() + b"x!",
+        "truncated": f"{object_id} blob 2\n".encode() + b"x",
+        "trailing": f"{object_id} blob 1\n".encode() + b"x\nraw-secret-extra",
+        "exit": f"{object_id} blob 1\n".encode() + b"x\n",
+    }
+    process = _ControlledBatchProcess(
+        response=responses[protocol_fault],
+        return_code=7 if protocol_fault == "exit" else 0,
+    )
+    observed_kwargs = _install_controlled_batch_process(module, monkeypatch, process)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+
+    caught_error = _caught_exception(
+        lambda: module.GitArchiveSnapshotProvider(
+            _omf_test_profile(), temp_parent=temp_parent, max_file_bytes=1
+        ).snapshot(repo, commit_sha)
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert len(observed_kwargs) == 1
+    assert process.stdin.writes == [f"{object_id}\n".encode()]
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert process.poll() == (7 if protocol_fault == "exit" else 0)
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_cat_file_batch_reads_large_unique_blob_once_in_bounded_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate paths share one request while exact bytes are read in bounded chunks."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    content = b"x" * 70_000
+    selected_paths = ("docs/research/a.md", "docs/research/b.md")
+    repo, commit_sha = _make_selected_files_repo(
+        tmp_path,
+        selected_files={source_path: content for source_path in selected_paths},
+    )
+    object_id = _git(repo, "rev-parse", f"{commit_sha}:{selected_paths[0]}")
+    response = f"{object_id} blob {len(content)}\n".encode() + content + b"\n"
+    process = _ControlledBatchProcess(response=response)
+    observed_kwargs = _install_controlled_batch_process(module, monkeypatch, process)
+
+    snapshot, caught_error = _captured_result(
+        lambda: module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+            repo, commit_sha
+        )
+    )
+
+    assert caught_error is None
+    assert snapshot == SourceSnapshot(
+        commit_sha=commit_sha,
+        archive_files=tuple(ArchiveFile(path, content) for path in selected_paths),
+    )
+    assert len(observed_kwargs) == 1
+    assert observed_kwargs[0]["cwd"] == repo
+    assert observed_kwargs[0]["shell"] is False
+    assert observed_kwargs[0]["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+    assert observed_kwargs[0]["stdin"] is subprocess.PIPE
+    assert observed_kwargs[0]["stdout"] is subprocess.PIPE
+    assert process.stdin.writes == [f"{object_id}\n".encode()]
+    assert process.stdout.read_sizes
+    assert max(process.stdout.read_sizes) <= module._ARCHIVE_CHUNK_BYTES
+    assert process.stdin.closed
+    assert process.stdout.closed
+
+
+@pytest.mark.parametrize("io_boundary", ["read", "write", "close"])
+def test_cat_file_batch_io_failure_kills_reaps_and_closes_both_pipes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    io_boundary: str,
+) -> None:
+    """Batch I/O faults are sanitized with kill fallback and deterministic cleanup."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(
+        tmp_path, source_path="docs/research/one.md", content=b"x"
+    )
+    process = _ControlledBatchProcess(
+        response=b"",
+        timeout_once=True,
+        read_error=(
+            ValueError("raw-secret-read") if io_boundary in {"read", "close"} else None
+        ),
+        write_error=(OSError("raw-secret-write") if io_boundary == "write" else None),
+        close_error=(OSError("raw-secret-close") if io_boundary == "close" else None),
+    )
+    _install_controlled_batch_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+            repo, commit_sha
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert "terminate" in process.events
+    assert "wait:1" in process.events
+    assert "kill" in process.events
+    assert process.events.count("wait:None") == 1
+    assert process.poll() == 0
 
 
 class _ControlledStdout:

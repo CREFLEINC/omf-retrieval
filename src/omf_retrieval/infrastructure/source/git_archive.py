@@ -5,6 +5,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -21,6 +22,8 @@ DEFAULT_MAX_TOTAL_BYTES = 128 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 _ARCHIVE_CHUNK_BYTES = 64 * 1024
 _TAR_BLOCK_BYTES = 512
+_MAX_PAX_METADATA_BYTES = 4 * 1024 * 1024
+_GIT_BATCH_HEADER_BYTES = 128
 
 
 class GitArchiveSnapshotError(RuntimeError):
@@ -180,7 +183,7 @@ class GitArchiveSnapshotProvider:
             archive_path,
             max_members=self._max_members,
             max_metadata_bytes=min(
-                self._max_file_bytes,
+                _MAX_PAX_METADATA_BYTES,
                 self._max_archive_bytes,
             ),
         )
@@ -338,18 +341,21 @@ def _verify_archive_provenance(
     if set(archive_by_path) != set(expected_blobs):
         raise GitArchiveSnapshotError("Git archive provenance path mismatch")
 
+    ordered_paths = sorted(expected_blobs)
+    unique_object_ids = tuple(
+        dict.fromkeys(expected_blobs[source_path] for source_path in ordered_paths)
+    )
+    blob_cache = _read_git_blobs_batch(
+        repo=repo,
+        object_ids=unique_object_ids,
+        git_environment=git_environment,
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    )
     total_bytes = 0
-    blob_cache: dict[str, bytes] = {}
-    for source_path, object_id in sorted(expected_blobs.items()):
-        content = blob_cache.get(object_id)
-        if content is None:
-            content = _read_git_blob(
-                repo=repo,
-                object_id=object_id,
-                git_environment=git_environment,
-                max_file_bytes=max_file_bytes,
-            )
-            blob_cache[object_id] = content
+    for source_path in ordered_paths:
+        object_id = expected_blobs[source_path]
+        content = blob_cache[object_id]
         total_bytes += len(content)
         if total_bytes > max_total_bytes:
             raise GitArchiveSnapshotError("Included total byte limit exceeded")
@@ -440,40 +446,99 @@ def _stream_git_nul_records(
             _stop_process(process)
 
 
-def _read_git_blob(
+def _read_git_blobs_batch(
     *,
     repo: Path,
-    object_id: str,
+    object_ids: tuple[str, ...],
     git_environment: dict[str, str],
     max_file_bytes: int,
-) -> bytes:
+    max_total_bytes: int,
+) -> dict[str, bytes]:
+    if not object_ids:
+        return {}
     process: subprocess.Popen[bytes] | None = None
     try:
         process = subprocess.Popen(
-            ["git", "cat-file", "blob", object_id],
+            ["git", "cat-file", "--batch"],
             cwd=repo,
             env=git_environment,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             shell=False,
         )
-        if process.stdout is None:
+        if process.stdin is None or process.stdout is None:
             raise GitArchiveSnapshotError("Git provenance stream is unavailable")
-        content = bytearray()
-        while chunk := process.stdout.read(_ARCHIVE_CHUNK_BYTES):
-            if len(content) + len(chunk) > max_file_bytes:
+        blobs: dict[str, bytes] = {}
+        total_bytes = 0
+        for object_id in object_ids:
+            request = f"{object_id}\n".encode("ascii")
+            if process.stdin.write(request) != len(request):
+                raise GitArchiveSnapshotError("Git provenance request failed")
+            process.stdin.flush()
+            header = _read_git_batch_line(process.stdout)
+            fields = header.removesuffix(b"\n").split(b" ")
+            if (
+                len(fields) != 3
+                or fields[0] != object_id.encode("ascii")
+                or fields[1] != b"blob"
+                or not fields[2].isdigit()
+            ):
+                raise GitArchiveSnapshotError("Git provenance response is malformed")
+            blob_size = int(fields[2])
+            if blob_size > max_file_bytes:
                 raise GitArchiveSnapshotError("Included file byte limit exceeded")
-            content.extend(chunk)
+            total_bytes += blob_size
+            if total_bytes > max_total_bytes:
+                raise GitArchiveSnapshotError("Included total byte limit exceeded")
+            content = _read_git_exact(process.stdout, blob_size)
+            if process.stdout.read(1) != b"\n":
+                raise GitArchiveSnapshotError("Git provenance response is malformed")
+            blobs[object_id] = content
+        process.stdin.close()
+        if process.stdout.read(1):
+            raise GitArchiveSnapshotError("Git provenance response is malformed")
         if process.wait() != 0:
             raise GitArchiveSnapshotError("Git provenance command failed")
-        return bytes(content)
-    except OSError as error:
+        return blobs
+    except (OSError, ValueError) as error:
         raise GitArchiveSnapshotError("Git provenance command failed") from error
     finally:
         if process is not None:
-            if process.stdout is not None:
-                process.stdout.close()
+            _close_git_pipe(process.stdin)
+            _close_git_pipe(process.stdout)
             _stop_process(process)
+
+
+def _read_git_batch_line(batch_output: BinaryIO) -> bytes:
+    line = bytearray()
+    while len(line) <= _GIT_BATCH_HEADER_BYTES:
+        character = batch_output.read(1)
+        if len(character) != 1:
+            raise GitArchiveSnapshotError("Git provenance response is malformed")
+        line.extend(character)
+        if character == b"\n":
+            return bytes(line)
+    raise GitArchiveSnapshotError("Git provenance response is malformed")
+
+
+def _close_git_pipe(pipe: BinaryIO | None) -> None:
+    if pipe is None:
+        return
+    with suppress(OSError, ValueError):
+        pipe.close()
+
+
+def _read_git_exact(batch_output: BinaryIO, size: int) -> bytes:
+    content = bytearray()
+    remaining = size
+    while remaining:
+        chunk = batch_output.read(min(remaining, _ARCHIVE_CHUNK_BYTES))
+        if not chunk:
+            raise GitArchiveSnapshotError("Git provenance response is incomplete")
+        content.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(content)
 
 
 def _validate_tar_structure(
@@ -526,6 +591,10 @@ def _validate_tar_structure(
                 raise GitArchiveSnapshotError("Tar archive member data is truncated")
 
             member_type = header[156:157]
+            if member_type == tarfile.SOLARIS_XHDTYPE:
+                raise GitArchiveSnapshotError(
+                    "Tar archive contains an unsupported extended header"
+                )
             is_local_metadata = member_type in {
                 tarfile.XHDTYPE,
                 tarfile.GNUTYPE_LONGNAME,
