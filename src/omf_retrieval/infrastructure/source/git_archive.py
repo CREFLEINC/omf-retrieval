@@ -25,6 +25,18 @@ _MAX_PAX_METADATA_BYTES = 4 * 1024 * 1024
 _GIT_BATCH_HEADER_BYTES = 128
 
 
+def _isolated_git_environment() -> dict[str, str]:
+    return {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "LC_ALL": "C",
+        "PATH": os.environ.get("PATH", os.defpath),
+    }
+
+
 class GitArchiveSnapshotError(RuntimeError):
     """Raised when a repository or archive cannot produce a safe snapshot."""
 
@@ -62,8 +74,7 @@ class GitArchiveSnapshotProvider:
 
     def snapshot(self, repo: Path, commit_sha: str) -> SourceSnapshot:
         """Return original bytes selected from one Git commit archive."""
-        git_environment = os.environ.copy()
-        git_environment["GIT_OPTIONAL_LOCKS"] = "0"
+        git_environment = _isolated_git_environment()
         try:
             status = subprocess.run(
                 [
@@ -621,6 +632,11 @@ def _validate_tar_structure(
             raw_member_count += 1
             if raw_member_count > max_members:
                 raise GitArchiveSnapshotError("Tar archive member limit exceeded")
+            member_type = header[156:157]
+            if member_type == tarfile.GNUTYPE_LONGLINK:
+                raise GitArchiveSnapshotError(
+                    "Tar archive contains a forbidden GNU long link"
+                )
             member_size = _parse_tar_size(header[124:136])
             if member_size < 0:
                 raise GitArchiveSnapshotError(
@@ -632,7 +648,6 @@ def _validate_tar_structure(
             if offset + padded_size > archive_size:
                 raise GitArchiveSnapshotError("Tar archive member data is truncated")
 
-            member_type = header[156:157]
             if member_type == tarfile.SOLARIS_XHDTYPE:
                 raise GitArchiveSnapshotError(
                     "Tar archive contains an unsupported extended header"
@@ -729,20 +744,13 @@ def _validate_pax_stream(archive_input: BinaryIO, payload_size: int) -> None:
         remaining -= body_size
         if not record.endswith(b"\n") or b"=" not in record:
             raise GitArchiveSnapshotError("Tar PAX record is malformed")
-        key, value = record[:-1].split(b"=", 1)
+        key, _ = record[:-1].split(b"=", 1)
         if key.startswith(b"GNU.sparse."):
             raise GitArchiveSnapshotError(
                 "Tar archive contains forbidden sparse metadata"
             )
         if key == b"size":
-            try:
-                pax_size = int(value)
-            except ValueError as error:
-                raise GitArchiveSnapshotError("Tar PAX size is invalid") from error
-            if pax_size < 0:
-                raise GitArchiveSnapshotError(
-                    "Tar archive contains an invalid declared size"
-                )
+            raise GitArchiveSnapshotError("Tar PAX size override is forbidden")
 
 
 def _read_exact_chunked(archive_input: BinaryIO, size: int) -> bytes:

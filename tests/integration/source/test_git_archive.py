@@ -181,6 +181,13 @@ def _raw_tar_entry(name: str, member_type: bytes, payload: bytes) -> bytes:
     return header + payload + bytes(padding)
 
 
+def _raw_tar_header(name: str, member_type: bytes, declared_size: int) -> bytes:
+    member = tarfile.TarInfo(name)
+    member.type = member_type
+    member.size = declared_size
+    return member.tobuf(format=tarfile.USTAR_FORMAT)
+
+
 def _raw_tar(*entries: bytes) -> bytes:
     return b"".join(entries) + bytes(tarfile.BLOCKSIZE * 2)
 
@@ -485,6 +492,20 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
     """Removing argv, cwd, no-lock env, or shell=False violates source isolation."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
     repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    ambient_git_environment = {
+        "GIT_DIR": str(repo / ".git"),
+        "GIT_WORK_TREE": str(repo),
+        "GIT_OBJECT_DIRECTORY": str(repo / ".git/objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(repo / ".git/objects"),
+        "GIT_COMMON_DIR": str(repo / ".git"),
+        "GIT_INDEX_FILE": str(repo / ".git/index"),
+        "GIT_NAMESPACE": "",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.repositoryformatversion",
+        "GIT_CONFIG_VALUE_0": "0",
+    }
+    for name, value in ambient_git_environment.items():
+        monkeypatch.setenv(name, value)
     real_run = subprocess.run
     real_popen = subprocess.Popen
     observed_calls: list[tuple[list[str], dict[str, Any]]] = []
@@ -534,10 +555,116 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
     assert all(type(argv) is list for argv, _ in all_calls)
     assert all(kwargs["cwd"] == repo for _, kwargs in all_calls)
     assert all(kwargs["shell"] is False for _, kwargs in all_calls)
-    assert all(kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0" for _, kwargs in all_calls)
+    expected_environment = {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "LC_ALL": "C",
+        "PATH": os.environ.get("PATH", os.defpath),
+    }
+    assert all(kwargs["env"] == expected_environment for _, kwargs in all_calls)
     batch_kwargs = observed_process_calls[-1][1]
     assert batch_kwargs["stdin"] is subprocess.PIPE
     assert batch_kwargs["stdout"] is subprocess.PIPE
+
+
+@pytest.mark.parametrize(
+    "ambient_case",
+    [
+        "git-dir",
+        "work-tree",
+        "object-directory",
+        "alternate-object-directories",
+        "common-dir",
+        "index-file",
+        "namespace",
+        "config-tuple",
+    ],
+)
+def test_snapshot_ignores_ambient_git_repository_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ambient_case: str,
+) -> None:
+    """Ambient Git context cannot redirect any command away from the repo argument."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    primary_parent = tmp_path / "primary"
+    decoy_parent = tmp_path / "decoy"
+    primary_parent.mkdir()
+    decoy_parent.mkdir()
+    repo, commit_sha = _make_single_selected_file_repo(
+        primary_parent,
+        source_path="docs/research/source.md",
+        content=b"primary bytes\n",
+    )
+    decoy_repo, _ = _make_single_selected_file_repo(
+        decoy_parent,
+        source_path="docs/research/source.md",
+        content=b"decoy bytes\n",
+    )
+    source_before = (_worktree_state(repo), _index_state(repo))
+    decoy_before = (_worktree_state(decoy_repo), _index_state(decoy_repo))
+    ambient_values = {
+        "git-dir": {"GIT_DIR": str(decoy_repo / ".git")},
+        "work-tree": {"GIT_WORK_TREE": str(decoy_repo)},
+        "object-directory": {"GIT_OBJECT_DIRECTORY": str(decoy_repo / ".git/objects")},
+        "alternate-object-directories": {
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(decoy_repo / ".git/objects")
+        },
+        "common-dir": {"GIT_COMMON_DIR": str(decoy_repo / ".git")},
+        "index-file": {"GIT_INDEX_FILE": str(decoy_repo / ".git/index")},
+        "namespace": {"GIT_NAMESPACE": "decoy"},
+        "config-tuple": {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.worktree",
+            "GIT_CONFIG_VALUE_0": str(decoy_repo),
+        },
+    }
+
+    with monkeypatch.context() as ambient_environment:
+        for name, value in ambient_values[ambient_case].items():
+            ambient_environment.setenv(name, value)
+        snapshot, caught_error = _captured_result(
+            lambda: module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+                repo, commit_sha
+            )
+        )
+
+    assert caught_error is None
+    assert snapshot == SourceSnapshot(
+        commit_sha=commit_sha,
+        archive_files=(ArchiveFile("docs/research/source.md", b"primary bytes\n"),),
+    )
+    assert (_worktree_state(repo), _index_state(repo)) == source_before
+    assert (_worktree_state(decoy_repo), _index_state(decoy_repo)) == decoy_before
+
+
+def test_snapshot_disables_actual_git_replacement_refs(tmp_path: Path) -> None:
+    """A replacement commit cannot change bytes designated by the requested SHA."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_a, commit_b = _make_two_commit_repo(tmp_path)
+    _git(repo, "replace", commit_a, commit_b)
+    before = (_worktree_state(repo), _index_state(repo), _git(repo, "replace", "-l"))
+
+    snapshot = module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+        repo, commit_a
+    )
+
+    assert snapshot == SourceSnapshot(
+        commit_sha=commit_a,
+        archive_files=(
+            ArchiveFile("docs/planning/nested/plan.md", "계획 A\n".encode()),
+            ArchiveFile("docs/research/direct.md", b"A direct\x00bytes\n"),
+            ArchiveFile("uiux/spec.md", b"UI A\n"),
+        ),
+    )
+    assert (
+        _worktree_state(repo),
+        _index_state(repo),
+        _git(repo, "replace", "-l"),
+    ) == before
 
 
 def test_snapshot_rejects_an_actual_git_symlink_member(tmp_path: Path) -> None:
@@ -587,7 +714,7 @@ def test_snapshot_rejects_unsafe_effective_archive_paths(
 ) -> None:
     """Unsafe header and PAX-resolved paths cannot reach profile selection."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     archive_bytes = _tar_bytes(
@@ -608,6 +735,7 @@ def test_snapshot_rejects_unsafe_effective_archive_paths(
         caught_error = error
 
     assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "tar archive validation" in str(caught_error).lower()
     assert "raw-secret-content" not in str(caught_error)
     assert list(temp_parent.iterdir()) == []
 
@@ -618,7 +746,7 @@ def test_snapshot_rejects_canonical_duplicate_archive_paths(
 ) -> None:
     """Two archive headers cannot resolve to the same extraction destination."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     archive_bytes = _tar_bytes(
@@ -642,30 +770,32 @@ def test_snapshot_rejects_canonical_duplicate_archive_paths(
         caught_error = error
 
     assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "duplicate path" in str(caught_error).lower()
     assert list(temp_parent.iterdir()) == []
 
 
 @pytest.mark.parametrize(
-    "member_type",
+    ("member_type", "expected_constraint"),
     [
-        tarfile.SYMTYPE,
-        tarfile.LNKTYPE,
-        tarfile.FIFOTYPE,
-        tarfile.CHRTYPE,
-        tarfile.BLKTYPE,
-        tarfile.CONTTYPE,
-        tarfile.GNUTYPE_SPARSE,
-        b"Z",
+        (tarfile.SYMTYPE, "forbidden member type"),
+        (tarfile.LNKTYPE, "forbidden member type"),
+        (tarfile.FIFOTYPE, "forbidden member type"),
+        (tarfile.CHRTYPE, "forbidden member type"),
+        (tarfile.BLKTYPE, "forbidden member type"),
+        (tarfile.CONTTYPE, "forbidden member type"),
+        (tarfile.GNUTYPE_SPARSE, "sparse metadata"),
+        (b"Z", "forbidden member type"),
     ],
 )
 def test_snapshot_rejects_links_special_and_unknown_members_even_when_excluded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     member_type: bytes,
+    expected_constraint: str,
 ) -> None:
     """Profile exclusion never bypasses global archive member-type validation."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     member = tarfile.TarInfo("outside-profile/danger")
@@ -691,6 +821,7 @@ def test_snapshot_rejects_links_special_and_unknown_members_even_when_excluded(
         caught_error = error
 
     assert type(caught_error) is module.GitArchiveSnapshotError
+    assert expected_constraint in str(caught_error).lower()
     assert list(temp_parent.iterdir()) == []
 
 
@@ -700,7 +831,7 @@ def test_snapshot_rejects_a_negative_declared_size_even_when_excluded(
 ) -> None:
     """A malformed negative file size cannot hide outside the selected profile."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     member = tarfile.TarInfo("outside/negative-size.bin")
@@ -719,6 +850,7 @@ def test_snapshot_rejects_a_negative_declared_size_even_when_excluded(
     )
 
     assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "size" in str(caught_error).lower()
     assert list(temp_parent.iterdir()) == []
 
 
@@ -786,15 +918,19 @@ def test_snapshot_accepts_safe_directories_and_long_unicode_pax_file_bytes(
     assert list(temp_parent.iterdir()) == []
 
 
-@pytest.mark.parametrize("archive_kind", ["corrupt", "truncated"])
+@pytest.mark.parametrize(
+    ("archive_kind", "expected_constraint"),
+    [("corrupt", "terminator"), ("truncated", "truncated")],
+)
 def test_snapshot_fails_closed_on_corrupt_or_truncated_tar(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_kind: str,
+    expected_constraint: str,
 ) -> None:
     """Malformed headers and declared/read truncation become sanitized failures."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     if archive_kind == "corrupt":
@@ -819,6 +955,7 @@ def test_snapshot_fails_closed_on_corrupt_or_truncated_tar(
         caught_error = error
 
     assert type(caught_error) is module.GitArchiveSnapshotError
+    assert expected_constraint in str(caught_error).lower()
     assert "raw-secret-content" not in str(caught_error)
     assert list(temp_parent.iterdir()) == []
 
@@ -1151,6 +1288,86 @@ def test_snapshot_fails_closed_when_git_attributes_transform_selected_blobs(
     assert _git_status(repo) == ""
 
 
+def test_pax_size_override_is_rejected_before_it_can_hide_a_symlink_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PAX size cannot move TarFile onto a header skipped by the raw scanner."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    hidden_symlink_header = _raw_tar_header(
+        "outside/hidden-link",
+        tarfile.SYMTYPE,
+        0,
+    )
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax", tarfile.XHDTYPE, _pax_record("size", "0")),
+        _raw_tar_entry("outside/carrier.bin", tarfile.REGTYPE, hidden_symlink_header),
+    )
+    real_tarfile_open = module.tarfile.open
+    tarfile_parse_started = False
+
+    def recording_tarfile_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal tarfile_parse_started
+        tarfile_parse_started = True
+        return real_tarfile_open(*args, **kwargs)
+
+    monkeypatch.setattr(module.tarfile, "open", recording_tarfile_open)
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "pax size" in str(caught_error).lower()
+    assert not tarfile_parse_started
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_pax_size_override_cannot_hide_a_header_from_the_raw_member_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A logical extra header hidden in raw payload space fails closed."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    hidden_regular_header = _raw_tar_header(
+        "outside/hidden.bin",
+        tarfile.REGTYPE,
+        0,
+    )
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax", tarfile.XHDTYPE, _pax_record("size", "0")),
+        _raw_tar_entry("outside/carrier.bin", tarfile.REGTYPE, hidden_regular_header),
+    )
+
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_members": 2},
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "pax size" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "pax_payload",
     [
@@ -1236,6 +1453,74 @@ def test_solaris_extended_header_is_rejected_before_tarfile_parsing(
 
     assert type(caught_error) is module.GitArchiveSnapshotError
     assert "extended header" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_gnu_long_link_is_rejected_from_its_header_without_payload_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forbidden GNU long-link header cannot trigger payload allocation."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    archive_bytes = _raw_tar(
+        _raw_tar_header(
+            "././@LongLink",
+            tarfile.GNUTYPE_LONGLINK,
+            module.DEFAULT_MAX_ARCHIVE_BYTES,
+        )
+    )
+    real_path_open = module.Path.open
+    observed_reads: list[int] = []
+
+    class HeaderOnlyReader:
+        def __init__(self, wrapped: BinaryIO) -> None:
+            self._wrapped = wrapped
+
+        def __enter__(self) -> "HeaderOnlyReader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._wrapped.close()
+
+        def read(self, size: int = -1) -> bytes:
+            observed_reads.append(size)
+            if size < 0 or size > tarfile.BLOCKSIZE:
+                raise AssertionError("GNU long-link payload read")
+            return self._wrapped.read(size)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            raise AssertionError(f"GNU long-link payload seek: {offset}:{whence}")
+
+    def header_only_path_open(
+        path: Path, mode: str = "r", *args: Any, **kwargs: Any
+    ) -> Any:
+        opened = real_path_open(path, mode, *args, **kwargs)
+        if path.name == "snapshot.tar" and mode == "rb":
+            return HeaderOnlyReader(opened)
+        return opened
+
+    def unexpected_tarfile_parse(*_: Any, **__: Any) -> None:
+        raise AssertionError("GNU long-link header reached tarfile")
+
+    monkeypatch.setattr(module.Path, "open", header_only_path_open)
+    monkeypatch.setattr(module.tarfile, "open", unexpected_tarfile_parse)
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "long link" in str(caught_error).lower()
+    assert observed_reads == [tarfile.BLOCKSIZE]
     assert list(temp_parent.iterdir()) == []
 
 
