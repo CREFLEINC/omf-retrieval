@@ -5,7 +5,12 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
-from omf_retrieval.application.indexing.ports import SourceSnapshot
+from markdown_it import MarkdownIt
+
+from omf_retrieval.application.indexing.ports import (
+    SourceSnapshot,
+    split_physical_lines,
+)
 from omf_retrieval.domain.enums import (
     DecisionState,
     OwnerDomain,
@@ -25,9 +30,6 @@ _VERSION_PATTERN = re.compile(r"v(?P<version>\d+(?:\.\d+)*)")
 _FILENAME_VERSION_PATTERN = re.compile(
     r"(?:^|[-_])v(?P<version>\d+(?:\.\d+)*)(?=$|[-_])"
 )
-_MARKDOWN_TITLE_PATTERN = re.compile(r"^ {0,3}#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
-_FENCE_OPEN_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
-_FENCE_CLOSE_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*$")
 _CONFIRMED_FILENAME_MARKERS = ("확정기록", "결정서")
 _NEGATIVE_CONFIRMED_MARKERS = ("미확정", "불확정", "확정 전")
 _DRAFT_MARKERS = ("초안", "제안안", "가설", "진행메모")
@@ -42,6 +44,7 @@ _RELATION_ENTRY_KEYS = {
     "evidence_line_start",
     "evidence_line_end",
 }
+_MARKDOWN_PARSER = MarkdownIt("commonmark").enable("table")
 
 
 class MetadataExtractionError(ValueError):
@@ -53,8 +56,26 @@ class RelationSidecarValidationError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class _MetadataContext:
+    key_value_lines: tuple[str, ...]
+    table_entries: tuple[tuple[str, str], ...]
+    title: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentRelationSpec:
-    """Represent one explicit relation and its source evidence."""
+    """Represent one explicit relation and its source evidence.
+
+    Attributes:
+        from_source_path: Canonical path of the relation source document.
+        to_source_path: Canonical path of the relation target document.
+        relation_type: Approved semantic relation between the two documents.
+        evidence_source_path: Canonical path containing the cited evidence.
+        evidence_line_range: Positive inclusive physical-line evidence range.
+
+    Raises:
+        RelationSidecarValidationError: If a field violates relation invariants.
+    """
 
     from_source_path: str
     to_source_path: str
@@ -63,7 +84,11 @@ class DocumentRelationSpec:
     evidence_line_range: LineRange
 
     def __post_init__(self) -> None:
-        """Validate immutable canonical relation values."""
+        """Validate immutable canonical relation values.
+
+        Raises:
+            RelationSidecarValidationError: If a field violates the contract.
+        """
         for source_path in (
             self.from_source_path,
             self.to_source_path,
@@ -265,7 +290,7 @@ def _validate_evidence_range(line_range: LineRange, content: bytes) -> None:
             "Relation evidence document must be valid UTF-8"
         )
 
-    physical_line_count = len(source.splitlines(keepends=True))
+    physical_line_count = len(split_physical_lines(source))
     if line_range.line_end > physical_line_count:
         raise RelationSidecarValidationError(
             "Relation evidence range must exist in its source document"
@@ -291,13 +316,13 @@ def extract_metadata(
     _require_exact_inputs(source_path=source_path, first_lines=first_lines)
     path_parts = _canonical_path_parts(source_path)
     top_lines = first_lines[:_TOP_LINE_LIMIT]
-    metadata_lines = _metadata_lines(top_lines)
+    metadata_context = _metadata_context(top_lines)
     filename_stem = path_parts[-1].removesuffix(".md")
-    document_date = _document_date(metadata_lines, filename_stem=filename_stem)
-    version = _document_version(metadata_lines, filename_stem=filename_stem)
+    document_date = _document_date(metadata_context, filename_stem=filename_stem)
+    version = _document_version(metadata_context, filename_stem=filename_stem)
     decision_state = _decision_state(
         filename_stem=filename_stem,
-        lines=metadata_lines,
+        context=metadata_context,
     )
     return DocumentMetadata(
         document_date=document_date,
@@ -335,88 +360,57 @@ def _is_physical_line(line: str) -> bool:
         line_without_ending = line_without_ending[:-1]
         if line_without_ending.endswith("\r"):
             line_without_ending = line_without_ending[:-1]
+    elif line_without_ending.endswith("\r"):
+        line_without_ending = line_without_ending[:-1]
     return "\n" not in line_without_ending and "\r" not in line_without_ending
 
 
-def _metadata_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
-    metadata_lines: list[str] = []
-    fence_character: str | None = None
-    fence_length = 0
-    in_html_comment = False
+def _metadata_context(lines: tuple[str, ...]) -> _MetadataContext:
+    line_contents = tuple(_line_content(line) for line in lines)
+    tokens = _MARKDOWN_PARSER.parse("\n".join(line_contents))
+    key_value_line_indexes: set[int] = set()
+    table_entries: list[tuple[str, str]] = []
+    title: str | None = None
+    inside_top_level_table = False
+    table_cells: list[str] | None = None
 
-    for line in lines:
-        line_content = line.rstrip("\r\n")
-        if fence_character is not None:
-            close_match = _FENCE_CLOSE_PATTERN.fullmatch(line_content)
-            if close_match is not None:
-                closing_fence = close_match.group("fence")
-                if (
-                    closing_fence[0] == fence_character
-                    and len(closing_fence) >= fence_length
-                ):
-                    fence_character = None
-                    fence_length = 0
-            continue
+    for token_index, token in enumerate(tokens):
+        if token.type == "paragraph_open" and token.level == 0 and token.map:
+            key_value_line_indexes.update(range(token.map[0], token.map[1]))
+        elif token.type == "heading_open" and token.level == 0 and title is None:
+            title = tokens[token_index + 1].content
+        elif token.type == "table_open" and token.level == 0:
+            inside_top_level_table = True
+        elif token.type == "table_close" and token.level == 0:
+            inside_top_level_table = False
+        elif inside_top_level_table and token.type == "tr_open":
+            table_cells = []
+        elif (
+            inside_top_level_table
+            and table_cells is not None
+            and token.type == "inline"
+        ):
+            table_cells.append(token.content)
+        elif inside_top_level_table and token.type == "tr_close":
+            if table_cells is not None and len(table_cells) >= 2:
+                table_entries.append((table_cells[0], table_cells[1]))
+            table_cells = None
 
-        if in_html_comment:
-            in_html_comment = _html_comment_remains_open(
-                line_content, already_open=True
-            )
-            continue
-
-        if _is_indented_code_line(line_content):
-            continue
-
-        open_match = _FENCE_OPEN_PATTERN.fullmatch(line_content)
-        if open_match is not None:
-            opening_fence = open_match.group("fence")
-            info = open_match.group("info")
-            if opening_fence[0] == "~" or "`" not in info:
-                fence_character = opening_fence[0]
-                fence_length = len(opening_fence)
-                continue
-
-        if "<!--" in line_content:
-            in_html_comment = _html_comment_remains_open(
-                line_content, already_open=False
-            )
-            continue
-
-        metadata_lines.append(line)
-
-    return tuple(metadata_lines)
+    return _MetadataContext(
+        key_value_lines=tuple(
+            lines[line_index] for line_index in sorted(key_value_line_indexes)
+        ),
+        table_entries=tuple(table_entries),
+        title=title,
+    )
 
 
-def _is_indented_code_line(line: str) -> bool:
-    indentation_columns = 0
-    for character in line:
-        if character == " ":
-            indentation_columns += 1
-        elif character == "\t":
-            indentation_columns += 4 - indentation_columns % 4
-        else:
-            break
-        if indentation_columns >= 4:
-            return True
-    return False
-
-
-def _html_comment_remains_open(line: str, *, already_open: bool) -> bool:
-    cursor = 0
-    if already_open:
-        closing_index = line.find("-->", cursor)
-        if closing_index < 0:
-            return True
-        cursor = closing_index + len("-->")
-
-    while True:
-        opening_index = line.find("<!--", cursor)
-        if opening_index < 0:
-            return False
-        closing_index = line.find("-->", opening_index + len("<!--"))
-        if closing_index < 0:
-            return True
-        cursor = closing_index + len("-->")
+def _line_content(line: str) -> str:
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line.endswith(("\r", "\n")):
+        return line[:-1]
+    return line
 
 
 def _canonical_path_parts(source_path: str) -> tuple[str, ...]:
@@ -445,10 +439,10 @@ def _owner_domain(path_parts: tuple[str, ...]) -> OwnerDomain:
 def _decision_state(
     *,
     filename_stem: str,
-    lines: tuple[str, ...],
+    context: _MetadataContext,
 ) -> DecisionState:
-    confirmed = _confirmed_filename(filename_stem) or _structured_confirmed(lines)
-    draft = _contains_marker(filename_stem, _DRAFT_MARKERS) or _draft_title(lines)
+    confirmed = _confirmed_filename(filename_stem) or _structured_confirmed(context)
+    draft = _contains_marker(filename_stem, _DRAFT_MARKERS) or _draft_title(context)
     if confirmed == draft:
         return DecisionState.UNKNOWN
     return DecisionState.CONFIRMED if confirmed else DecisionState.DRAFT
@@ -460,8 +454,8 @@ def _confirmed_filename(filename_stem: str) -> bool:
     ) and _contains_marker(filename_stem, _CONFIRMED_FILENAME_MARKERS)
 
 
-def _structured_confirmed(lines: tuple[str, ...]) -> bool:
-    for entry_kind, key, value in _structured_entries(lines):
+def _structured_confirmed(context: _MetadataContext) -> bool:
+    for entry_kind, key, value in _structured_entries(context):
         if key in _DECISION_KEYS and value in _CONFIRMED_VALUES:
             return True
         if entry_kind == "table" and key == "신뢰도" and value == "확정":
@@ -469,12 +463,8 @@ def _structured_confirmed(lines: tuple[str, ...]) -> bool:
     return False
 
 
-def _draft_title(lines: tuple[str, ...]) -> bool:
-    for line in lines:
-        title_match = _MARKDOWN_TITLE_PATTERN.fullmatch(line.strip("\r\n"))
-        if title_match is not None:
-            return _contains_marker(title_match.group("title"), _DRAFT_MARKERS)
-    return False
+def _draft_title(context: _MetadataContext) -> bool:
+    return context.title is not None and _contains_marker(context.title, _DRAFT_MARKERS)
 
 
 def _contains_marker(value: str, markers: tuple[str, ...]) -> bool:
@@ -482,11 +472,11 @@ def _contains_marker(value: str, markers: tuple[str, ...]) -> bool:
 
 
 def _document_date(
-    lines: tuple[str, ...],
+    context: _MetadataContext,
     *,
     filename_stem: str,
 ) -> date | None:
-    structured_date = _structured_value(lines, key="작성일")
+    structured_date = _structured_value(context, key="작성일")
     parsed_date = _parse_date(structured_date)
     if parsed_date is not None:
         return parsed_date
@@ -496,11 +486,11 @@ def _document_date(
 
 
 def _document_version(
-    lines: tuple[str, ...],
+    context: _MetadataContext,
     *,
     filename_stem: str,
 ) -> str | None:
-    structured_version = _structured_value(lines, key="버전")
+    structured_version = _structured_value(context, key="버전")
     structured_match = (
         _VERSION_PATTERN.fullmatch(structured_version)
         if structured_version is not None
@@ -522,26 +512,24 @@ def _parse_date(candidate: str | None) -> date | None:
         return None
 
 
-def _structured_value(lines: tuple[str, ...], *, key: str) -> str | None:
-    for _, entry_key, value in _structured_entries(lines):
+def _structured_value(context: _MetadataContext, *, key: str) -> str | None:
+    for _, entry_key, value in _structured_entries(context):
         if entry_key == key:
             return value
     return None
 
 
 def _structured_entries(
-    lines: tuple[str, ...],
+    context: _MetadataContext,
 ) -> tuple[tuple[str, str, str], ...]:
     entries: list[tuple[str, str, str]] = []
-    for line in lines:
-        stripped_line = line.strip()
-        if stripped_line.startswith("|") and stripped_line.endswith("|"):
-            cells = tuple(cell.strip() for cell in stripped_line[1:-1].split("|"))
-            if len(cells) >= 2:
-                entries.append(("table", cells[0], cells[1]))
-            continue
-
+    for line in context.key_value_lines:
+        stripped_line = line.strip(" \t\r\n")
         key, separator, value = stripped_line.partition(":")
         if separator:
-            entries.append(("key_value", key.strip(), value.strip()))
+            entries.append(("key_value", key.strip(" \t"), value.strip(" \t")))
+    entries.extend(
+        ("table", key.strip(" \t"), value.strip(" \t"))
+        for key, value in context.table_entries
+    )
     return tuple(entries)

@@ -129,7 +129,11 @@ def test_invalid_structured_version_uses_explicit_filename_fallback() -> None:
         ),
         (
             "docs/research/leap-day.md",
-            ("| 작성일 | 2024-02-29 |",),
+            (
+                "| 항목 | 값 |",
+                "| --- | --- |",
+                "| 작성일 | 2024-02-29 |",
+            ),
             date(2024, 2, 29),
         ),
         (
@@ -181,7 +185,11 @@ def test_date_reads_physical_line_40_but_not_line_41() -> None:
             ("버전: v2.1.3",),
             "2.1.3",
         ),
-        ("docs/research/table.md", ("| 버전 | v3 |",), "3"),
+        (
+            "docs/research/table.md",
+            ("| 항목 | 값 |", "| --- | --- |", "| 버전 | v3 |"),
+            "3",
+        ),
         (
             "docs/research/fallback-v2.5.md",
             ("버전: version 1",),
@@ -355,8 +363,8 @@ def test_confirmed_filename_markers_are_explicit_signals(source_path: str) -> No
     [
         ("상태: [확정]",),
         ("결정 상태: 확정",),
-        ("| 상태 | [확정] |",),
-        ("| 신뢰도 | 확정 |",),
+        ("| 항목 | 값 |", "| --- | --- |", "| 상태 | [확정] |"),
+        ("| 항목 | 값 |", "| --- | --- |", "| 신뢰도 | 확정 |"),
     ],
 )
 def test_confirmed_structured_markers_are_explicit_signals(
@@ -572,6 +580,47 @@ def test_validation_errors_do_not_echo_rejected_input(
     assert secret not in str(error_info.value)
 
 
+@pytest.mark.parametrize(
+    "separator",
+    ["\u2028", "\x85", "\x0b", "\x0c"],
+    ids=["line-separator", "next-line", "vertical-tab", "form-feed"],
+)
+def test_metadata_does_not_treat_unicode_separators_as_new_physical_lines(
+    separator: str,
+) -> None:
+    """The shared splitter keeps non-CR/LF separators inside one metadata line."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines(f"{separator}상태: 확정")
+
+    assert len(first_lines) == 1
+    assert (
+        extract_metadata("docs/research/operation.md", first_lines).decision_state
+        is DecisionState.UNKNOWN
+    )
+
+
+def test_metadata_accepts_shared_cr_lf_and_crlf_physical_lines() -> None:
+    """Shared physical slices retain all approved Markdown newline forms."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines("작성일: 2024-02-29\r버전: v1.2\r\n상태: 확정\n")
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert first_lines == (
+        "작성일: 2024-02-29\r",
+        "버전: v1.2\r\n",
+        "상태: 확정\n",
+    )
+    assert metadata.document_date == date(2024, 2, 29)
+    assert metadata.version == "1.2"
+    assert metadata.decision_state is DecisionState.CONFIRMED
+
+
 def test_fenced_structured_state_is_not_document_metadata() -> None:
     """A metadata-shaped line inside a fenced block cannot confirm a document."""
     from omf_retrieval.application.indexing.metadata import extract_metadata
@@ -583,6 +632,128 @@ def test_fenced_structured_state_is_not_document_metadata() -> None:
     )
 
     assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+def test_raw_html_pre_block_is_not_document_metadata() -> None:
+    """Metadata-shaped raw HTML block content cannot describe the document."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines(
+        "<pre>\n작성일: 2024-02-29\n버전: v9.1\n상태: 확정\n# 운영 정책 초안\n</pre>\n"
+    )
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.document_date is None
+    assert metadata.version is None
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+def test_standalone_pipe_paragraph_is_not_a_reliability_table() -> None:
+    """A pipe-shaped paragraph without a delimiter cannot confirm a document."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines("| 신뢰도 | 확정 |\n")
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("signal", "attribute", "expected"),
+    [
+        ("작성일: 2024-02-29", "document_date", None),
+        ("버전: v9.1", "version", None),
+        ("상태: 확정", "decision_state", "unknown"),
+        ("# 운영 정책 초안", "decision_state", "unknown"),
+    ],
+)
+def test_raw_html_blocks_hide_each_metadata_signal(
+    signal: str,
+    attribute: str,
+    expected: object,
+) -> None:
+    """Raw HTML block contents cannot supply any document metadata field."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+
+    first_lines = split_physical_lines(f"<div>\n{signal}\n</div>\n\n")
+
+    actual = getattr(
+        extract_metadata("docs/research/operation.md", first_lines), attribute
+    )
+
+    assert getattr(actual, "value", actual) == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("신뢰도", "확정"),
+        ("상태", "[확정]"),
+        ("작성일", "2024-02-29"),
+        ("버전", "v9.1"),
+    ],
+)
+def test_pipe_shaped_paragraphs_do_not_supply_structured_metadata(
+    key: str,
+    value: str,
+) -> None:
+    """Pipe syntax without a table delimiter remains an ordinary paragraph."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    metadata = extract_metadata(
+        "docs/research/operation.md",
+        split_physical_lines(f"| {key} | {value} |\n"),
+    )
+
+    assert metadata.document_date is None
+    assert metadata.version is None
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+def test_actual_markdown_table_supplies_all_approved_structured_metadata() -> None:
+    """A delimiter-backed top-level table retains all approved explicit fields."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines(
+        "| 항목 | 값 |\n"
+        "| --- | --- |\n"
+        "| 작성일 | 2024-02-29 |\n"
+        "| 버전 | v9.1 |\n"
+        "| 신뢰도 | 확정 |\n"
+    )
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.document_date == date(2024, 2, 29)
+    assert metadata.version == "9.1"
+    assert metadata.decision_state is DecisionState.CONFIRMED
+
+
+def test_actual_markdown_state_table_remains_an_explicit_confirmed_signal() -> None:
+    """A delimiter-backed state row remains a confirmed metadata signal."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines(
+        "| 항목 | 값 |\n| --- | --- |\n| 상태 | [확정] |\n"
+    )
+
+    assert (
+        extract_metadata("docs/research/operation.md", first_lines).decision_state
+        is DecisionState.CONFIRMED
+    )
 
 
 @pytest.mark.parametrize(
@@ -1170,6 +1341,34 @@ def test_evidence_range_uses_physical_markdown_lines(
         line_start=line_start,
         line_end=line_end,
     )
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\u2028", "\x85", "\x0b", "\x0c"],
+    ids=["line-separator", "next-line", "vertical-tab", "form-feed"],
+)
+def test_relation_evidence_does_not_treat_unicode_separators_as_physical_lines(
+    separator: str,
+) -> None:
+    """Only CR and LF create a second Markdown evidence line."""
+    from omf_retrieval.application.indexing.metadata import (
+        RelationSidecarValidationError,
+        parse_relation_sidecar,
+    )
+
+    evidence = f"one{separator}two".encode()
+
+    with pytest.raises(RelationSidecarValidationError):
+        parse_relation_sidecar(
+            _relation_payload(
+                _valid_relation_entry(
+                    evidence_line_start=2,
+                    evidence_line_end=2,
+                )
+            ),
+            _relation_snapshot_with_evidence(evidence),
+        )
 
 
 @pytest.mark.parametrize(
