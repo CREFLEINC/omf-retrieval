@@ -15,6 +15,7 @@ from database_test_utils import (
     DEFAULT_TEST_DATABASE_URL,
     assert_safe_test_connection,
     create_test_engine,
+    validate_test_database_url,
 )
 from schema_expectations import (
     EXPECTED_CHECK_CONSTRAINTS,
@@ -350,6 +351,77 @@ def test_query_target_override_is_rejected_before_engine_creation(
         create_test_engine()
 
     engine_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    [
+        "host=",
+        "unknown_target=",
+        "h%6fst=",
+        "host=&host=",
+        "application_name=safe&host=",
+    ],
+)
+def test_blank_raw_query_key_is_rejected_before_engine_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_query: str,
+) -> None:
+    """Reject decoded unsafe raw keys even when SQLAlchemy drops blank values."""
+    monkeypatch.setenv(
+        TEST_DATABASE_ENV,
+        f"{DEFAULT_TEST_DATABASE_URL}?{raw_query}",
+    )
+    engine_constructor = Mock()
+    monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
+
+    with pytest.raises(ValueError, match="Unsafe test database URL query"):
+        create_test_engine()
+
+    engine_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "expected_application_name"),
+    [
+        ("application_name=", None),
+        ("application_name=safe", "safe"),
+        ("application%5Fname=safe%2Dencoded", "safe-encoded"),
+        ("application_name=first&application_name=second", ("first", "second")),
+    ],
+)
+def test_allowed_application_name_query_preserves_safe_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_query: str,
+    expected_application_name: str | tuple[str, str] | None,
+) -> None:
+    """Allow only application metadata while preserving the approved endpoint."""
+    monkeypatch.setenv(
+        TEST_DATABASE_ENV,
+        f"{DEFAULT_TEST_DATABASE_URL}?{raw_query}",
+    )
+    engine = create_test_engine()
+
+    try:
+        positional_arguments, keyword_arguments = engine.dialect.create_connect_args(
+            engine.url
+        )
+        assert not positional_arguments
+        assert engine.url.query.get("application_name") == expected_application_name
+        assert keyword_arguments["host"] == "127.0.0.1"
+        assert keyword_arguments["port"] == 55432
+        assert keyword_arguments["user"] == "omf_retrieval_test"
+        assert keyword_arguments["dbname"] == "omf_retrieval_test"
+    finally:
+        engine.dispose()
+
+
+def test_sqlalchemy_url_object_query_allowlist_is_preserved() -> None:
+    """Continue validating query entries supplied through a URL object."""
+    unsafe_url = make_url(DEFAULT_TEST_DATABASE_URL).update_query_dict({"host": ""})
+
+    with pytest.raises(ValueError, match="Unsafe test database URL query"):
+        validate_test_database_url(unsafe_url)
 
 
 @pytest.mark.parametrize(

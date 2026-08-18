@@ -1,6 +1,8 @@
 """Connection utilities shared by PostgreSQL integration tests."""
 
 import os
+from collections.abc import Iterable
+from urllib.parse import parse_qsl, urlsplit
 
 from sqlalchemy import URL, Connection, Engine, create_engine, make_url, text
 
@@ -15,6 +17,11 @@ SAFE_TEST_DATABASE_PORT = 55432
 SAFE_TEST_DATABASE_USER = "omf_retrieval_test"
 SAFE_TEST_DATABASE_PREFIX = "omf_retrieval_test"
 ALLOWED_TEST_DATABASE_QUERY_KEYS = frozenset({"application_name"})
+
+
+def _validate_query_keys(query_keys: Iterable[str]) -> None:
+    if set(query_keys) - ALLOWED_TEST_DATABASE_QUERY_KEYS:
+        raise ValueError("Unsafe test database URL query option")
 
 
 def _database_name_is_safe(database_name: object) -> bool:
@@ -42,10 +49,13 @@ def _validate_effective_connect_arguments(parsed_url: URL) -> None:
 
 def validate_test_database_url(database_url: str | URL) -> URL:
     """Validate that a URL can only target the isolated local test database."""
+    if isinstance(database_url, str):
+        raw_query = urlsplit(database_url).query
+        _validate_query_keys(
+            key for key, _value in parse_qsl(raw_query, keep_blank_values=True)
+        )
     parsed_url = make_url(database_url)
-    unsupported_query_keys = set(parsed_url.query) - ALLOWED_TEST_DATABASE_QUERY_KEYS
-    if unsupported_query_keys:
-        raise ValueError("Unsafe test database URL query option")
+    _validate_query_keys(parsed_url.query)
     if (
         parsed_url.host != SAFE_TEST_DATABASE_HOST
         or parsed_url.port != SAFE_TEST_DATABASE_PORT
