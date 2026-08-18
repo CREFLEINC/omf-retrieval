@@ -1,0 +1,19 @@
+{
+  "source_key": "omf",
+  "include_patterns": [
+    "docs/research/**/*.md",
+    "docs/planning/**/*.md",
+    "uiux/**/*.md"
+  ],
+  "exclude_patterns": [
+    "docs/raw/**",
+    "docs/_workspace/**",
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    "**/.agents/**",
+    "**/.claude/**",
+    "**/_workspace/**",
+    "**/.omc/**",
+    "**/crefle-doc/**"
+  ]
+}
