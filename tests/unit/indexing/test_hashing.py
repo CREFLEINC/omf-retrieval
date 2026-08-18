@@ -86,6 +86,15 @@ def test_chunk_hash_includes_all_approved_coordinates() -> None:
         heading_path=("Design", "Indexing"),
         line_start=10,
         line_end=13,
+        raw_text="원문\n",
+        search_text="원문",
+    )
+    assert baseline != chunk_hash(
+        parser_version="markdown-v1",
+        chunk_config_hash="config-abc",
+        heading_path=("Design", "Indexing"),
+        line_start=10,
+        line_end=12,
         raw_text="변경 원문\n",
         search_text="원문",
     )
