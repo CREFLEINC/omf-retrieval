@@ -665,6 +665,33 @@ def test_standalone_pipe_paragraph_is_not_a_reliability_table() -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("작성일", "2024-02-29"),
+        ("버전", "v9.1"),
+        ("상태", "[확정]"),
+        ("신뢰도", "확정"),
+    ],
+)
+def test_actual_table_header_is_not_a_metadata_entry(
+    key: str,
+    value: str,
+) -> None:
+    """Table column names cannot supply metadata without a body row."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    first_lines = split_physical_lines(f"| {key} | {value} |\n| --- | --- |\n")
+
+    metadata = extract_metadata("docs/research/operation.md", first_lines)
+
+    assert metadata.document_date is None
+    assert metadata.version is None
+    assert metadata.decision_state is DecisionState.UNKNOWN
+
+
+@pytest.mark.parametrize(
     ("signal", "attribute", "expected"),
     [
         ("작성일: 2024-02-29", "document_date", None),
@@ -756,6 +783,28 @@ def test_actual_markdown_state_table_remains_an_explicit_confirmed_signal() -> N
     )
 
 
+def test_table_body_reads_physical_line_40_but_not_line_41() -> None:
+    """The metadata limit applies to the original physical table-body line."""
+    from omf_retrieval.application.indexing.metadata import extract_metadata
+    from omf_retrieval.application.indexing.ports import split_physical_lines
+    from omf_retrieval.domain.enums import DecisionState
+
+    table = "| 항목 | 값 |\n| --- | --- |\n| 신뢰도 | 확정 |"
+    line_40 = split_physical_lines("\n" * 37 + table)
+    line_41 = split_physical_lines("\n" * 38 + table)
+
+    assert len(line_40) == 40
+    assert len(line_41) == 41
+    assert (
+        extract_metadata("docs/research/line-40.md", line_40).decision_state
+        is DecisionState.CONFIRMED
+    )
+    assert (
+        extract_metadata("docs/research/line-41.md", line_41).decision_state
+        is DecisionState.UNKNOWN
+    )
+
+
 @pytest.mark.parametrize(
     "first_lines",
     [
@@ -791,6 +840,11 @@ def test_actual_markdown_state_table_remains_an_explicit_confirmed_signal() -> N
             "> 작성일: 2024-02-29",
             "> 버전: v9.1",
             "> 상태: 확정",
+        ),
+        (
+            "- 작성일: 2024-02-29",
+            "- 버전: v9.1",
+            "- 상태: 확정",
         ),
         (
             "`작성일: 2024-02-29`",

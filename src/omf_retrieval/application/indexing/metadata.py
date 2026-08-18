@@ -371,7 +371,7 @@ def _metadata_context(lines: tuple[str, ...]) -> _MetadataContext:
     key_value_line_indexes: set[int] = set()
     table_entries: list[tuple[str, str]] = []
     title: str | None = None
-    inside_top_level_table = False
+    inside_top_level_table_body = False
     table_cells: list[str] | None = None
 
     for token_index, token in enumerate(tokens):
@@ -379,19 +379,26 @@ def _metadata_context(lines: tuple[str, ...]) -> _MetadataContext:
             key_value_line_indexes.update(range(token.map[0], token.map[1]))
         elif token.type == "heading_open" and token.level == 0 and title is None:
             title = tokens[token_index + 1].content
-        elif token.type == "table_open" and token.level == 0:
-            inside_top_level_table = True
-        elif token.type == "table_close" and token.level == 0:
-            inside_top_level_table = False
-        elif inside_top_level_table and token.type == "tr_open":
+        elif token.type == "tbody_open" and token.level == 1:
+            inside_top_level_table_body = True
+        elif token.type == "tbody_close" and token.level == 1:
+            inside_top_level_table_body = False
+        elif (
+            inside_top_level_table_body and token.type == "tr_open" and token.level == 2
+        ):
             table_cells = []
         elif (
-            inside_top_level_table
+            inside_top_level_table_body
             and table_cells is not None
             and token.type == "inline"
+            and token.level == 4
         ):
             table_cells.append(token.content)
-        elif inside_top_level_table and token.type == "tr_close":
+        elif (
+            inside_top_level_table_body
+            and token.type == "tr_close"
+            and token.level == 2
+        ):
             if table_cells is not None and len(table_cells) >= 2:
                 table_entries.append((table_cells[0], table_cells[1]))
             table_cells = None
