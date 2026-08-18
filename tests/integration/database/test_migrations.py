@@ -1,18 +1,20 @@
 """Integration tests for the PostgreSQL migration lifecycle."""
 
+import os
 from collections.abc import Iterator
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, create_engine, make_url, text
 
 TEST_DATABASE_URL = (
     "postgresql+psycopg://omf_retrieval_test:omf_retrieval_test@"
     "127.0.0.1:55432/omf_retrieval_test"
 )
 REQUIRED_EXTENSIONS = {"pg_trgm", "vector"}
+OVERRIDE_DATABASE_URL = f"{TEST_DATABASE_URL}?application_name=override-fixture"
 
 
 def _installed_extensions(connection: Connection) -> set[str]:
@@ -29,7 +31,8 @@ def _installed_extensions(connection: Connection) -> set[str]:
 @pytest.fixture
 def database_connection() -> Iterator[Connection]:
     """Yield a live connection to the isolated integration-test database."""
-    engine = create_engine(TEST_DATABASE_URL)
+    database_url = os.getenv("OMF_RETRIEVAL_DATABASE_URL", TEST_DATABASE_URL)
+    engine = create_engine(database_url)
     with engine.connect() as connection:
         yield connection
     engine.dispose()
@@ -39,6 +42,20 @@ def database_connection() -> Iterator[Connection]:
 def alembic_config() -> Config:
     """Return the repository Alembic configuration."""
     return Config("alembic.ini")
+
+
+def test_database_connection_prefers_environment_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The integration fixture follows the Alembic database URL override."""
+    monkeypatch.setenv("OMF_RETRIEVAL_DATABASE_URL", OVERRIDE_DATABASE_URL)
+    connection_iterator = database_connection.__wrapped__()
+    connection = next(connection_iterator)
+
+    try:
+        assert connection.engine.url == make_url(OVERRIDE_DATABASE_URL)
+    finally:
+        connection_iterator.close()
 
 
 def test_required_extensions_are_installed(database_connection: Connection) -> None:
