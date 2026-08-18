@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable
 
 import pytest
 
@@ -132,10 +132,14 @@ def _captured_result(
         return None, error
 
 
-def _tar_bytes(members: list[tuple[tarfile.TarInfo, bytes | None]]) -> bytes:
+def _tar_bytes(
+    members: list[tuple[tarfile.TarInfo, bytes | None]],
+    *,
+    archive_format: int = tarfile.PAX_FORMAT,
+) -> bytes:
     archive_buffer = io.BytesIO()
     with tarfile.open(
-        fileobj=archive_buffer, mode="w", format=tarfile.PAX_FORMAT
+        fileobj=archive_buffer, mode="w", format=archive_format
     ) as archive:
         for member, content in members:
             if content is not None:
@@ -156,6 +160,57 @@ def _regular_member(
     if pax_path is not None:
         member.pax_headers = {"path": pax_path}
     return member, content
+
+
+def _pax_record(key: str, value: str) -> bytes:
+    body = f"{key}={value}\n".encode()
+    record_size = len(body) + 2
+    while True:
+        encoded = f"{record_size} ".encode() + body
+        if len(encoded) == record_size:
+            return encoded
+        record_size = len(encoded)
+
+
+def _raw_tar_entry(name: str, member_type: bytes, payload: bytes) -> bytes:
+    member = tarfile.TarInfo(name)
+    member.type = member_type
+    member.size = len(payload)
+    header = member.tobuf(format=tarfile.USTAR_FORMAT)
+    padding = (-len(payload)) % tarfile.BLOCKSIZE
+    return header + payload + bytes(padding)
+
+
+def _raw_tar(*entries: bytes) -> bytes:
+    return b"".join(entries) + bytes(tarfile.BLOCKSIZE * 2)
+
+
+def _make_single_selected_file_repo(
+    tmp_path: Path,
+    *,
+    source_path: str | None,
+    content: bytes = b"selected\n",
+) -> tuple[Path, str]:
+    selected_files = {} if source_path is None else {source_path: content}
+    return _make_selected_files_repo(tmp_path, selected_files=selected_files)
+
+
+def _make_selected_files_repo(
+    tmp_path: Path,
+    *,
+    selected_files: dict[str, bytes],
+) -> tuple[Path, str]:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Task 4B Test")
+    _git(repo, "config", "user.email", "task4b@example.invalid")
+    if not selected_files:
+        _write(repo, ".gitkeep", b"")
+    else:
+        for source_path, content in selected_files.items():
+            _write(repo, source_path, content)
+    return repo, _commit_all(repo, "fixture")
 
 
 def _crafted_archive_snapshot(
@@ -430,6 +485,14 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
     """Removing argv, cwd, no-lock env, or shell=False violates source isolation."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
     repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    selected_object_ids = [
+        _git(repo, "rev-parse", f"{commit_a}:{source_path}")
+        for source_path in (
+            "docs/planning/nested/plan.md",
+            "docs/research/direct.md",
+            "uiux/spec.md",
+        )
+    ]
     real_run = subprocess.run
     real_popen = subprocess.Popen
     observed_calls: list[tuple[list[str], dict[str, Any]]] = []
@@ -442,7 +505,7 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
         return real_run(argv, **kwargs)
 
     def recording_popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
-        if argv[:2] == ["git", "archive"]:
+        if argv[1] in {"archive", "ls-tree", "cat-file"}:
             observed_process_calls.append((argv, kwargs.copy()))
         return real_popen(argv, **kwargs)
 
@@ -471,7 +534,9 @@ def test_git_commands_use_exact_shell_free_read_only_boundaries(
         ],
     ]
     assert [call[0] for call in observed_process_calls] == [
-        ["git", "archive", "--format=tar", commit_a]
+        ["git", "archive", "--format=tar", commit_a],
+        ["git", "ls-tree", "-r", "-z", "--full-tree", commit_a],
+        *[["git", "cat-file", "blob", object_id] for object_id in selected_object_ids],
     ]
     all_calls = [*observed_calls, *observed_process_calls]
     assert all(type(argv) is list for argv, _ in all_calls)
@@ -691,13 +756,15 @@ def test_snapshot_accepts_safe_directories_and_long_unicode_pax_file_bytes(
 ) -> None:
     """Safe PAX paths retain exact bytes through real validation and extraction."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
-    temp_parent = tmp_path / "provider-temporary"
-    temp_parent.mkdir()
     long_path = "docs/research/" + ("긴경로" * 35) + "/문서.md"
     directory = tarfile.TarInfo("docs/research/safe/")
     directory.type = tarfile.DIRTYPE
     content = "원본 bytes\x00보존\n".encode()
+    repo, commit_a = _make_single_selected_file_repo(
+        tmp_path, source_path=long_path, content=content
+    )
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
     archive_bytes = _tar_bytes(
         [
             (directory, None),
@@ -797,7 +864,7 @@ def test_archive_member_count_allows_exact_limit_and_rejects_one_over(
 ) -> None:
     """Every included or excluded tar member consumes the global member budget."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     exact_archive = _tar_bytes(
@@ -851,10 +918,12 @@ def test_included_file_allows_exact_limit_and_rejects_one_over(
 ) -> None:
     """An included regular file cannot exceed its individual byte budget."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    exact_content = b"1234"
+    repo, commit_a = _make_single_selected_file_repo(
+        tmp_path, source_path="docs/research/exact.md", content=exact_content
+    )
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
-    exact_content = b"1234"
     exact_archive = _tar_bytes(
         [_regular_member("docs/research/exact.md", exact_content)]
     )
@@ -899,7 +968,13 @@ def test_included_total_allows_exact_limit_and_rejects_one_over(
 ) -> None:
     """The sum of included file bytes cannot exceed the snapshot byte budget."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_selected_files_repo(
+        tmp_path,
+        selected_files={
+            "docs/research/a.md": b"12",
+            "docs/research/b.md": b"34",
+        },
+    )
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     exact_archive = _tar_bytes(
@@ -952,7 +1027,7 @@ def test_excluded_large_file_does_not_consume_included_byte_limits(
 ) -> None:
     """Only selected regular files consume per-file and included-total budgets."""
     module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
-    repo, commit_a, _ = _make_two_commit_repo(tmp_path)
+    repo, commit_a = _make_single_selected_file_repo(tmp_path, source_path=None)
     temp_parent = tmp_path / "provider-temporary"
     temp_parent.mkdir()
     archive_bytes = _tar_bytes([_regular_member("outside/large.bin", b"x" * 32)])
@@ -1044,3 +1119,517 @@ def test_git_archive_process_failure_is_sanitized_and_cleans_temp(
     assert type(caught_error) is module.GitArchiveSnapshotError
     assert "raw-secret" not in str(caught_error)
     assert list(temp_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "source_content"),
+    [
+        ("export-subst", b"commit=$Format:%H$\n"),
+        ("export-ignore", b"must remain selected\n"),
+    ],
+)
+def test_snapshot_fails_closed_when_git_attributes_transform_selected_blobs(
+    tmp_path: Path,
+    attribute: str,
+    source_content: bytes,
+) -> None:
+    """Archive export attributes cannot alter or omit selected commit blobs."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Task 4B Test")
+    _git(repo, "config", "user.email", "task4b@example.invalid")
+    _write(repo, ".gitattributes", f"docs/research/source.md {attribute}\n".encode())
+    _write(repo, "docs/research/source.md", source_content)
+    commit_sha = _commit_all(repo, attribute)
+
+    caught_error = _caught_exception(
+        lambda: module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+            repo, commit_sha
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "provenance" in str(caught_error).lower()
+    assert source_content.decode().strip() not in str(caught_error)
+    assert _git_status(repo) == ""
+
+
+@pytest.mark.parametrize(
+    "pax_payload",
+    [
+        _pax_record("GNU.sparse.size", "1")
+        + _pax_record("GNU.sparse.offset", "0")
+        + _pax_record("GNU.sparse.numbytes", "1"),
+        _pax_record("GNU.sparse.map", "0,1"),
+        _pax_record("GNU.sparse.major", "1")
+        + _pax_record("GNU.sparse.minor", "0")
+        + _pax_record("GNU.sparse.realsize", "1"),
+    ],
+    ids=("gnu-sparse-0.0", "gnu-sparse-0.1", "gnu-sparse-1.0"),
+)
+@pytest.mark.parametrize("pax_type", [tarfile.XHDTYPE, tarfile.XGLTYPE])
+def test_sparse_pax_metadata_is_rejected_before_tarfile_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pax_payload: bytes,
+    pax_type: bytes,
+) -> None:
+    """Local and inherited GNU sparse forms cannot masquerade as regular files."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax", pax_type, pax_payload),
+        _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+    )
+
+    def unexpected_tarfile_parse(*_: Any, **__: Any) -> None:
+        raise AssertionError("sparse metadata reached tarfile")
+
+    monkeypatch.setattr(module.tarfile, "open", unexpected_tarfile_parse)
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "sparse" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
+def _metadata_archive(kind: str) -> bytes:
+    if kind == "local-pax":
+        return _tar_bytes(
+            [_regular_member("placeholder", b"x", pax_path="outside/" + "가" * 60)],
+        )
+    if kind == "global-pax":
+        return _raw_tar(
+            _raw_tar_entry(
+                "pax_global_header",
+                tarfile.XGLTYPE,
+                _pax_record("comment", "safe Git archive comment"),
+            ),
+            _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+        )
+    long_name = "outside/" + "a" * 180
+    return _tar_bytes(
+        [_regular_member(long_name, b"x")], archive_format=tarfile.GNU_FORMAT
+    )
+
+
+@pytest.mark.parametrize("metadata_kind", ["local-pax", "global-pax", "gnu-longname"])
+def test_raw_metadata_headers_consume_member_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_kind: str,
+) -> None:
+    """Every non-zero raw header counts, including metadata hidden by TarFile."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    archive_bytes = _metadata_archive(metadata_kind)
+
+    exact_snapshot, exact_error = _captured_result(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_members": 2},
+        )
+    )
+    one_over_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_members": 1},
+        )
+    )
+
+    assert exact_error is None
+    assert isinstance(exact_snapshot, SourceSnapshot)
+    assert exact_snapshot.archive_files == ()
+    assert type(one_over_error) is module.GitArchiveSnapshotError
+    assert "member limit" in str(one_over_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("malformation", ["checksum", "orphan-local-pax"])
+def test_raw_tar_structure_is_validated_before_tarfile_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformation: str,
+) -> None:
+    """Checksums and metadata sequencing are fail-closed at the raw boundary."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    if malformation == "checksum":
+        damaged = bytearray(
+            _raw_tar(_raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"))
+        )
+        damaged[0] ^= 1
+        archive_bytes = bytes(damaged)
+    else:
+        archive_bytes = _raw_tar(
+            _raw_tar_entry(
+                "pax", tarfile.XHDTYPE, _pax_record("path", "outside/plain.bin")
+            )
+        )
+
+    def unexpected_tarfile_parse(*_: Any, **__: Any) -> None:
+        raise AssertionError("invalid raw tar reached tarfile")
+
+    monkeypatch.setattr(module.tarfile, "open", unexpected_tarfile_parse)
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_pax_payload_reads_are_chunked_and_metadata_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attacker-declared PAX body is never allocated with one large read."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    payload = _pax_record("comment", "x" * 70_000)
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax_global_header", tarfile.XGLTYPE, payload),
+        _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+    )
+    real_path_open = module.Path.open
+    observed_reads: list[int] = []
+
+    class LimitedReader:
+        def __init__(self, wrapped: BinaryIO) -> None:
+            self._wrapped = wrapped
+
+        def __enter__(self) -> "LimitedReader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._wrapped.close()
+
+        def read(self, size: int = -1) -> bytes:
+            observed_reads.append(size)
+            if size < 0 or size > module._ARCHIVE_CHUNK_BYTES:
+                raise ValueError("oversized archive read")
+            return self._wrapped.read(size)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return self._wrapped.seek(offset, whence)
+
+    def bounded_path_open(
+        path: Path, mode: str = "r", *args: Any, **kwargs: Any
+    ) -> Any:
+        opened = real_path_open(path, mode, *args, **kwargs)
+        if path.name == "snapshot.tar" and mode == "rb":
+            return LimitedReader(opened)
+        return opened
+
+    monkeypatch.setattr(module.Path, "open", bounded_path_open)
+    snapshot, caught_error = _captured_result(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_file_bytes": 128 * 1024},
+        )
+    )
+
+    assert caught_error is None
+    assert isinstance(snapshot, SourceSnapshot)
+    assert observed_reads
+    assert max(observed_reads) <= module._ARCHIVE_CHUNK_BYTES
+    assert list(temp_parent.iterdir()) == []
+
+
+def test_pax_metadata_cap_is_derived_from_approved_file_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PAX allocation inherits an approved resource bound, not a new setting."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(tmp_path, source_path=None)
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    payload = _pax_record("comment", "x" * 2_000)
+    archive_bytes = _raw_tar(
+        _raw_tar_entry("pax_global_header", tarfile.XGLTYPE, payload),
+        _raw_tar_entry("outside/plain.bin", tarfile.REGTYPE, b"x"),
+    )
+
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=archive_bytes,
+            temp_parent=temp_parent,
+            provider_options={"max_file_bytes": 1_024},
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "metadata limit" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "reverse_order", [False, True], ids=("parent-first", "child-first")
+)
+@pytest.mark.parametrize(
+    ("selected_path", "selected_content", "conflicting_path", "conflicting_content"),
+    [
+        ("docs/research/child.md", b"child\n", "docs", b"excluded-parent"),
+        (
+            "docs/research/parent.md",
+            b"parent\n",
+            "docs/research/parent.md/excluded.bin",
+            b"excluded-child",
+        ),
+    ],
+    ids=("excluded-file-ancestor", "excluded-file-descendant"),
+)
+def test_regular_file_tree_conflicts_are_rejected_globally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selected_path: str,
+    selected_content: bytes,
+    conflicting_path: str,
+    conflicting_content: bytes,
+    reverse_order: bool,
+) -> None:
+    """Profile exclusion and archive order cannot hide impossible file trees."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(
+        tmp_path, source_path=selected_path, content=selected_content
+    )
+    temp_parent = tmp_path / "provider-temporary"
+    temp_parent.mkdir()
+    members = [
+        _regular_member(selected_path, selected_content),
+        _regular_member(conflicting_path, conflicting_content),
+    ]
+    if reverse_order:
+        members.reverse()
+
+    caught_error = _caught_exception(
+        lambda: _crafted_archive_snapshot(
+            module=module,
+            monkeypatch=monkeypatch,
+            repo=repo,
+            commit_sha=commit_sha,
+            archive_bytes=_tar_bytes(members),
+            temp_parent=temp_parent,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "tree conflict" in str(caught_error).lower()
+    assert list(temp_parent.iterdir()) == []
+
+
+class _ControlledStdout:
+    def __init__(
+        self,
+        events: list[str],
+        chunks: list[bytes] | None = None,
+        read_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._chunks = list(chunks or [])
+        self._read_error = read_error
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        self._events.append(f"read:{size}")
+        if self._read_error is not None:
+            raise self._read_error
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def close(self) -> None:
+        self.closed = True
+        self._events.append("stdout-close")
+
+
+class _ControlledProcess:
+    def __init__(
+        self,
+        events: list[str],
+        stdout: _ControlledStdout,
+        *,
+        return_code: int = 0,
+        timeout_once: bool = False,
+    ) -> None:
+        self._events = events
+        self.stdout = stdout
+        self._return_code = return_code
+        self._timeout_once = timeout_once
+        self._reaped = False
+
+    def poll(self) -> int | None:
+        self._events.append("poll")
+        return self._return_code if self._reaped else None
+
+    def terminate(self) -> None:
+        self._events.append("terminate")
+
+    def kill(self) -> None:
+        self._events.append("kill")
+
+    def wait(self, timeout: int | None = None) -> int:
+        self._events.append(f"wait:{timeout}")
+        if timeout is not None and self._timeout_once:
+            self._timeout_once = False
+            raise subprocess.TimeoutExpired(["git", "archive"], timeout)
+        self._reaped = True
+        return self._return_code
+
+
+def _call_controlled_archive_writer(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process: _ControlledProcess,
+    archive_output: BinaryIO,
+    *,
+    max_archive_bytes: int,
+) -> Exception | None:
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    return _caught_exception(
+        lambda: module._write_git_archive(
+            repo=Path("/not-read"),
+            commit_sha="0" * 40,
+            archive_output=archive_output,
+            git_environment={},
+            max_archive_bytes=max_archive_bytes,
+        )
+    )
+
+
+def test_raw_limit_terminates_kills_and_reaps_controlled_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stuck archive process is killed, finally reaped, and its pipe is closed."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _ControlledStdout(events, chunks=[b"over"])
+    process = _ControlledProcess(events, stdout, timeout_once=True)
+
+    caught_error = _call_controlled_archive_writer(
+        module,
+        monkeypatch,
+        process,
+        io.BytesIO(),
+        max_archive_bytes=3,
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "limit" in str(caught_error).lower()
+    assert events == [
+        f"read:{module._ARCHIVE_CHUNK_BYTES}",
+        "poll",
+        "terminate",
+        "wait:1",
+        "kill",
+        "wait:None",
+        "stdout-close",
+        "poll",
+    ]
+    assert stdout.closed
+    assert process.poll() == 0
+
+
+def test_nonzero_archive_process_is_reaped_and_pipe_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nonzero Git exit is sanitized after the process has been reaped."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _ControlledStdout(events, chunks=[b"partial", b""])
+    process = _ControlledProcess(events, stdout, return_code=7)
+
+    caught_error = _call_controlled_archive_writer(
+        module,
+        monkeypatch,
+        process,
+        io.BytesIO(),
+        max_archive_bytes=100,
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert events == [
+        f"read:{module._ARCHIVE_CHUNK_BYTES}",
+        f"read:{module._ARCHIVE_CHUNK_BYTES}",
+        "wait:None",
+        "stdout-close",
+        "poll",
+    ]
+    assert stdout.closed
+
+
+@pytest.mark.parametrize("failure_boundary", ["read", "write"])
+def test_archive_io_exceptions_are_sanitized_and_resources_are_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    """Read and write boundary failures cannot leak raw errors or child resources."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    read_error = ValueError("raw-secret-read") if failure_boundary == "read" else None
+    stdout = _ControlledStdout(events, chunks=[b"x"], read_error=read_error)
+    process = _ControlledProcess(events, stdout)
+
+    class FailingOutput(io.BytesIO):
+        def write(self, content: bytes) -> int:
+            raise ValueError(f"raw-secret-write:{content!r}")
+
+    output: BinaryIO = FailingOutput() if failure_boundary == "write" else io.BytesIO()
+    caught_error = _call_controlled_archive_writer(
+        module,
+        monkeypatch,
+        process,
+        output,
+        max_archive_bytes=100,
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert stdout.closed
+    assert "terminate" in events
+    assert "wait:1" in events
+    assert process.poll() == 0

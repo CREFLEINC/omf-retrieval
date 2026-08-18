@@ -6,7 +6,7 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 from omf_retrieval.application.indexing.ports import ArchiveFile, SourceSnapshot
 from omf_retrieval.infrastructure.source.profiles import (
@@ -140,6 +140,17 @@ class GitArchiveSnapshotProvider:
                     archive_path=archive_path,
                     extraction_root=extraction_root,
                 )
+                _verify_archive_provenance(
+                    repo=repo,
+                    commit_sha=resolved_commit,
+                    archive_files=archive_files,
+                    profile=self._profile,
+                    git_environment=git_environment,
+                    max_members=self._max_members,
+                    max_file_bytes=self._max_file_bytes,
+                    max_total_bytes=self._max_total_bytes,
+                    max_metadata_bytes=self._max_archive_bytes,
+                )
         except GitArchiveSnapshotError:
             raise
         except subprocess.CalledProcessError as error:
@@ -165,25 +176,32 @@ class GitArchiveSnapshotProvider:
         archive_path: Path,
         extraction_root: Path,
     ) -> list[ArchiveFile]:
-        _validate_tar_structure(archive_path)
+        _validate_tar_structure(
+            archive_path,
+            max_members=self._max_members,
+            max_metadata_bytes=min(
+                self._max_file_bytes,
+                self._max_archive_bytes,
+            ),
+        )
         archive_files: list[ArchiveFile] = []
         seen_paths: set[str] = set()
-        member_count = 0
+        regular_paths: set[str] = set()
         included_bytes = 0
         with tarfile.open(archive_path, mode="r:") as archive:
             for member in archive:
-                member_count += 1
-                if member_count > self._max_members:
-                    raise GitArchiveSnapshotError("Tar archive member limit exceeded")
                 source_path = canonical_source_path(member.name)
                 if source_path in seen_paths:
                     raise GitArchiveSnapshotError(
                         "Tar archive contains a duplicate path"
                     )
-                seen_paths.add(source_path)
                 if member.size < 0:
                     raise GitArchiveSnapshotError(
                         "Tar archive contains an invalid declared size"
+                    )
+                if member.issparse():
+                    raise GitArchiveSnapshotError(
+                        "Tar archive contains forbidden sparse metadata"
                     )
                 is_regular = member.type in {tarfile.REGTYPE, tarfile.AREGTYPE}
                 is_directory = member.type == tarfile.DIRTYPE
@@ -191,6 +209,22 @@ class GitArchiveSnapshotProvider:
                     raise GitArchiveSnapshotError(
                         "Tar archive contains a forbidden member type"
                     )
+                if any(
+                    ancestor in regular_paths
+                    for ancestor in _source_path_ancestors(source_path)
+                ) or (
+                    is_regular
+                    and any(
+                        seen_path.startswith(f"{source_path}/")
+                        for seen_path in seen_paths
+                    )
+                ):
+                    raise GitArchiveSnapshotError(
+                        "Tar archive contains a file tree conflict"
+                    )
+                seen_paths.add(source_path)
+                if is_regular:
+                    regular_paths.add(source_path)
                 if is_directory or not self._profile.includes(source_path):
                     continue
                 if member.size > self._max_file_bytes:
@@ -219,6 +253,11 @@ class GitArchiveSnapshotProvider:
                     )
                 )
         return archive_files
+
+
+def _source_path_ancestors(source_path: str) -> tuple[str, ...]:
+    parts = source_path.split("/")
+    return tuple("/".join(parts[:index]) for index in range(1, len(parts)))
 
 
 def _write_git_archive(
@@ -253,7 +292,7 @@ def _write_git_archive(
         return_code = process.wait()
         if return_code != 0:
             raise GitArchiveSnapshotError("Git archive creation failed")
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise GitArchiveSnapshotError("Git archive creation failed") from error
     finally:
         if process is not None:
@@ -273,10 +312,181 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def _validate_tar_structure(archive_path: Path) -> None:
+def _verify_archive_provenance(
+    *,
+    repo: Path,
+    commit_sha: str,
+    archive_files: list[ArchiveFile],
+    profile: SourceProfileConfig,
+    git_environment: dict[str, str],
+    max_members: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+    max_metadata_bytes: int,
+) -> None:
+    expected_blobs = _read_selected_tree_blobs(
+        repo=repo,
+        commit_sha=commit_sha,
+        profile=profile,
+        git_environment=git_environment,
+        max_members=max_members,
+        max_metadata_bytes=max_metadata_bytes,
+    )
+    archive_by_path = {
+        archive_file.source_path: archive_file.content for archive_file in archive_files
+    }
+    if set(archive_by_path) != set(expected_blobs):
+        raise GitArchiveSnapshotError("Git archive provenance path mismatch")
+
+    total_bytes = 0
+    blob_cache: dict[str, bytes] = {}
+    for source_path, object_id in sorted(expected_blobs.items()):
+        content = blob_cache.get(object_id)
+        if content is None:
+            content = _read_git_blob(
+                repo=repo,
+                object_id=object_id,
+                git_environment=git_environment,
+                max_file_bytes=max_file_bytes,
+            )
+            blob_cache[object_id] = content
+        total_bytes += len(content)
+        if total_bytes > max_total_bytes:
+            raise GitArchiveSnapshotError("Included total byte limit exceeded")
+        if archive_by_path[source_path] != content:
+            raise GitArchiveSnapshotError("Git archive provenance content mismatch")
+
+
+def _read_selected_tree_blobs(
+    *,
+    repo: Path,
+    commit_sha: str,
+    profile: SourceProfileConfig,
+    git_environment: dict[str, str],
+    max_members: int,
+    max_metadata_bytes: int,
+) -> dict[str, str]:
+    selected_blobs: dict[str, str] = {}
+
+    def consume_tree_record(record: bytes) -> None:
+        metadata, separator, raw_path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise GitArchiveSnapshotError("Git tree provenance is malformed")
+        object_type = fields[1]
+        try:
+            object_id = fields[2].decode("ascii")
+            source_path = raw_path.decode("utf-8", "surrogateescape")
+        except UnicodeError as error:
+            raise GitArchiveSnapshotError("Git tree provenance is malformed") from error
+        if not profile.includes(source_path):
+            return
+        if object_type != b"blob":
+            raise GitArchiveSnapshotError("Git tree provenance type mismatch")
+        selected_blobs[source_path] = object_id
+        if len(selected_blobs) > max_members:
+            raise GitArchiveSnapshotError("Tar archive member limit exceeded")
+
+    _stream_git_nul_records(
+        argv=["git", "ls-tree", "-r", "-z", "--full-tree", commit_sha],
+        repo=repo,
+        git_environment=git_environment,
+        max_output_bytes=max_metadata_bytes,
+        consume_record=consume_tree_record,
+    )
+    return selected_blobs
+
+
+def _stream_git_nul_records(
+    *,
+    argv: list[str],
+    repo: Path,
+    git_environment: dict[str, str],
+    max_output_bytes: int,
+    consume_record: Callable[[bytes], None],
+) -> None:
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=repo,
+            env=git_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+        if process.stdout is None:
+            raise GitArchiveSnapshotError("Git provenance stream is unavailable")
+        pending = bytearray()
+        output_bytes = 0
+        while chunk := process.stdout.read(_ARCHIVE_CHUNK_BYTES):
+            output_bytes += len(chunk)
+            if output_bytes > max_output_bytes:
+                raise GitArchiveSnapshotError("Git provenance metadata limit exceeded")
+            pending.extend(chunk)
+            while (separator := pending.find(0)) >= 0:
+                consume_record(bytes(pending[:separator]))
+                del pending[: separator + 1]
+        if pending:
+            raise GitArchiveSnapshotError("Git tree provenance is malformed")
+        if process.wait() != 0:
+            raise GitArchiveSnapshotError("Git provenance command failed")
+    except OSError as error:
+        raise GitArchiveSnapshotError("Git provenance command failed") from error
+    finally:
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            _stop_process(process)
+
+
+def _read_git_blob(
+    *,
+    repo: Path,
+    object_id: str,
+    git_environment: dict[str, str],
+    max_file_bytes: int,
+) -> bytes:
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            ["git", "cat-file", "blob", object_id],
+            cwd=repo,
+            env=git_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+        if process.stdout is None:
+            raise GitArchiveSnapshotError("Git provenance stream is unavailable")
+        content = bytearray()
+        while chunk := process.stdout.read(_ARCHIVE_CHUNK_BYTES):
+            if len(content) + len(chunk) > max_file_bytes:
+                raise GitArchiveSnapshotError("Included file byte limit exceeded")
+            content.extend(chunk)
+        if process.wait() != 0:
+            raise GitArchiveSnapshotError("Git provenance command failed")
+        return bytes(content)
+    except OSError as error:
+        raise GitArchiveSnapshotError("Git provenance command failed") from error
+    finally:
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            _stop_process(process)
+
+
+def _validate_tar_structure(
+    archive_path: Path,
+    *,
+    max_members: int,
+    max_metadata_bytes: int,
+) -> None:
     archive_size = archive_path.stat().st_size
     with archive_path.open("rb") as archive_input:
         offset = 0
+        raw_member_count = 0
+        pending_local_metadata = False
         while True:
             header = archive_input.read(_TAR_BLOCK_BYTES)
             if len(header) != _TAR_BLOCK_BYTES:
@@ -284,6 +494,10 @@ def _validate_tar_structure(archive_path: Path) -> None:
             offset += _TAR_BLOCK_BYTES
 
             if header == bytes(_TAR_BLOCK_BYTES):
+                if pending_local_metadata:
+                    raise GitArchiveSnapshotError(
+                        "Tar archive contains orphaned metadata"
+                    )
                 second_terminator = archive_input.read(_TAR_BLOCK_BYTES)
                 if second_terminator != bytes(_TAR_BLOCK_BYTES):
                     raise GitArchiveSnapshotError(
@@ -296,6 +510,10 @@ def _validate_tar_structure(archive_path: Path) -> None:
                         )
                 return
 
+            _validate_tar_checksum(header)
+            raw_member_count += 1
+            if raw_member_count > max_members:
+                raise GitArchiveSnapshotError("Tar archive member limit exceeded")
             member_size = _parse_tar_size(header[124:136])
             if member_size < 0:
                 raise GitArchiveSnapshotError(
@@ -307,13 +525,51 @@ def _validate_tar_structure(archive_path: Path) -> None:
             if offset + padded_size > archive_size:
                 raise GitArchiveSnapshotError("Tar archive member data is truncated")
 
-            if header[156:157] in {tarfile.XHDTYPE, tarfile.XGLTYPE}:
-                pax_payload = archive_input.read(member_size)
-                _validate_pax_payload(pax_payload)
-                archive_input.seek(padded_size - member_size, os.SEEK_CUR)
+            member_type = header[156:157]
+            is_local_metadata = member_type in {
+                tarfile.XHDTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+            }
+            if pending_local_metadata and member_type in {
+                tarfile.XHDTYPE,
+                tarfile.XGLTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+            }:
+                raise GitArchiveSnapshotError(
+                    "Tar archive metadata sequence is invalid"
+                )
+            if member_type in {
+                tarfile.XHDTYPE,
+                tarfile.XGLTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+            }:
+                if member_size > max_metadata_bytes:
+                    raise GitArchiveSnapshotError("Tar archive metadata limit exceeded")
+                if member_type in {tarfile.XHDTYPE, tarfile.XGLTYPE}:
+                    _validate_pax_stream(archive_input, member_size)
+                else:
+                    _read_and_discard(archive_input, member_size)
+                _read_and_discard(archive_input, padded_size - member_size)
+                pending_local_metadata = is_local_metadata
             else:
                 archive_input.seek(padded_size, os.SEEK_CUR)
+                pending_local_metadata = False
             offset += padded_size
+
+
+def _validate_tar_checksum(header: bytes) -> None:
+    raw_checksum = header[148:156].strip(b"\x00 ")
+    try:
+        stored_checksum = int(raw_checksum, 8)
+    except ValueError as error:
+        raise GitArchiveSnapshotError("Tar archive checksum is invalid") from error
+    checksum_header = header[:148] + b" " * 8 + header[156:]
+    unsigned_checksum = sum(checksum_header)
+    signed_checksum = sum(
+        byte if byte < 128 else byte - 256 for byte in checksum_header
+    )
+    if stored_checksum not in {unsigned_checksum, signed_checksum}:
+        raise GitArchiveSnapshotError("Tar archive checksum is invalid")
 
 
 def _parse_tar_size(raw_size: bytes) -> int:
@@ -333,23 +589,40 @@ def _parse_tar_size(raw_size: bytes) -> int:
         raise GitArchiveSnapshotError("Tar archive size encoding is invalid") from error
 
 
-def _validate_pax_payload(payload: bytes) -> None:
-    offset = 0
-    while offset < len(payload):
-        separator = payload.find(b" ", offset)
-        if separator < 0:
+def _validate_pax_stream(archive_input: BinaryIO, payload_size: int) -> None:
+    remaining = payload_size
+    while remaining:
+        raw_record_size = bytearray()
+        while True:
+            character = archive_input.read(1)
+            if len(character) != 1:
+                raise GitArchiveSnapshotError("Tar archive member data is truncated")
+            remaining -= 1
+            if character == b" ":
+                break
+            if not character.isdigit() or len(raw_record_size) >= 20 or remaining <= 0:
+                raise GitArchiveSnapshotError("Tar PAX record is malformed")
+            raw_record_size.extend(character)
+        if not raw_record_size:
             raise GitArchiveSnapshotError("Tar PAX record is malformed")
         try:
-            record_size = int(payload[offset:separator])
+            record_size = int(raw_record_size)
         except ValueError as error:
             raise GitArchiveSnapshotError("Tar PAX record is malformed") from error
-        if record_size <= 0 or offset + record_size > len(payload):
+        prefix_size = len(raw_record_size) + 1
+        body_size = record_size - prefix_size
+        if body_size <= 0 or body_size > remaining:
             raise GitArchiveSnapshotError("Tar PAX record is malformed")
 
-        record = payload[separator + 1 : offset + record_size]
+        record = _read_exact_chunked(archive_input, body_size)
+        remaining -= body_size
         if not record.endswith(b"\n") or b"=" not in record:
             raise GitArchiveSnapshotError("Tar PAX record is malformed")
         key, value = record[:-1].split(b"=", 1)
+        if key.startswith(b"GNU.sparse."):
+            raise GitArchiveSnapshotError(
+                "Tar archive contains forbidden sparse metadata"
+            )
         if key == b"size":
             try:
                 pax_size = int(value)
@@ -359,4 +632,24 @@ def _validate_pax_payload(payload: bytes) -> None:
                 raise GitArchiveSnapshotError(
                     "Tar archive contains an invalid declared size"
                 )
-        offset += record_size
+
+
+def _read_exact_chunked(archive_input: BinaryIO, size: int) -> bytes:
+    content = bytearray()
+    remaining = size
+    while remaining:
+        chunk = archive_input.read(min(remaining, _ARCHIVE_CHUNK_BYTES))
+        if not chunk:
+            raise GitArchiveSnapshotError("Tar archive member data is truncated")
+        content.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(content)
+
+
+def _read_and_discard(archive_input: BinaryIO, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = archive_input.read(min(remaining, _ARCHIVE_CHUNK_BYTES))
+        if not chunk:
+            raise GitArchiveSnapshotError("Tar archive member data is truncated")
+        remaining -= len(chunk)
