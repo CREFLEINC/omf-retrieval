@@ -76,7 +76,7 @@ def load_source_profile(profile_path: Path) -> SourceProfileConfig:
             f"Cannot load source profile: {profile_path}"
         ) from error
 
-    if not isinstance(raw_profile, dict):
+    if type(raw_profile) is not dict:
         raise SourceProfileValidationError("Source profile must be a JSON object")
 
     expected_keys = {"source_key", "include_patterns", "exclude_patterns"}
@@ -108,7 +108,7 @@ def canonical_source_path(source_path: str) -> str:
     Raises:
         SourceProfileValidationError: If the path is absolute or unsafe.
     """
-    if not isinstance(source_path, str):
+    if type(source_path) is not str:
         raise SourceProfileValidationError("Source path must be a string")
     if not source_path or "\x00" in source_path or "\\" in source_path:
         raise SourceProfileValidationError("Source path must be a non-empty POSIX path")
@@ -128,23 +128,23 @@ def _project_root() -> Path:
 
 
 def _require_non_empty_string(*, value: object, field_name: str) -> None:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise SourceProfileValidationError(f"{field_name} must be a non-empty string")
 
 
 def _require_pattern_list(*, value: object, field_name: str) -> None:
-    if not isinstance(value, list):
+    if type(value) is not list:
         raise SourceProfileValidationError(f"{field_name} must be a JSON array")
     _require_patterns(value=tuple(value), field_name=field_name)
 
 
 def _require_pattern_tuple(*, value: object, field_name: str) -> None:
-    if not isinstance(value, tuple):
+    if type(value) is not tuple:
         raise SourceProfileValidationError(f"{field_name} must be an immutable tuple")
 
 
 def _require_patterns(*, value: tuple[str, ...], field_name: str) -> None:
-    if any(not isinstance(pattern, str) or not pattern.strip() for pattern in value):
+    if any(type(pattern) is not str or not pattern.strip() for pattern in value):
         raise SourceProfileValidationError(
             f"{field_name} must contain only non-empty strings"
         )

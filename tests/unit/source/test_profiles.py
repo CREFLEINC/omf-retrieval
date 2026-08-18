@@ -11,6 +11,23 @@ from omf_retrieval.infrastructure.source import profiles
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OMF_PROFILE_PATH = PROJECT_ROOT / "config/source_profiles/omf.json"
 OMF_RELATIONS_PATH = PROJECT_ROOT / "config/source_profiles/omf-relations.json"
+VALID_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class StringSubclass(str):
+    """Represent an invalid string subclass at an exact-type boundary."""
+
+
+class BytesSubclass(bytes):
+    """Represent an invalid bytes subclass at an exact-type boundary."""
+
+
+class TupleSubclass(tuple[object, ...]):
+    """Represent an invalid tuple subclass at an exact-type boundary."""
+
+
+class ArchiveFileSubclass(ports.ArchiveFile):
+    """Represent an invalid archive-file subclass in a snapshot tuple."""
 
 
 def test_committed_omf_profile_has_the_approved_contract() -> None:
@@ -176,6 +193,67 @@ def test_profile_config_rejects_mutable_pattern_containers() -> None:
             source_key="test",
             include_patterns=["uiux/**/*.md"],  # type: ignore[arg-type]
             exclude_patterns=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "constructor",
+    [
+        lambda: profiles.SourceProfileConfig(
+            source_key=StringSubclass("test"),
+            include_patterns=("uiux/**/*.md",),
+            exclude_patterns=(),
+        ),
+        lambda: profiles.SourceProfileConfig(
+            source_key="test",
+            include_patterns=(StringSubclass("uiux/**/*.md"),),
+            exclude_patterns=(),
+        ),
+        lambda: profiles.SourceProfileConfig(
+            source_key="test",
+            include_patterns=TupleSubclass(("uiux/**/*.md",)),
+            exclude_patterns=(),
+        ),
+        lambda: ports.ArchiveFile(
+            source_path=StringSubclass("docs/a.md"), content=b"source"
+        ),
+        lambda: ports.ArchiveFile(
+            source_path="docs/a.md", content=BytesSubclass(b"source")
+        ),
+        lambda: ports.SourceSnapshot(
+            commit_sha=StringSubclass(VALID_COMMIT_SHA), archive_files=()
+        ),
+        lambda: ports.SourceSnapshot(
+            commit_sha=VALID_COMMIT_SHA,
+            archive_files=TupleSubclass(()),
+        ),
+    ],
+)
+def test_public_contracts_reject_builtin_subclasses(constructor: object) -> None:
+    """Public value objects reject subclasses at exact runtime type boundaries."""
+    with pytest.raises(
+        (
+            profiles.SourceProfileValidationError,
+            ports.SourceSnapshotValidationError,
+        )
+    ):
+        constructor()  # type: ignore[operator]
+
+
+def test_canonical_source_path_rejects_a_string_subclass() -> None:
+    """The standalone path canonicalizer enforces the same exact string boundary."""
+    with pytest.raises(profiles.SourceProfileValidationError):
+        profiles.canonical_source_path(StringSubclass("docs/a.md"))
+
+
+def test_snapshot_rejects_an_archive_file_subclass() -> None:
+    """Archive-file entries use the same exact runtime type contract."""
+    archive_file = ArchiveFileSubclass(source_path="docs/a.md", content=b"source")
+
+    with pytest.raises(ports.SourceSnapshotValidationError):
+        ports.SourceSnapshot(
+            commit_sha=VALID_COMMIT_SHA,
+            archive_files=(archive_file,),
         )
 
 

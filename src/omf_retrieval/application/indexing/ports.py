@@ -28,7 +28,7 @@ class ArchiveFile:
     def __post_init__(self) -> None:
         """Validate archive coordinates without exposing temporary paths."""
         _require_canonical_source_path(self.source_path)
-        if not isinstance(self.content, bytes):
+        if type(self.content) is not bytes:
             raise SourceSnapshotValidationError("Archive content must be bytes")
 
 
@@ -50,18 +50,18 @@ class SourceSnapshot:
     def __post_init__(self) -> None:
         """Validate snapshot identity and deterministic archive ordering."""
         if (
-            not isinstance(self.commit_sha, str)
+            type(self.commit_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}", self.commit_sha) is None
         ):
             raise SourceSnapshotValidationError(
                 "Snapshot commit_sha must be a lowercase full Git SHA-1"
             )
-        if not isinstance(self.archive_files, tuple):
+        if type(self.archive_files) is not tuple:
             raise SourceSnapshotValidationError(
                 "Snapshot archive_files must be a tuple"
             )
         if not all(
-            isinstance(archive_file, ArchiveFile) for archive_file in self.archive_files
+            type(archive_file) is ArchiveFile for archive_file in self.archive_files
         ):
             raise SourceSnapshotValidationError(
                 "Snapshot archive_files must contain ArchiveFile values"
@@ -86,7 +86,7 @@ class SourceSnapshotProvider(Protocol):
 
 
 def _require_canonical_source_path(source_path: object) -> None:
-    if not isinstance(source_path, str) or not source_path:
+    if type(source_path) is not str or not source_path:
         raise SourceSnapshotValidationError("Archive source_path must be non-empty")
     if "\x00" in source_path or "\\" in source_path or source_path.startswith("/"):
         raise SourceSnapshotValidationError(
