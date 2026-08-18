@@ -5,7 +5,6 @@ import re
 import subprocess
 import tarfile
 import tempfile
-from contextlib import suppress
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -272,6 +271,7 @@ def _write_git_archive(
     max_archive_bytes: int,
 ) -> None:
     process: subprocess.Popen[bytes] | None = None
+    operation_succeeded = False
     try:
         process = subprocess.Popen(
             ["git", "archive", "--format=tar", commit_sha],
@@ -295,24 +295,56 @@ def _write_git_archive(
         return_code = process.wait()
         if return_code != 0:
             raise GitArchiveSnapshotError("Git archive creation failed")
+        operation_succeeded = True
     except (OSError, ValueError) as error:
         raise GitArchiveSnapshotError("Git archive creation failed") from error
     finally:
         if process is not None:
-            if process.stdout is not None:
-                process.stdout.close()
-            _stop_process(process)
+            cleanup_failed = _cleanup_git_process(process, (process.stdout,))
+            if operation_succeeded and cleanup_failed:
+                raise GitArchiveSnapshotError("Git archive cleanup failed")
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+def _stop_process(process: subprocess.Popen[bytes]) -> bool:
+    cleanup_failed = False
+    try:
+        if process.poll() is not None:
+            return False
+    except OSError:
+        cleanup_failed = True
+    try:
+        process.terminate()
+    except OSError:
+        cleanup_failed = True
     try:
         process.wait(timeout=1)
+        return cleanup_failed
     except subprocess.TimeoutExpired:
+        pass
+    except OSError:
+        cleanup_failed = True
+    try:
         process.kill()
+    except OSError:
+        cleanup_failed = True
+    try:
         process.wait()
+    except (OSError, subprocess.TimeoutExpired):
+        cleanup_failed = True
+    return cleanup_failed
+
+
+def _cleanup_git_process(
+    process: subprocess.Popen[bytes],
+    pipes: tuple[BinaryIO | None, ...],
+) -> bool:
+    cleanup_failed = False
+    for pipe in pipes:
+        if _close_git_pipe(pipe):
+            cleanup_failed = True
+    if _stop_process(process):
+        cleanup_failed = True
+    return cleanup_failed
 
 
 def _verify_archive_provenance(
@@ -412,6 +444,7 @@ def _stream_git_nul_records(
     consume_record: Callable[[bytes], None],
 ) -> None:
     process: subprocess.Popen[bytes] | None = None
+    operation_succeeded = False
     try:
         process = subprocess.Popen(
             argv,
@@ -437,13 +470,14 @@ def _stream_git_nul_records(
             raise GitArchiveSnapshotError("Git tree provenance is malformed")
         if process.wait() != 0:
             raise GitArchiveSnapshotError("Git provenance command failed")
-    except OSError as error:
+        operation_succeeded = True
+    except (OSError, ValueError) as error:
         raise GitArchiveSnapshotError("Git provenance command failed") from error
     finally:
         if process is not None:
-            if process.stdout is not None:
-                process.stdout.close()
-            _stop_process(process)
+            cleanup_failed = _cleanup_git_process(process, (process.stdout,))
+            if operation_succeeded and cleanup_failed:
+                raise GitArchiveSnapshotError("Git provenance cleanup failed")
 
 
 def _read_git_blobs_batch(
@@ -457,6 +491,7 @@ def _read_git_blobs_batch(
     if not object_ids:
         return {}
     process: subprocess.Popen[bytes] | None = None
+    operation_succeeded = False
     try:
         process = subprocess.Popen(
             ["git", "cat-file", "--batch"],
@@ -500,14 +535,18 @@ def _read_git_blobs_batch(
             raise GitArchiveSnapshotError("Git provenance response is malformed")
         if process.wait() != 0:
             raise GitArchiveSnapshotError("Git provenance command failed")
+        operation_succeeded = True
         return blobs
     except (OSError, ValueError) as error:
         raise GitArchiveSnapshotError("Git provenance command failed") from error
     finally:
         if process is not None:
-            _close_git_pipe(process.stdin)
-            _close_git_pipe(process.stdout)
-            _stop_process(process)
+            cleanup_failed = _cleanup_git_process(
+                process,
+                (process.stdin, process.stdout),
+            )
+            if operation_succeeded and cleanup_failed:
+                raise GitArchiveSnapshotError("Git provenance cleanup failed")
 
 
 def _read_git_batch_line(batch_output: BinaryIO) -> bytes:
@@ -522,11 +561,14 @@ def _read_git_batch_line(batch_output: BinaryIO) -> bytes:
     raise GitArchiveSnapshotError("Git provenance response is malformed")
 
 
-def _close_git_pipe(pipe: BinaryIO | None) -> None:
+def _close_git_pipe(pipe: BinaryIO | None) -> bool:
     if pipe is None:
-        return
-    with suppress(OSError, ValueError):
+        return False
+    try:
         pipe.close()
+    except (OSError, ValueError):
+        return True
+    return False
 
 
 def _read_git_exact(batch_output: BinaryIO, size: int) -> bytes:

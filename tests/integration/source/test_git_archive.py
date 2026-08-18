@@ -1627,18 +1627,20 @@ class _ControlledBatchProcess:
         read_error: Exception | None = None,
         write_error: Exception | None = None,
         close_error: Exception | None = None,
+        stdin_close_error: Exception | None = None,
+        stdout_close_error: Exception | None = None,
     ) -> None:
         self.events: list[str] = []
         self.stdin = _BatchInput(
             self.events,
             write_error=write_error,
-            close_error=close_error,
+            close_error=stdin_close_error or close_error,
         )
         self.stdout = _BatchOutput(
             self.events,
             response,
             read_error=read_error,
-            close_error=close_error,
+            close_error=stdout_close_error or close_error,
         )
         self._return_code = return_code
         self._timeout_once = timeout_once
@@ -1988,3 +1990,269 @@ def test_archive_io_exceptions_are_sanitized_and_resources_are_reaped(
     assert "terminate" in events
     assert "wait:1" in events
     assert process.poll() == 0
+
+
+class _FailureStream:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        chunks: list[bytes] | None = None,
+        read_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._chunks = list(chunks or [])
+        self._read_error = read_error
+        self._close_error = close_error
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        self._events.append(f"read:{size}")
+        if self._read_error is not None:
+            raise self._read_error
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def close(self) -> None:
+        self.closed = True
+        self._events.append("stdout-close")
+        if self._close_error is not None:
+            raise self._close_error
+
+
+class _FailureProcess:
+    def __init__(
+        self,
+        stdout: _FailureStream,
+        *,
+        poll_error: Exception | None = None,
+        terminate_error: Exception | None = None,
+        wait_outcomes: list[int | Exception] | None = None,
+        kill_error: Exception | None = None,
+    ) -> None:
+        self.events = stdout._events
+        self.stdout = stdout
+        self._poll_error = poll_error
+        self._terminate_error = terminate_error
+        self._wait_outcomes = list(wait_outcomes or [0])
+        self._kill_error = kill_error
+        self._reaped = False
+
+    def poll(self) -> int | None:
+        self.events.append("poll")
+        if self._poll_error is not None:
+            raise self._poll_error
+        return 0 if self._reaped else None
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        if self._terminate_error is not None:
+            raise self._terminate_error
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        if self._kill_error is not None:
+            raise self._kill_error
+
+    def wait(self, timeout: int | None = None) -> int:
+        self.events.append(f"wait:{timeout}")
+        outcome = self._wait_outcomes.pop(0) if self._wait_outcomes else 0
+        if isinstance(outcome, Exception):
+            raise outcome
+        self._reaped = True
+        return outcome
+
+
+def _install_failure_process(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process: _FailureProcess,
+) -> None:
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+
+@pytest.mark.parametrize("failure_case", ["archive-close", "archive-read-close"])
+def test_archive_cleanup_failures_are_sanitized_and_reaping_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_case: str,
+) -> None:
+    """Archive close faults never escape or prevent best-effort child reaping."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _FailureStream(
+        events,
+        read_error=(
+            ValueError("raw-secret-read")
+            if failure_case == "archive-read-close"
+            else None
+        ),
+        close_error=OSError("raw-secret-close"),
+    )
+    process = _FailureProcess(stdout)
+    _install_failure_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module._write_git_archive(
+            repo=Path("/not-read"),
+            commit_sha="0" * 40,
+            archive_output=io.BytesIO(),
+            git_environment={},
+            max_archive_bytes=100,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert stdout.closed
+    assert "poll" in events
+    if failure_case == "archive-read-close":
+        assert "terminate" in events
+        assert "wait:1" in events
+
+
+@pytest.mark.parametrize("failure_case", ["tree-read", "tree-close", "tree-read-close"])
+def test_tree_stream_failures_are_sanitized_and_reaping_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_case: str,
+) -> None:
+    """Tree provenance read/close faults preserve module errors and cleanup."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _FailureStream(
+        events,
+        read_error=(ValueError("raw-secret-read") if "read" in failure_case else None),
+        close_error=(OSError("raw-secret-close") if "close" in failure_case else None),
+    )
+    process = _FailureProcess(stdout)
+    _install_failure_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module._stream_git_nul_records(
+            argv=["git", "ls-tree", "controlled"],
+            repo=Path("/not-read"),
+            git_environment={},
+            max_output_bytes=100,
+            consume_record=lambda _record: None,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert stdout.closed
+    assert "poll" in events
+    if "read" in failure_case:
+        assert "terminate" in events
+        assert "wait:1" in events
+
+
+def test_batch_stdout_close_failure_cannot_turn_cleanup_into_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch stdout close failure produces a sanitized module error after cleanup."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_sha = _make_single_selected_file_repo(
+        tmp_path, source_path="docs/research/one.md", content=b"x"
+    )
+    object_id = _git(repo, "rev-parse", f"{commit_sha}:docs/research/one.md")
+    process = _ControlledBatchProcess(
+        response=f"{object_id} blob 1\n".encode() + b"x\n",
+        stdout_close_error=OSError("raw-secret-close"),
+    )
+    _install_controlled_batch_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module.GitArchiveSnapshotProvider(_omf_test_profile()).snapshot(
+            repo, commit_sha
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert "poll" in process.events
+
+
+@pytest.mark.parametrize(
+    "control_case",
+    ["poll", "terminate", "wait", "kill", "final-wait"],
+)
+def test_process_control_failures_preserve_primary_error_and_attempt_final_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    control_case: str,
+) -> None:
+    """Control-operation faults never replace a primary sanitized stream error."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _FailureStream(events, read_error=ValueError("primary-secret"))
+    timeout = subprocess.TimeoutExpired(["git", "archive"], 1)
+    process_options: dict[str, object] = {}
+    if control_case == "poll":
+        process_options["poll_error"] = OSError("raw-secret-poll")
+    elif control_case == "terminate":
+        process_options["terminate_error"] = OSError("raw-secret-terminate")
+    elif control_case == "wait":
+        process_options["wait_outcomes"] = [OSError("raw-secret-wait"), 0]
+    elif control_case == "kill":
+        process_options["wait_outcomes"] = [timeout, 0]
+        process_options["kill_error"] = OSError("raw-secret-kill")
+    else:
+        process_options["wait_outcomes"] = [
+            timeout,
+            OSError("raw-secret-final-wait"),
+        ]
+    process = _FailureProcess(stdout, **process_options)
+    _install_failure_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module._write_git_archive(
+            repo=Path("/not-read"),
+            commit_sha="0" * 40,
+            archive_output=io.BytesIO(),
+            git_environment={},
+            max_archive_bytes=100,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "primary-secret" not in str(caught_error)
+    assert "raw-secret" not in str(caught_error)
+    assert stdout.closed
+    assert "poll" in events
+    assert "terminate" in events
+    assert any(event.startswith("wait:") for event in events)
+    if control_case in {"wait", "kill", "final-wait"}:
+        assert "kill" in events
+        assert "wait:None" in events
+
+
+def test_process_control_cleanup_failure_cannot_allow_a_success_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll cleanup fault after successful output becomes a sanitized module error."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    events: list[str] = []
+    stdout = _FailureStream(events)
+    process = _FailureProcess(
+        stdout,
+        poll_error=OSError("raw-secret-poll"),
+    )
+    _install_failure_process(module, monkeypatch, process)
+
+    caught_error = _caught_exception(
+        lambda: module._write_git_archive(
+            repo=Path("/not-read"),
+            commit_sha="0" * 40,
+            archive_output=io.BytesIO(),
+            git_environment={},
+            max_archive_bytes=100,
+        )
+    )
+
+    assert type(caught_error) is module.GitArchiveSnapshotError
+    assert "raw-secret" not in str(caught_error)
+    assert stdout.closed
+    assert "poll" in events
+    assert "terminate" in events
+    assert "wait:1" in events
