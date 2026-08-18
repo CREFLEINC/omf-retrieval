@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from database_test_utils import assert_safe_test_connection
 from orm_parity import schema_catalog
 from sqlalchemy import Connection, exc, text
 
@@ -113,6 +114,7 @@ def test_orm_created_schema_catalog_matches_migration_catalog(
     quoted_schema_name = database_connection.dialect.identifier_preparer.quote(
         schema_name
     )
+    assert_safe_test_connection(database_connection)
     database_connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
 
     try:
@@ -125,4 +127,5 @@ def test_orm_created_schema_catalog_matches_migration_catalog(
             database_connection, "public"
         )
     finally:
+        assert_safe_test_connection(database_connection)
         database_connection.execute(text(f"DROP SCHEMA {quoted_schema_name} CASCADE"))

@@ -15,9 +15,11 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("OMF_RETRIEVAL_DATABASE_URL")
+database_url = config.attributes.get("database_url")
+if database_url is None:
+    database_url = os.getenv("OMF_RETRIEVAL_DATABASE_URL")
 if database_url is not None:
-    config.set_main_option("sqlalchemy.url", database_url)
+    config.set_main_option("sqlalchemy.url", str(database_url).replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -44,6 +46,10 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        connection_validator = config.attributes.get("connection_validator")
+        if connection_validator is not None:
+            connection_validator(connection)
+            connection.rollback()
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():

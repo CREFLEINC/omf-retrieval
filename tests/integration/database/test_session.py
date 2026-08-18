@@ -5,8 +5,8 @@ import sys
 from collections.abc import Iterator
 from uuid import UUID, uuid4
 
+import database_test_utils as database_test_support
 import pytest
-from database_test_utils import test_database_url as database_url
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -46,20 +46,25 @@ APPLICATION_TABLE_NAMES = (
 
 
 @pytest.fixture
-def orm_session_factory() -> Iterator[sessionmaker[Session]]:
+def orm_session_factory(
+    request: pytest.FixtureRequest,
+) -> Iterator[sessionmaker[Session]]:
     """Yield an explicit factory against an empty migrated test schema."""
-    engine = session.create_database_engine(database_url())
+    engine = session.create_database_engine(database_test_support.test_database_url())
+    request.addfinalizer(engine.dispose)
     table_list = ", ".join(APPLICATION_TABLE_NAMES)
 
     with engine.begin() as connection:
+        database_test_support.assert_safe_test_connection(connection)
         connection.execute(text(f"TRUNCATE TABLE {table_list} CASCADE"))
 
-    try:
-        yield session.create_session_factory(engine)
-    finally:
+    def clean_tables() -> None:
         with engine.begin() as connection:
+            database_test_support.assert_safe_test_connection(connection)
             connection.execute(text(f"TRUNCATE TABLE {table_list} CASCADE"))
-        engine.dispose()
+
+    request.addfinalizer(clean_tables)
+    yield session.create_session_factory(engine)
 
 
 def test_session_factory_functions_are_available() -> None:
@@ -70,7 +75,9 @@ def test_session_factory_functions_are_available() -> None:
 
 def test_engine_and_session_factory_options_are_explicit() -> None:
     """Enable connection liveness checks and preserve committed object state."""
-    engine = session.create_database_engine(database_url(), echo=False)
+    engine = session.create_database_engine(
+        database_test_support.test_database_url(), echo=False
+    )
 
     try:
         factory = session.create_session_factory(engine)

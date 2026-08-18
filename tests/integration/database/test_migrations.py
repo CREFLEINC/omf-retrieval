@@ -1,11 +1,19 @@
 """Integration tests for the PostgreSQL migration lifecycle."""
 
+import json
+import subprocess
+from collections.abc import Iterator
+from pathlib import Path
+from unittest.mock import Mock
+
+import database_test_utils as database_test_support
 import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from database_test_utils import (
     DEFAULT_TEST_DATABASE_URL,
+    assert_safe_test_connection,
     create_test_engine,
 )
 from schema_expectations import (
@@ -17,7 +25,14 @@ from schema_expectations import (
 from sqlalchemy import Connection, make_url, text
 
 REQUIRED_EXTENSIONS = {"pg_trgm", "vector"}
-OVERRIDE_DATABASE_URL = f"{DEFAULT_TEST_DATABASE_URL}?application_name=override-fixture"
+EXPECTED_EXTENSION_VERSIONS = {"pg_trgm": "1.6", "vector": "0.8.6"}
+EXPECTED_DATABASE_IMAGE = (
+    "pgvector/pgvector:0.8.6-pg18-trixie@"
+    "sha256:1963bc48febf543433baa1ce3edcc6cc08154de722e22495f86681cc9a849026"
+)
+TEST_DATABASE_ENV = "OMF_RETRIEVAL_TEST_DATABASE_URL"
+GENERIC_DATABASE_ENV = "OMF_RETRIEVAL_DATABASE_URL"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 APPLICATION_TABLES = {
     "api_clients",
     "chunk_embeddings",
@@ -173,6 +188,17 @@ def _installed_extensions(connection: Connection) -> set[str]:
     )
 
 
+def _installed_extension_versions(connection: Connection) -> dict[str, str]:
+    return dict(
+        connection.execute(
+            text(
+                "SELECT extname, extversion FROM pg_extension "
+                "WHERE extname IN ('vector', 'pg_trgm')"
+            )
+        ).all()
+    )
+
+
 def _application_tables(connection: Connection) -> set[str]:
     return set(
         connection.execute(
@@ -186,28 +212,198 @@ def _application_tables(connection: Connection) -> set[str]:
 
 @pytest.fixture
 def alembic_config() -> Config:
-    """Return the repository Alembic configuration."""
-    return Config("alembic.ini")
+    """Return Alembic config pinned to the validated test-only database URL."""
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_test_support.test_database_url()
+    config.attributes["connection_validator"] = assert_safe_test_connection
+    return config
 
 
-def test_database_connection_prefers_environment_url(
+@pytest.fixture
+def downgraded_database(
+    database_connection: Connection,
+    alembic_config: Config,
+) -> Iterator[None]:
+    """Downgrade for one test and always restore the schema during teardown."""
+    try:
+        command.downgrade(alembic_config, "base")
+        yield
+    finally:
+        command.upgrade(alembic_config, "head")
+        applied_revision = database_connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        expected_revision = ScriptDirectory.from_config(
+            alembic_config
+        ).get_current_head()
+        assert applied_revision == expected_revision
+        assert _application_tables(database_connection) == APPLICATION_TABLES
+
+
+def test_generic_database_environment_requires_explicit_test_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The integration fixture follows the Alembic database URL override."""
-    monkeypatch.setenv("OMF_RETRIEVAL_DATABASE_URL", OVERRIDE_DATABASE_URL)
+    """Reject a generic application URL without a test-specific acknowledgement."""
+    monkeypatch.delenv(TEST_DATABASE_ENV, raising=False)
+    monkeypatch.setenv(
+        GENERIC_DATABASE_ENV,
+        "postgresql+psycopg://production:secret@10.0.0.8:5432/production",
+    )
+    engine_constructor = Mock()
+    monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
+
+    with pytest.raises(ValueError, match="without an explicit test database URL"):
+        create_test_engine()
+
+    engine_constructor.assert_not_called()
+
+
+def test_safe_test_database_environment_override_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept a test-specific override after validating its local identity."""
+    override_url = f"{DEFAULT_TEST_DATABASE_URL}?application_name=safe-override"
+    monkeypatch.setenv(TEST_DATABASE_ENV, override_url)
+    monkeypatch.setenv(
+        GENERIC_DATABASE_ENV,
+        "postgresql+psycopg://production:secret@127.0.0.1:55432/production",
+    )
     engine = create_test_engine()
 
     try:
-        with engine.connect() as connection:
-            assert connection.engine.url == make_url(OVERRIDE_DATABASE_URL)
+        assert engine.url == make_url(override_url)
     finally:
         engine.dispose()
+
+
+def test_safe_prefixed_test_database_name_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow isolated worker databases beneath the approved test prefix."""
+    database_server_url, _ = DEFAULT_TEST_DATABASE_URL.rsplit("/", maxsplit=1)
+    worker_url = f"{database_server_url}/omf_retrieval_test_worker_1"
+    monkeypatch.setenv(TEST_DATABASE_ENV, worker_url)
+    engine = create_test_engine()
+
+    try:
+        assert engine.url.database == "omf_retrieval_test_worker_1"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "postgresql+psycopg://omf_retrieval_test:test@localhost:55432/omf_retrieval_test",
+        "postgresql+psycopg://omf_retrieval_test:test@127.0.0.1:5432/omf_retrieval_test",
+        "postgresql+psycopg://postgres:test@127.0.0.1:55432/omf_retrieval_test",
+        "postgresql+psycopg://omf_retrieval_test:test@127.0.0.1:55432/production",
+    ],
+)
+def test_unsafe_test_database_url_is_rejected_before_engine_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_url: str,
+) -> None:
+    """Reject unsafe host, port, user, and database identifiers before use."""
+    monkeypatch.setenv(TEST_DATABASE_ENV, unsafe_url)
+    engine_constructor = Mock()
+    monkeypatch.setattr(database_test_support, "create_engine", engine_constructor)
+
+    with pytest.raises(ValueError, match="Unsafe test database URL"):
+        create_test_engine()
+
+    engine_constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("database_name", "database_user"),
+    [("production", "omf_retrieval_test"), ("omf_retrieval_test", "postgres")],
+)
+def test_unsafe_live_identity_is_rejected_before_destructive_sql(
+    database_name: str,
+    database_user: str,
+) -> None:
+    """Reject a live database or role that differs from the test identity."""
+    connection = Mock(spec=Connection)
+    connection.execute.return_value.one.return_value = (
+        database_name,
+        database_user,
+    )
+
+    with pytest.raises(ValueError, match="destructive SQL blocked"):
+        assert_safe_test_connection(connection)
+
+    connection.execute.assert_called_once()
+
+
+def test_alembic_config_pins_url_and_live_validator(
+    alembic_config: Config,
+) -> None:
+    """Pass the test URL and live identity guard through explicit attributes."""
+    assert alembic_config.attributes["database_url"] == (
+        database_test_support.test_database_url()
+    )
+    assert alembic_config.attributes["connection_validator"] is (
+        assert_safe_test_connection
+    )
 
 
 def test_required_extensions_are_installed(database_connection: Connection) -> None:
     """The initial migration installs the approved PostgreSQL extensions."""
 
     assert _installed_extensions(database_connection) == REQUIRED_EXTENSIONS
+
+
+def test_extension_versions_match_compose_contract(
+    database_connection: Connection,
+) -> None:
+    """Pin pgvector and PostgreSQL extension versions used by the test image."""
+    assert _installed_extension_versions(database_connection) == (
+        EXPECTED_EXTENSION_VERSIONS
+    )
+
+
+def test_rendered_compose_contract_is_exact() -> None:
+    """Keep the rendered test database container isolated and reproducible."""
+    completed = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "compose.test.yaml",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered_config = json.loads(completed.stdout)
+
+    assert set(rendered_config["services"]) == {"db"}
+    database_service = rendered_config["services"]["db"]
+    assert database_service["image"] == EXPECTED_DATABASE_IMAGE
+    assert database_service["ports"] == [
+        {
+            "mode": "ingress",
+            "host_ip": "127.0.0.1",
+            "target": 5432,
+            "published": "55432",
+            "protocol": "tcp",
+        }
+    ]
+    assert database_service["tmpfs"] == ["/var/lib/postgresql"]
+    assert database_service["healthcheck"] == {
+        "test": [
+            "CMD-SHELL",
+            "pg_isready -U omf_retrieval_test -d omf_retrieval_test",
+        ],
+        "timeout": "5s",
+        "interval": "2s",
+        "retries": 10,
+    }
 
 
 def test_alembic_revision_is_at_head(
@@ -398,19 +594,8 @@ def test_trigram_gin_index_exists_and_ann_indexes_do_not(
 
 def test_extensions_survive_downgrade_and_reupgrade(
     database_connection: Connection,
-    alembic_config: Config,
+    downgraded_database: None,
 ) -> None:
     """Downgrade preserves extensions and the revision upgrades again."""
-    command.downgrade(alembic_config, "base")
-
     assert _installed_extensions(database_connection) == REQUIRED_EXTENSIONS
     assert _application_tables(database_connection) == set()
-
-    command.upgrade(alembic_config, "head")
-    applied_revision = database_connection.execute(
-        text("SELECT version_num FROM alembic_version")
-    ).scalar_one()
-    expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
-
-    assert applied_revision == expected_revision
-    assert _application_tables(database_connection) == APPLICATION_TABLES
