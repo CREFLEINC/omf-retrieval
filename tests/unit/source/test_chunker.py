@@ -1,6 +1,8 @@
 """Unit tests for deterministic chunking contracts and identities."""
 
 import re
+import traceback
+from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError, replace
 from importlib import import_module
 from typing import Any
@@ -96,6 +98,10 @@ class _SecretTokenizerException(Exception):
     """Represent an adapter-specific ordinary exception outside any allowlist."""
 
 
+class _SecretAdapterError(Exception):
+    """Represent an ordinary failure raised while consuming adapter output."""
+
+
 class _EncodeFailureCounter(_FakeTokenCounter):
     def __init__(self, error_type: type[BaseException]) -> None:
         self._error_type = error_type
@@ -134,6 +140,57 @@ class _OffsetPropertyFailureCounter:
     @property
     def offsets(self) -> object:
         raise self._error_type("secret-offset-property-detail")
+
+
+class _FailingSequence(Sequence[object]):
+    def __init__(
+        self,
+        items: tuple[object, ...],
+        operation: str,
+        error: BaseException,
+    ) -> None:
+        self._items = items
+        self._operation = operation
+        self._error = error
+
+    def __len__(self) -> int:
+        if self._operation == "len":
+            raise self._error
+        return len(self._items)
+
+    def __iter__(self) -> Iterator[object]:
+        if self._operation == "iter":
+            raise self._error
+        return super().__iter__()
+
+    def __getitem__(self, index: int | slice) -> object:
+        if self._operation == "getitem":
+            raise self._error
+        return self._items[index]
+
+
+class _SequenceOperationFailureCounter(_FakeTokenCounter):
+    def __init__(
+        self,
+        side: str,
+        operation: str,
+        error: BaseException,
+    ) -> None:
+        self._side = side
+        self._operation = operation
+        self._error = error
+
+    def encode(self, text: str) -> object:
+        tokens = super().encode(text)
+        if self._side == "encode":
+            return _FailingSequence(tokens, self._operation, self._error)
+        return tokens
+
+    def offsets(self, text: str) -> object:
+        offsets = super().offsets(text)
+        if self._side == "offsets":
+            return _FailingSequence(offsets, self._operation, self._error)
+        return offsets
 
 
 def _descriptor() -> TokenizerDescriptor:
@@ -578,9 +635,17 @@ def _assert_sanitized_tokenizer_error(
 ) -> None:
     rendered = f"{type(error).__name__}: {error!r}: {error}"
     assert str(error) == expected_message
+    assert type(error) is ValueError
     assert error.__cause__ is None
     assert error.__context__ is None
     assert "_SecretTokenizerException" not in rendered
+    assert "_SecretAdapterError" not in rendered
+    assert "secret-" not in rendered
+
+
+def _assert_traceback_has_no_adapter_secret(error: ValueError) -> None:
+    rendered = "".join(traceback.format_exception(error))
+    assert "_SecretAdapterError" not in rendered
     assert "secret-" not in rendered
 
 
@@ -664,6 +729,84 @@ def test_non_exception_base_exceptions_are_never_sanitized(
     chunker = _chunker(_OffsetFailureCounter(error_type))
     with pytest.raises(error_type):
         chunker.split(_section("s" * 601), parser_version="parser-v1")
+
+
+@pytest.mark.parametrize(
+    ("side", "operation"),
+    [
+        ("encode", "len"),
+        ("encode", "iter"),
+        ("encode", "getitem"),
+        ("offsets", "len"),
+        ("offsets", "iter"),
+        ("offsets", "getitem"),
+    ],
+    ids=[
+        "encode-len",
+        "encode-iter",
+        "encode-getitem",
+        "offsets-len",
+        "offsets-iter",
+        "offsets-getitem",
+    ],
+)
+def test_adapter_sequence_exceptions_are_sanitized_without_traceback_leaks(
+    side: str, operation: str
+) -> None:
+    """Consuming an adapter Sequence must not expose its ordinary failures."""
+    error = _SecretAdapterError(f"secret-{side}-{operation}-detail")
+    counter = _SequenceOperationFailureCounter(side, operation, error)
+    source = "# Secret\nbody\n" if side == "encode" else "s" * 601
+    caught_error: Exception | None = None
+
+    try:
+        _chunker(counter).split(_section(source), parser_version="parser-v1")
+    except (_SecretAdapterError, ValueError) as raised:
+        caught_error = raised
+    else:
+        pytest.fail("adapter Sequence failure was not raised")
+
+    assert type(caught_error) is ValueError
+    _assert_sanitized_tokenizer_error(
+        caught_error, expected_message="Token counter failed"
+    )
+    _assert_traceback_has_no_adapter_secret(caught_error)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize(
+    ("side", "operation"),
+    [
+        ("encode", "len"),
+        ("encode", "iter"),
+        ("encode", "getitem"),
+        ("offsets", "len"),
+        ("offsets", "iter"),
+        ("offsets", "getitem"),
+    ],
+    ids=[
+        "encode-len",
+        "encode-iter",
+        "encode-getitem",
+        "offsets-len",
+        "offsets-iter",
+        "offsets-getitem",
+    ],
+)
+def test_adapter_sequence_base_exceptions_preserve_the_same_object(
+    side: str,
+    operation: str,
+    error_type: type[BaseException],
+) -> None:
+    """Process-control signals must cross Sequence consumption unchanged."""
+    error = error_type(f"secret-{side}-{operation}-detail")
+    counter = _SequenceOperationFailureCounter(side, operation, error)
+    source = "# A\nbody\n" if side == "encode" else "s" * 601
+
+    with pytest.raises(error_type) as caught:
+        _chunker(counter).split(_section(source), parser_version="parser-v1")
+
+    assert caught.value is error
 
 
 def test_chunk_contract_exposes_stable_version_and_default_config() -> None:

@@ -304,16 +304,18 @@ class ParentChildChunker:
         result = _call_token_counter(self._offsets, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        if (
-            not isinstance(result, Sequence)
-            or isinstance(result, (str, bytes, bytearray))
-            or len(result) != len(tokens)
-        ):
+        materialized = _materialize_sequence(result)
+        if materialized is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        if materialized is None:
+            raise ValueError("Token counter returned malformed data") from None
+        declared_length, spans = materialized
+        if declared_length != len(tokens):
             raise ValueError("Token counter returned malformed data") from None
 
         offsets: list[tuple[int, int]] = []
         previous_end = 0
-        for span in result:
+        for span in spans:
             if (
                 type(span) is not tuple
                 or len(span) != 2
@@ -332,14 +334,17 @@ class ParentChildChunker:
         result = _call_token_counter(self._encode, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        if (
-            not isinstance(result, Sequence)
-            or isinstance(result, (str, bytes, bytearray))
-            or any(type(token) is not int for token in result)
-            or (text and not result)
+        materialized = _materialize_sequence(result)
+        if materialized is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        if materialized is None:
+            raise ValueError("Token counter returned malformed data") from None
+        declared_length, tokens = materialized
+        if any(type(token) is not int for token in tokens) or (
+            text and declared_length == 0
         ):
             raise ValueError("Token counter returned malformed data") from None
-        return tuple(result)
+        return tokens
 
 
 def _token_counter_methods(
@@ -360,6 +365,17 @@ def _call_token_counter(operation: Callable[[str], object], text: str) -> object
         return operation(text)
     except Exception:
         return _TOKEN_COUNTER_FAILED
+
+
+def _materialize_sequence(result: object) -> object:
+    if not isinstance(result, Sequence) or isinstance(result, (str, bytes, bytearray)):
+        return None
+    try:
+        declared_length = len(result)
+        items = tuple(result)
+    except Exception:
+        return _TOKEN_COUNTER_FAILED
+    return declared_length, items
 
 
 def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
