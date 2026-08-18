@@ -115,6 +115,50 @@ def test_profile_applies_segment_globs_exclusions_and_canonicalization() -> None
     assert not segment_pattern_profile.includes("uiux/spec.md")
 
 
+def test_terminal_recursive_glob_matches_a_deep_path_without_stack_overflow() -> None:
+    """A terminal ** includes arbitrarily deep repository-relative paths."""
+    profile = profiles.SourceProfileConfig(
+        source_key="test",
+        include_patterns=("docs/**",),
+        exclude_patterns=(),
+    )
+    deep_path = "docs/" + "/".join("section" for _ in range(1_100))
+
+    try:
+        matched = profile.includes(deep_path)
+    except RecursionError:
+        pytest.fail("terminal ** matching must not depend on the Python call stack")
+
+    assert matched
+
+
+def test_recursive_glob_handles_consecutive_terminal_and_deep_nonmatching_paths() -> (
+    None
+):
+    """Segment-aware ** preserves zero-or-more semantics on adversarial paths."""
+    consecutive_profile = profiles.SourceProfileConfig(
+        source_key="test",
+        include_patterns=("docs/**/**/guide?.md",),
+        exclude_patterns=(),
+    )
+    terminal_profile = profiles.SourceProfileConfig(
+        source_key="test",
+        include_patterns=("docs/**",),
+        exclude_patterns=(),
+    )
+    nonmatching_profile = profiles.SourceProfileConfig(
+        source_key="test",
+        include_patterns=("docs/**/**/**/**/**/**/**/**/target.md",),
+        exclude_patterns=(),
+    )
+    deep_nonmatch = "docs/" + "/".join([*("section" for _ in range(18)), "other.md"])
+
+    assert consecutive_profile.includes("docs/guide1.md")
+    assert consecutive_profile.includes("docs/design/release/guide2.md")
+    assert terminal_profile.includes("docs/guide.md")
+    assert not nonmatching_profile.includes(deep_nonmatch)
+
+
 @pytest.mark.parametrize(
     "source_path",
     ["/uiux/spec.md", "uiux/../spec.md", "uiux\\spec.md", "uiux/\x00spec.md", "", "."],

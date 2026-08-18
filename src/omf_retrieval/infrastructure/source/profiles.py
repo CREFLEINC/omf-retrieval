@@ -164,33 +164,38 @@ def _match_segments(
     pattern_index: int = 0,
     path_index: int = 0,
 ) -> bool:
-    if pattern_index == len(pattern_segments):
-        return path_index == len(path_segments)
+    pending_states = [(pattern_index, path_index)]
+    visited_states = set(pending_states)
+    pattern_length = len(pattern_segments)
+    path_length = len(path_segments)
 
-    pattern_segment = pattern_segments[pattern_index]
-    if pattern_segment == "**":
-        return (
-            _match_segments(
-                pattern_segments=pattern_segments,
-                path_segments=path_segments,
-                pattern_index=pattern_index + 1,
-                path_index=path_index,
-            )
-            or path_index < len(path_segments)
-            and _match_segments(
-                pattern_segments=pattern_segments,
-                path_segments=path_segments,
-                pattern_index=pattern_index,
-                path_index=path_index + 1,
-            )
-        )
-    return (
-        path_index < len(path_segments)
-        and fnmatchcase(path_segments[path_index], pattern_segment)
-        and _match_segments(
-            pattern_segments=pattern_segments,
-            path_segments=path_segments,
-            pattern_index=pattern_index + 1,
-            path_index=path_index + 1,
-        )
-    )
+    while pending_states:
+        current_pattern_index, current_path_index = pending_states.pop()
+        if current_pattern_index == pattern_length:
+            if current_path_index == path_length:
+                return True
+            continue
+
+        pattern_segment = pattern_segments[current_pattern_index]
+        if pattern_segment == "**":
+            zero_segment_state = (current_pattern_index + 1, current_path_index)
+            if zero_segment_state not in visited_states:
+                visited_states.add(zero_segment_state)
+                pending_states.append(zero_segment_state)
+
+            if current_path_index < path_length:
+                consuming_state = (current_pattern_index, current_path_index + 1)
+                if consuming_state not in visited_states:
+                    visited_states.add(consuming_state)
+                    pending_states.append(consuming_state)
+            continue
+
+        if current_path_index < path_length and fnmatchcase(
+            path_segments[current_path_index], pattern_segment
+        ):
+            next_state = (current_pattern_index + 1, current_path_index + 1)
+            if next_state not in visited_states:
+                visited_states.add(next_state)
+                pending_states.append(next_state)
+
+    return False
