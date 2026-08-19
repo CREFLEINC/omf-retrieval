@@ -703,80 +703,151 @@ def test_heading_at_soft_max_rejects_nonempty_overflow_without_source_leak() -> 
     assert secret_body not in str(caught.value)
 
 
-def _assert_long_heading_character_chunks(
+_HEADING_TARGET_TOKENS = 400
+_HEADING_SOFT_MAX_TOKENS = 600
+_HEADING_OVERLAP_TOKENS = 64
+_HEADING_MIN_TARGET_SOURCE_TOKENS = 128
+_HEADING_WORK_MULTIPLIER = 24
+_HEADING_EMITTED_TOKEN_MULTIPLIER = 10
+
+
+def _assert_heading_window_invariants(
     counter: _CountingTokenCounter,
     chunks: Sequence[object],
     body: str,
     *,
+    prefix_tokens: int,
     repeated: Sequence[object],
+    split_work: int,
+    split_calls: int,
 ) -> None:
     actual_counts = [len(counter.encode(chunk.search_text)) for chunk in chunks]
     assert actual_counts == [chunk.token_count for chunk in chunks]
-    assert all(count <= 600 for count in actual_counts)
+    assert all(count <= _HEADING_SOFT_MAX_TOKENS for count in actual_counts)
     assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
     assert all((chunk.line_start, chunk.line_end) == (2, 2) for chunk in chunks)
-    assert all(
-        chunk.raw_text.startswith(previous.raw_text[-64:])
-        for previous, chunk in zip(chunks, chunks[1:], strict=False)
-    )
-    assert _reconstruct_character_chunks(chunks) == body
     assert chunks == repeated
     assert [chunk.chunk_hash for chunk in chunks] == [
         chunk.chunk_hash for chunk in repeated
     ]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
+
+    starts = [body.find(chunk.raw_text) for chunk in chunks]
+    assert starts[0] == 0
+    assert all(start >= 0 for start in starts)
+    reconstructed = chunks[0].raw_text
+    for index, (previous, chunk) in enumerate(
+        zip(chunks, chunks[1:], strict=False), start=1
+    ):
+        previous_start = starts[index - 1]
+        chunk_start = starts[index]
+        previous_end = previous_start + len(previous.raw_text)
+        overlap = previous_end - chunk_start
+        assert chunk_start - previous_start >= (len(previous.raw_text) + 1) // 2
+        assert overlap == min(_HEADING_OVERLAP_TOKENS, len(previous.raw_text) // 2)
+        if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
+            assert overlap == _HEADING_OVERLAP_TOKENS
+        reconstructed += chunk.raw_text[overlap:]
+    assert reconstructed == body
+
+    target_budget = _HEADING_TARGET_TOKENS - prefix_tokens
+    soft_budget = _HEADING_SOFT_MAX_TOKENS - prefix_tokens
+    use_target_window = target_budget >= _HEADING_MIN_TARGET_SOURCE_TOKENS
+    selected_budget = target_budget if use_target_window else soft_budget
+    selected_overlap = min(_HEADING_OVERLAP_TOKENS, selected_budget // 2)
+    selected_advance = selected_budget - selected_overlap
+    selected_forced_tokens = len(body) - soft_budget
+    selected_bound = (
+        selected_forced_tokens + selected_advance - 1
+    ) // selected_advance + 1
+    assert len(chunks[0].raw_text) == selected_budget
+    assert len(chunks) <= selected_bound
+
+    if not use_target_window:
+        soft_overlap = min(_HEADING_OVERLAP_TOKENS, soft_budget // 2)
+        soft_advance = soft_budget - soft_overlap
+        theoretical_soft_children = (
+            selected_forced_tokens + soft_advance - 1
+        ) // soft_advance + 1
+        assert len(chunks) <= theoretical_soft_children
+
+    original_search_tokens = prefix_tokens + len(body)
+    assert split_work <= _HEADING_WORK_MULTIPLIER * original_search_tokens
+    assert split_calls <= 2 * len(chunks) + 4
+    assert sum(actual_counts) <= (
+        _HEADING_EMITTED_TOKEN_MULTIPLIER * original_search_tokens
+    )
 
 
-def test_heading_prefix_399_uses_soft_window_to_avoid_output_amplification() -> None:
-    """A one-token target window must not emit one child per source token."""
-    heading = "H" * 398
-    body = "".join(chr(0x4E00 + index) for index in range(1_000))
+def _split_character_heading(
+    prefix_tokens: int, body_length: int
+) -> tuple[_CountingTokenCounter, str, tuple[object, ...]]:
+    heading = "H" * (prefix_tokens - 1)
+    body = "".join(chr(0x6000 + index) for index in range(body_length))
     source = f"# {heading}\n{body}"
     counter = _CountingTokenCounter()
 
     chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
+    split_work = counter.input_work
+    split_calls = counter.calls
     repeated = _chunker().split(_section(source), parser_version="parser-v1")
 
-    assert len(_FakeTokenCounter().encode(heading + "\n")) == 399
-    assert len(chunks) <= 8, (
-        f"children={len(chunks)}, adapter input work={counter.input_work}"
+    assert len(_FakeTokenCounter().encode(heading + "\n")) == prefix_tokens
+    _assert_heading_window_invariants(
+        counter,
+        chunks,
+        body,
+        prefix_tokens=prefix_tokens,
+        repeated=repeated,
+        split_work=split_work,
+        split_calls=split_calls,
     )
-    assert counter.input_work <= 20_000
-    assert len(chunks[0].raw_text) == 201
-    _assert_long_heading_character_chunks(counter, chunks, body, repeated=repeated)
+    return counter, body, chunks
 
 
 @pytest.mark.parametrize(
-    ("heading_length", "expected_first_source", "uses_soft_window"),
+    "prefix_tokens",
     [
-        (334, 65, False),
-        (335, 264, True),
-        (399, 200, True),
-        (400, 199, True),
+        271,
+        272,
+        273,
+        333,
+        334,
+        335,
+        336,
+        337,
+        399,
+        400,
+        401,
     ],
 )
-def test_heading_overlap_budget_boundary_uses_actual_prefix_token_count(
-    heading_length: int,
-    expected_first_source: int,
-    uses_soft_window: bool,
+@pytest.mark.parametrize("body_length", [1_000, 4_000])
+def test_heading_prefix_sweep_bounds_window_progress_and_amplification(
+    prefix_tokens: int, body_length: int
 ) -> None:
-    """The trailing heading newline moves budget 65 to the fallback boundary."""
-    heading = "H" * heading_length
-    body = "".join(chr(0x5200 + index) for index in range(1_000))
-    source = f"# {heading}\n{body}"
-    counter = _CountingTokenCounter()
+    """Every chosen window bounds children, work, tokens, and cursor progress."""
+    _split_character_heading(prefix_tokens, body_length)
 
-    chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
-    repeated = _chunker().split(_section(source), parser_version="parser-v1")
 
-    actual_prefix_tokens = len(_FakeTokenCounter().encode(heading + "\n"))
-    assert actual_prefix_tokens == heading_length + 1
+@pytest.mark.parametrize(
+    ("prefix_tokens", "expected_first_source", "expected_overlap"),
+    [(472, 128, 64), (473, 127, 63)],
+)
+@pytest.mark.parametrize("body_length", [1_000, 4_000])
+def test_soft_window_half_progress_boundary_catches_threshold_mutations(
+    prefix_tokens: int,
+    expected_first_source: int,
+    expected_overlap: int,
+    body_length: int,
+) -> None:
+    """The 128/127 soft-window boundary preserves at least half new source."""
+    _, body, chunks = _split_character_heading(prefix_tokens, body_length)
+
+    first_start = body.find(chunks[0].raw_text)
+    second_start = body.find(chunks[1].raw_text)
+    actual_overlap = first_start + len(chunks[0].raw_text) - second_start
     assert len(chunks[0].raw_text) == expected_first_source
-    if uses_soft_window:
-        assert len(chunks) <= 8
-        assert counter.input_work <= 20_000
-    else:
-        assert chunks[0].token_count == 400
-    _assert_long_heading_character_chunks(counter, chunks, body, repeated=repeated)
+    assert actual_overlap == expected_overlap
 
 
 def _boundary_sensitive_split(
