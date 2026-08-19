@@ -13,6 +13,7 @@ from omf_retrieval.application.indexing.ports import (
     ParsedMarkdown,
     ParsedSection,
     TokenizerDescriptor,
+    split_physical_lines,
 )
 from omf_retrieval.infrastructure.source.chunker import (
     ParentChildChunker,
@@ -753,6 +754,53 @@ def test_public_child_builds_boundary_sensitive_parent_without_quadratic_work() 
     assert context.line_start <= child.line_start <= child.line_end <= context.line_end
     assert counter.calls <= 64
     assert counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (len(body) + 1_200)
+
+
+def _measure_boundary_sensitive_multiblock_parent(
+    paragraph_count: int,
+) -> tuple[_BoundarySensitiveContextCounter, ParentContext]:
+    body = "x\n\n" * paragraph_count + "MATCH\n\n"
+    section = _section(f"# H\n{body}")
+    matched_line = 2 + 2 * paragraph_count
+    counter = _BoundarySensitiveContextCounter(
+        body,
+        maximum_work=_CONTEXT_PROBE_WORK_MULTIPLIER * (len(body) + 1_200),
+    )
+
+    context = _builder(token_counter=counter).build(
+        section,
+        matched_raw_text="MATCH\n",
+        matched_line_start=matched_line,
+        matched_line_end=matched_line,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    body_lines = split_physical_lines(body)
+    relative_start = context.line_start - 2
+    relative_end = context.line_end - 1
+    assert len(section.blocks) == 2 * paragraph_count + 2
+    assert context.raw_text == "".join(body_lines[relative_start:relative_end])
+    assert "MATCH\n" in context.raw_text
+    assert context.token_count == len(counter.encode(context.raw_text)) <= 1_200
+    assert context.line_start <= matched_line <= context.line_end
+    return counter, context
+
+
+def test_boundary_sensitive_multiblock_parent_has_linear_bounded_probe_work() -> None:
+    """Block expansion may not encode every one-block-larger source substring."""
+    small_counter, small = _measure_boundary_sensitive_multiblock_parent(500)
+    large_counter, large = _measure_boundary_sensitive_multiblock_parent(1_000)
+    repeated_counter, repeated = _measure_boundary_sensitive_multiblock_parent(1_000)
+
+    assert large == repeated
+    assert small.raw_text != "x\n\n" * 500 + "MATCH\n\n"
+    assert large.raw_text != "x\n\n" * 1_000 + "MATCH\n\n"
+    assert small_counter.calls <= 64
+    assert large_counter.calls <= 80
+    assert repeated_counter.calls <= 80
+    assert small_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (1_507 + 1_200)
+    assert large_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (3_007 + 1_200)
+    assert large_counter.input_work / small_counter.input_work < 2.5
 
 
 @pytest.mark.parametrize(

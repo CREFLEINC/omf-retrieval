@@ -1746,12 +1746,11 @@ def test_one_token_only_large_boundary_correction_fails_closed(
 
 def test_nonmonotonic_boundary_probe_checks_adjacent_candidate_above_capacity() -> None:
     """An invalid lower candidate may not hide an adjacent verified upper fit."""
-    heading = "H" * 474
+    heading = "H" * 472
     heading_prefix = heading + "\n"
     body = "".join(chr(0x7800 + index) for index in range(1_000))
     counter = _BoundarySensitiveTokenCounter(
         heading_prefix,
-        standalone_prefix_tokens=473,
         combined_token_counts={128: 601, 129: 600},
         maximum_calls=512,
         maximum_work=500 * (len(heading_prefix) + len(body)),
@@ -1762,7 +1761,6 @@ def test_nonmonotonic_boundary_probe_checks_adjacent_candidate_above_capacity() 
     )
     repeated_counter = _BoundarySensitiveTokenCounter(
         heading_prefix,
-        standalone_prefix_tokens=473,
         combined_token_counts={128: 601, 129: 600},
         maximum_calls=512,
         maximum_work=500 * (len(heading_prefix) + len(body)),
@@ -1771,11 +1769,56 @@ def test_nonmonotonic_boundary_probe_checks_adjacent_candidate_above_capacity() 
         _section(f"# {heading}\n{body}"), parser_version="parser-v1"
     )
 
-    assert len(counter.encode(heading_prefix)) == 473
+    assert len(heading_prefix) == 473
+    assert len(counter.encode(heading_prefix)) == 1
     assert len(counter.encode(heading_prefix + body[:128])) == 601
     assert len(counter.encode(heading_prefix + body[:129])) == 600
     assert chunks == repeated
     assert len(chunks[0].raw_text) == 129
+    assert _reconstruct_variable_overlap(chunks) == body
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
+        for chunk in chunks
+    )
+    assert all(chunk.line_start == chunk.line_end == 2 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert counter.calls <= 512
+    assert counter.input_work <= 500 * (len(heading_prefix) + len(body))
+
+
+@pytest.mark.parametrize(
+    ("physical_prefix_length", "first_piece_tokens", "effective_overlap"),
+    [(472, 128, 64), (473, 127, 63)],
+)
+def test_combined_character_boundary_derives_progress_from_actual_soft_capacity(
+    physical_prefix_length: int,
+    first_piece_tokens: int,
+    effective_overlap: int,
+) -> None:
+    """A one-token standalone prefix may consume physical room when combined."""
+    heading = "H" * (physical_prefix_length - 1)
+    heading_prefix = heading + "\n"
+    body = "".join(chr(0x7200 + index) for index in range(1_000))
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=512,
+        maximum_work=500 * (len(heading_prefix) + len(body)),
+    )
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    repeated = _chunker(_BoundarySensitiveTokenCounter(heading_prefix)).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert len(heading_prefix) == physical_prefix_length
+    assert len(counter.encode(heading_prefix)) == 1
+    assert len(counter.encode(heading_prefix + body[:first_piece_tokens])) == 600
+    assert chunks == repeated
+    assert len(chunks[0].raw_text) == first_piece_tokens
+    assert chunks[1].raw_text.startswith(chunks[0].raw_text[-effective_overlap:])
     assert _reconstruct_variable_overlap(chunks) == body
     assert all(
         chunk.token_count == len(counter.encode(chunk.search_text)) <= 600

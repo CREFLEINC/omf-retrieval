@@ -67,7 +67,6 @@ class _ContextSearchBudget:
 _TOKEN_COUNTER_FAILED = object()
 _PARSER_FAILED = object()
 _WINDOW_PROBE_LIMIT = 24
-_WINDOW_NEIGHBOR_RADIUS = 2
 _WINDOW_SEARCH_INPUT_MULTIPLIER = 64
 _TINY_CORRECTIVE_REMAINDER_TOKENS = 64
 _CONTEXT_BASE_PROBES = 16
@@ -201,9 +200,8 @@ class ParentContextBuilder:
             line_start=blocks[left].line_start,
             line_end=blocks[right].line_end,
         )
-        if self._token_count(excerpt.raw_text) > (
-            self._config.parent_context_max_tokens
-        ):
+        seed_token_count = self._token_count(excerpt.raw_text)
+        if seed_token_count > self._config.parent_context_max_tokens:
             if seed_left != seed_right:
                 raise ValueError(
                     "Matched parser blocks exceed the parent context limit"
@@ -225,6 +223,29 @@ class ParentContextBuilder:
                 excerpt,
                 matched_start=matched_start,
                 matched_end=matched_start + len(matched_raw_text),
+            )
+
+        expansion_windows = _block_expansion_windows(
+            len(blocks), seed_left=seed_left, seed_right=seed_right
+        )
+        source_length = sum(len(line) for line in source_lines)
+        search_budget = _context_search_budget(
+            source_length,
+            self._config.parent_context_max_tokens,
+        )
+        if not _can_exhaustively_expand_blocks(
+            expansion_windows,
+            source_length=source_length,
+            search_budget=search_budget,
+        ):
+            return self._select_blocks_bounded(
+                blocks,
+                source_lines,
+                body_line_start=body_line_start,
+                expansion_windows=expansion_windows,
+                seed_excerpt=excerpt,
+                seed_token_count=seed_token_count,
+                search_budget=search_budget,
             )
 
         while left > 0 or right + 1 < len(blocks):
@@ -254,6 +275,39 @@ class ParentContextBuilder:
             if not added:
                 break
         return excerpt
+
+    def _select_blocks_bounded(
+        self,
+        blocks: tuple[ParsedBlock, ...],
+        source_lines: tuple[str, ...],
+        *,
+        body_line_start: int,
+        expansion_windows: tuple[tuple[int, int], ...],
+        seed_excerpt: _Excerpt,
+        seed_token_count: int,
+        search_budget: _ContextSearchBudget,
+    ) -> _Excerpt:
+        limit = self._config.parent_context_max_tokens
+        candidate_indices = _block_context_probe_indices(
+            len(expansion_windows),
+            expected_expansions=max(0, limit - seed_token_count),
+        )
+        best = seed_excerpt
+        for index in candidate_indices:
+            left, right = expansion_windows[index]
+            candidate = _relative_line_excerpt(
+                source_lines,
+                body_line_start=body_line_start,
+                line_start=blocks[left].line_start,
+                line_end=blocks[right].line_end,
+            )
+            if not search_budget.consume(len(candidate.raw_text)):
+                break
+            if self._token_count(candidate.raw_text) > limit:
+                continue
+            if len(candidate.raw_text) > len(best.raw_text):
+                best = candidate
+        return best
 
     def _oversized_block_excerpt(
         self,
@@ -533,6 +587,7 @@ class ParentChildChunker:
                 heading_prefix=heading_prefix,
                 token_limit=self._config.atomic_max_tokens,
                 search_budget=search_budget,
+                allow_reduced_progress=False,
             )
             if window_end is None:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
@@ -658,6 +713,7 @@ class ParentChildChunker:
                 heading_prefix=heading_prefix,
                 token_limit=token_limit,
                 search_budget=search_budget,
+                allow_reduced_progress=token_limit == self._config.soft_max_tokens,
             )
             if window_end is None and token_limit < self._config.soft_max_tokens:
                 window_end = self._bounded_window_end(
@@ -668,6 +724,7 @@ class ParentChildChunker:
                     heading_prefix=heading_prefix,
                     token_limit=self._config.soft_max_tokens,
                     search_budget=search_budget,
+                    allow_reduced_progress=True,
                 )
             if window_end is None:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
@@ -696,6 +753,7 @@ class ParentChildChunker:
         heading_prefix: str,
         token_limit: int,
         search_budget: _WindowSearchBudget,
+        allow_reduced_progress: bool,
     ) -> int | None:
         candidate = min(start + source_budget, len(offsets))
         start_offset = _token_boundary(offsets, start, len(raw_text))
@@ -703,12 +761,6 @@ class ParentChildChunker:
         if available_tokens <= 0:
             return None
 
-        remaining_tokens = len(offsets) - start
-        minimum_progress = (
-            1
-            if remaining_tokens <= _TINY_CORRECTIVE_REMAINDER_TOKENS
-            else min(available_tokens, _minimum_window_progress(source_budget))
-        )
         probes = 0
 
         def token_count(end: int) -> int:
@@ -725,26 +777,36 @@ class ParentChildChunker:
         if candidate_count <= token_limit:
             return candidate
 
+        estimated_capacity = max(
+            1,
+            available_tokens - max(0, candidate_count - token_limit),
+        )
+        remaining_tokens = len(offsets) - start
+        configured_progress = _configured_window_progress(
+            source_budget, overlap_tokens=self._config.overlap_tokens
+        )
+        if (
+            estimated_capacity < configured_progress
+            and remaining_tokens > _TINY_CORRECTIVE_REMAINDER_TOKENS
+            and (
+                not allow_reduced_progress
+                or self._config.overlap_tokens == 0
+                or estimated_capacity <= self._config.overlap_tokens
+            )
+        ):
+            return None
+        minimum_progress = min(
+            available_tokens,
+            estimated_capacity,
+            configured_progress,
+        )
         minimum_end = start + minimum_progress
-        maximum_end = min(len(offsets), candidate + _WINDOW_NEIGHBOR_RADIUS)
-        centers = [
-            candidate - max(1, candidate_count - token_limit),
-            candidate,
-            minimum_end,
-            (minimum_end + candidate) // 2,
-            minimum_end + (candidate - minimum_end) // 4,
-            minimum_end + 3 * (candidate - minimum_end) // 4,
-        ]
-        candidates: list[int] = []
-        seen = {candidate}
-        for center_index, center in enumerate(centers):
-            radius = _WINDOW_NEIGHBOR_RADIUS if center_index < len(centers) - 2 else 0
-            for end in range(center - radius, center + radius + 1):
-                if minimum_end <= end <= maximum_end and end not in seen:
-                    seen.add(end)
-                    candidates.append(end)
-        if len(candidates) + probes > _WINDOW_PROBE_LIMIT:
-            raise ValueError("Tokenizer offsets cannot form a non-empty child")
+        estimated_end = start + estimated_capacity
+        candidates = _window_probe_ends(
+            minimum_end=minimum_end,
+            estimated_end=estimated_end,
+            maximum_end=candidate,
+        )
 
         best: int | None = None
         for end in candidates:
@@ -841,8 +903,11 @@ class ParentChildChunker:
         return tokens
 
 
-def _minimum_window_progress(source_budget: int) -> int:
-    return min(128, max(1, source_budget // 2))
+def _configured_window_progress(source_budget: int, *, overlap_tokens: int) -> int:
+    configured_progress = (
+        2 * overlap_tokens if overlap_tokens else (source_budget + 1) // 2
+    )
+    return min(source_budget, max(1, configured_progress))
 
 
 def _window_search_budget(
@@ -853,7 +918,9 @@ def _window_search_budget(
     source_budget: int,
     overlap_tokens: int,
 ) -> _WindowSearchBudget:
-    minimum_progress = _minimum_window_progress(source_budget)
+    minimum_progress = _configured_window_progress(
+        source_budget, overlap_tokens=overlap_tokens
+    )
     minimum_overlap = min(overlap_tokens, minimum_progress // 2)
     minimum_advance = max(1, minimum_progress - minimum_overlap)
     expected_windows = (source_tokens + minimum_advance - 1) // minimum_advance + 1
@@ -861,6 +928,87 @@ def _window_search_budget(
         calls_left=2 * _WINDOW_PROBE_LIMIT * expected_windows,
         input_chars_left=_WINDOW_SEARCH_INPUT_MULTIPLIER
         * max(1, len(raw_text) + expected_windows * len(heading_prefix)),
+    )
+
+
+def _window_probe_ends(
+    *, minimum_end: int, estimated_end: int, maximum_end: int
+) -> tuple[int, ...]:
+    centers = (
+        estimated_end,
+        minimum_end,
+        maximum_end,
+        (minimum_end + maximum_end) // 2,
+        minimum_end + (maximum_end - minimum_end) // 4,
+        minimum_end + 3 * (maximum_end - minimum_end) // 4,
+    )
+    candidates: list[int] = []
+    seen: set[int] = set()
+
+    def add(candidate: int) -> None:
+        if (
+            minimum_end <= candidate <= maximum_end
+            and candidate not in seen
+            and len(candidates) < _WINDOW_PROBE_LIMIT - 1
+        ):
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for center in centers:
+        add(center)
+    distance = 1
+    while len(candidates) < _WINDOW_PROBE_LIMIT - 1 and distance <= maximum_end:
+        before = len(candidates)
+        add(estimated_end - distance)
+        add(estimated_end + distance)
+        if len(candidates) == before and (
+            estimated_end - distance < minimum_end
+            and estimated_end + distance > maximum_end
+        ):
+            break
+        distance *= 2
+    return tuple(candidates)
+
+
+def _block_expansion_windows(
+    block_count: int, *, seed_left: int, seed_right: int
+) -> tuple[tuple[int, int], ...]:
+    left = seed_left
+    right = seed_right
+    windows = [(left, right)]
+    while left > 0 or right + 1 < block_count:
+        candidates: list[tuple[int, int, str]] = []
+        if left > 0:
+            candidates.append((seed_left - left + 1, 0, "left"))
+        if right + 1 < block_count:
+            candidates.append((right - seed_right + 1, 1, "right"))
+        _, _, side = min(candidates)
+        if side == "left":
+            left -= 1
+        else:
+            right += 1
+        windows.append((left, right))
+    return tuple(windows)
+
+
+def _block_context_probe_indices(
+    window_count: int, *, expected_expansions: int
+) -> tuple[int, ...]:
+    last = window_count - 1
+    expected = min(expected_expansions, last)
+    return tuple(dict.fromkeys((last, max(0, last - 1), expected)))
+
+
+def _can_exhaustively_expand_blocks(
+    expansion_windows: tuple[tuple[int, int], ...],
+    *,
+    source_length: int,
+    search_budget: _ContextSearchBudget,
+) -> bool:
+    candidate_count = max(0, len(expansion_windows) - 1)
+    return (
+        2 * candidate_count <= search_budget.calls_left
+        and 2 * candidate_count * source_length <= search_budget.input_chars_left
     )
 
 
