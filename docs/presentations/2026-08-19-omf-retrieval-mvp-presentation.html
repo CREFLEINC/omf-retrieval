@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CREFLE 정보 조회 플랫폼 MVP · CREFLE</title>
+
+<!-- CREFLE 문서 디자인 시스템의 인접 로컬 번들을 사용한다. -->
+<link rel="stylesheet" href="./crefle-doc/crefle-doc.css">
+<style>
+  .slide .deck-flow {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: var(--s-4);
+    margin-top: var(--s-4);
+  }
+
+  .slide .deck-flow.vertical {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    grid-template-columns: 1fr;
+    gap: var(--s-3);
+  }
+
+  .slide .deck-node {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--s-2);
+    min-width: 0;
+    padding: var(--s-5);
+    border: thin solid var(--outline-variant);
+    border-radius: var(--radius-md);
+    background: var(--surface-container-low);
+  }
+
+  .slide .deck-node.primary {
+    border-color: var(--primary);
+    background: var(--primary-container);
+  }
+
+  .slide .deck-node strong,
+  .slide .deck-node span {
+    display: block;
+  }
+
+  .slide .deck-node span,
+  .slide .compact-list,
+  .slide .diagram-note {
+    font-size: var(--slide-small);
+    line-height: var(--leading-snug);
+  }
+
+  .slide .deck-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-weight: var(--w-bold);
+    animation: flow-step var(--dur-emph) var(--ease-standard) infinite alternate;
+  }
+
+  .slide .architecture {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--s-6);
+    align-items: stretch;
+    margin-top: var(--s-4);
+  }
+
+  .slide .architecture-column {
+    display: grid;
+    gap: var(--s-4);
+  }
+
+  .slide .hierarchy {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s-6);
+    align-items: start;
+    margin-top: var(--s-4);
+  }
+
+  .slide .hierarchy-parent {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: calc(100% - var(--s-24));
+  }
+
+  .slide .decision-stack {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--s-4);
+    align-items: stretch;
+    margin-top: var(--s-4);
+  }
+
+  .slide .gate-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s-5);
+    margin-top: var(--s-4);
+  }
+
+  .slide .compact-list {
+    margin: var(--s-2) 0 0;
+    padding-left: var(--s-6);
+  }
+
+  .slide .compact-list li {
+    margin-bottom: var(--s-2);
+  }
+
+  .slide .metric-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2) var(--s-5);
+    margin-top: var(--s-2);
+  }
+
+  .slide .metric-line span {
+    font-family: var(--font-mono);
+    font-size: var(--slide-small);
+  }
+
+  .slide .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: var(--s-3);
+    margin-top: var(--s-5);
+  }
+
+  .slide .phase-track .deck-node {
+    animation: rise-step var(--dur-long) var(--ease-decelerate) both;
+  }
+
+  .slide .phase-track .deck-node:nth-child(2) { animation-delay: var(--dur-short); }
+  .slide .phase-track .deck-node:nth-child(3) { animation-delay: var(--dur-medium); }
+  .slide .phase-track .deck-node:nth-child(4) { animation-delay: var(--dur-long); }
+  .slide .phase-track .deck-node:nth-child(5) { animation-delay: var(--dur-emph); }
+
+  @keyframes flow-step {
+    from { transform: translateX(calc(-1 * var(--s-1))); }
+    to { transform: translateX(var(--s-1)); }
+  }
+
+  @keyframes rise-step {
+    from { opacity: 0; transform: translateY(var(--s-4)); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<deck-stage>
+
+  <section class="slide dark">
+    <div class="stage middle">
+      <p class="eyebrow">CREFLE · 시스템 설계와 구현 로드맵</p>
+      <h1 class="display">CREFLE 정보 조회 플랫폼 MVP</h1>
+      <p class="lede">OMF 문서에서 검증 가능한 원문 근거를 찾아 재현 정보와 함께 전달한다</p>
+      <table data-document-info>
+        <caption>문서 정보</caption>
+        <tbody>
+          <tr><th>작성자</th><td>CREFLE Inc. CTO 김정규</td></tr>
+          <tr><th>작성일시</th><td>2026-08-19 KST</td></tr>
+          <tr><th>문서 버전</th><td>v1.0</td></tr>
+          <tr><th>열람 대상</th><td>CREFLE 프로젝트 관계자—기획·개발·검토 인원</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="footer"><span>CREFLE</span><span>01</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">01 · 문제와 목표</p>
+      <h2>답변보다 먼저, 근거를 찾고 다시 확인할 수 있어야 한다</h2>
+      <p class="lede">MVP의 성공 기준은 자연스러운 문장이 아니라 필요한 근거의 회수와 원문 재현이다</p>
+      <div class="grid-3">
+        <div class="card-primary">
+          <h3>요청</h3>
+          <p>“필요한 자료”를 자연어로 질의</p>
+        </div>
+        <div class="card">
+          <h3>검색</h3>
+          <p>키워드와 의미 검색으로 관련 절을 회수</p>
+        </div>
+        <div class="card">
+          <h3>검증</h3>
+          <p>인용·경로·제목·행·커밋·해시로 원문 재확인</p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>3일 MVP:</strong> OMF-MES 문서를 첫 검증 대상으로 삼되, 이후 source profile을 확장할 수 있는 범용 검색 기반을 만든다.
+      </div>
+    </div>
+    <div class="footer"><span>MVP INTENT</span><span>02</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="stage">
+      <p class="eyebrow">02 · 범위 경계</p>
+      <h2>MVP는 근거 검색 서비스이며, 생성형 답변과 Agent 도구는 2차다</h2>
+      <div class="grid-2">
+        <div class="card-primary">
+          <h3>MVP에 포함</h3>
+          <ul class="compact-list">
+            <li>지정 Git commit의 승인된 Markdown 색인</li>
+            <li>Parent–Child 분할과 하이브리드 검색</li>
+            <li>REST API·Search CLI·운영자 Admin CLI</li>
+            <li>근거 패키지, 품질·성능 평가, 롤백</li>
+          </ul>
+        </div>
+        <div class="card-filled">
+          <h3>2차 개발로 분리</h3>
+          <ul class="compact-list">
+            <li>LLM 요약·분석·답변 생성</li>
+            <li>대화형 Agent·MCP·function tool</li>
+            <li>리랭커·ANN·검색 확장</li>
+            <li>자동 백업·중앙 관측·Git 전체 이력 검색</li>
+          </ul>
+        </div>
+      </div>
+      <p class="diagram-note"><strong>검색 원본:</strong> OMF 저장소는 읽기 전용이며, 검색 플랫폼과 릴리스 주기를 분리한다.</p>
+    </div>
+    <div class="footer"><span>SCOPE</span><span>03</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">03 · 시스템 구성</p>
+      <h2>하나의 검색 호스트 안에서 API·임베딩·DB 경계를 분리한다</h2>
+      <div class="architecture" role="img" aria-label="사용자와 Search CLI가 중앙 Nginx Gateway를 거쳐 FastAPI 검색 API에 접근하고, API와 Admin CLI가 PostgreSQL 및 읽기 전용 OMF Git 원본을 사용하는 시스템 구성">
+        <div class="architecture-column">
+          <div class="deck-node primary"><strong>사내 사용자</strong><span>자연어 검색 요청</span></div>
+          <div class="deck-node"><strong>Search CLI</strong><span>REST API와 같은 계약</span></div>
+        </div>
+        <div class="architecture-column">
+          <div class="deck-node"><strong>중앙 Nginx Gateway</strong><span>TLS · 호스트 라우팅 · Request ID</span></div>
+          <div class="deck-node primary"><strong>FastAPI Search API</strong><span>인증·권한 · query embedding · RRF · evidence</span></div>
+          <div class="deck-node"><strong>Admin CLI</strong><span>index · evaluate · rollback · client 관리</span></div>
+        </div>
+        <div class="architecture-column">
+          <div class="deck-node primary"><strong>PostgreSQL 18</strong><span>pg_trgm · pgvector · 메타데이터</span></div>
+          <div class="deck-node"><strong>Qwen3 Embedding</strong><span>1024차원 · GPU 0</span></div>
+          <div class="deck-node"><strong>OMF Git clone</strong><span>지정 commit · 읽기 전용</span></div>
+        </div>
+      </div>
+      <p class="diagram-note">FastAPI 포트는 Gateway만 허용하고 PostgreSQL은 Compose 내부망에만 둔다.</p>
+    </div>
+    <div class="footer"><span>ARCHITECTURE</span><span>04</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="stage">
+      <p class="eyebrow">04 · 색인 파이프라인</p>
+      <h2>완성된 새 색인만 원자적으로 활성화한다</h2>
+      <div class="deck-flow" role="img" aria-label="commit 고정, 문서 스캔, 파싱과 청킹, 필요한 임베딩 생성, 검증, 원자 활성 전환 순서의 색인 파이프라인">
+        <div class="deck-node"><strong>1 · 고정</strong><span>Git commit 존재·clean 확인</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>2 · 스캔</strong><span>포함·제외·콘텐츠 해시</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>3 · 변환</strong><span>parse · child chunk · embedding</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>4 · 검증</strong><span>행 범위 · 차원 · 설정</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node primary"><strong>5 · 전환</strong><span>active pointer 단일 트랜잭션</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="card"><h3>재사용</h3><p>동일 콘텐츠·설정의 parse, chunk, embedding을 재사용</p></div>
+        <div class="card"><h3>실패 격리</h3><p>building 실패 시 현재 active는 그대로 유지</p></div>
+        <div class="card"><h3>2세대</h3><p>active와 previous를 보존해 Admin CLI로 롤백</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>INDEXING</span><span>05</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">05 · 문서 분할</p>
+      <h2>Child로 정확히 찾고 Parent로 맥락을 전달한다</h2>
+      <p class="lede">Parent(상위 절)–Child(검색 단위) 구조는 제목 계층과 원문 행 범위를 함께 보존한다</p>
+      <div class="hierarchy" role="img" aria-label="하나의 Parent 상위 절 아래 세 개 Child 검색 단위가 연결되고 각 Child가 제목 계층과 원문 행 범위를 보존하는 구조">
+        <div class="deck-node primary hierarchy-parent"><strong>Parent · 제목이 있는 상위 절</strong><span>요청 시 최대 1,200 tokens 문맥 제공</span></div>
+        <div class="deck-node"><strong>Child A</strong><span>작은 절은 600 tokens 이하 단일 단위</span></div>
+        <div class="deck-node"><strong>Child B</strong><span>긴 절은 목표 400 · soft max 600</span></div>
+        <div class="deck-node"><strong>Child C</strong><span>표·목록·인용은 경계 보존 · 최대 800</span></div>
+      </div>
+      <div class="callout"><strong>검색문 구성:</strong> 모든 child 앞에 제목 계층을 포함하고, 검색 결과에는 원본 child의 개별 행 범위와 점수를 남긴다.</div>
+    </div>
+    <div class="footer"><span>PARENT–CHILD</span><span>06</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="stage">
+      <p class="eyebrow">06 · 하이브리드 검색</p>
+      <h2>식별자와 의미를 각각 찾고 RRF로 순위를 결합한다</h2>
+      <p class="lede">RRF(Reciprocal Rank Fusion, 역순위 결합)는 두 검색기의 순위를 같은 가중치로 합친다</p>
+      <div class="deck-flow" role="img" aria-label="질의와 권한 필터에서 pg_trgm 상위 50개와 pgvector cosine 상위 50개를 병렬 검색한 뒤 RRF로 결합하고 Parent별 근거로 묶는 흐름">
+        <div class="deck-node"><strong>질의·필터</strong><span>권한·버전·경로를 후보 전에 적용</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>pg_trgm</strong><span>키워드 Top 50</span></div>
+        <div class="deck-node"><strong>pgvector</strong><span>cosine 정확 검색 Top 50</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node primary"><strong>RRF</strong><span>k=60 · weight 1.0 + 1.0</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>Evidence</strong><span>child 병합 · parent grouping</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="card"><h3>정확 검색</h3><p>초기 코퍼스는 ANN 인덱스 없이 시작</p></div>
+        <div class="card"><h3>순위</h3><p>evidence는 포함 child의 최고 RRF로 결정</p></div>
+        <div class="card"><h3>보존</h3><p>keyword·vector 개별 순위와 RRF 점수 반환</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>HYBRID RETRIEVAL</span><span>07</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">07 · 정본과 충돌</p>
+      <h2>명시적 근거로 우선순위를 판정하고, 남은 충돌은 숨기지 않는다</h2>
+      <div class="decision-stack" role="img" aria-label="중복 해시 확인, 영역 소유권 판정, 확정 표기 우선, 버전과 결정일 비교 후 남은 충돌은 양쪽 근거를 공개하는 정본 판정 흐름">
+        <div class="deck-node"><strong>1 · 동일 내용?</strong><span>SHA-256 콘텐츠 해시로 감지 · 모든 경로 보존</span></div>
+        <div class="deck-node"><strong>2 · 소유 영역</strong><span>화면·IA는 uiux · 업무·데이터는 docs</span></div>
+        <div class="deck-node"><strong>3 · 결정 지위</strong><span>확정기록·결정서·[확정] 우선</span></div>
+        <div class="deck-node primary"><strong>4 · 남은 충돌</strong><span>버전·결정일 비교 후 양쪽 근거 공개</span></div>
+      </div>
+      <div class="grid-2">
+        <div class="card"><h3>버전 범위</h3><p>일반 검색은 현재본 우선, 이전·변경 전·최초 요청은 과거본 검색</p></div>
+        <div class="card"><h3>추론 경계</h3><p>LLM 의미 추론은 하지 않고, 원문·관리 설정의 명시 관계만 potential_conflict로 표시</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>CANONICALITY</span><span>08</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="stage">
+      <p class="eyebrow">08 · 요청에서 근거까지</p>
+      <h2>검색은 권한을 먼저 좁히고 재현 가능한 evidence를 반환한다</h2>
+      <div class="deck-flow" role="img" aria-label="Bearer token 검증, 검색 요청 검증, 활성 색인 고정, 하이브리드 검색, 근거 패키지 반환의 요청 처리 순서">
+        <div class="deck-node"><strong>1 · 인증</strong><span>Bearer token · source grant</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>2 · 요청</strong><span>source · version · path · decision filter</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>3 · 검색</strong><span>active run 고정 · embedding · hybrid</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node primary"><strong>4 · 근거</strong><span>인용 · 제목 · 행 · commit · hash</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="card"><h3>응답 상태</h3><p>정상은 <code>ok</code>, 근거 없음은 HTTP 200 <code>no_evidence</code></p></div>
+        <div class="card"><h3>재현 좌표</h3><p>색인 run과 commit, source path, 1-based 행 범위</p></div>
+        <div class="card"><h3>판정 정보</h3><p>문서 날짜·버전·결정 상태·소유 영역·잠재 충돌</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>SEARCH CONTRACT</span><span>09</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">09 · 검증 데이터셋</p>
+      <h2>Agent는 후보를 만들고, 사람은 의미를 승인하며, evaluator는 계산한다</h2>
+      <div class="deck-flow" role="img" aria-label="Agent가 30개 질문과 원문 좌표 후보를 작성하고 사용자 또는 지정 reviewer가 의미를 검수해 gold 1.0을 승인한 뒤 evaluator가 지표와 게이트를 계산하는 역할 분담">
+        <div class="deck-node"><strong>Agent · 후보 작성</strong><span>고정 OMF commit에서 30개 질문·line coordinate candidate</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node primary"><strong>사용자·지정 reviewer</strong><span>질문 의도·필수 근거·관련도·no-evidence 의미 검수</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>Gold v1.0 승인</strong><span>사람 승인 전에는 v1.0 또는 품질 통과 주장 금지</span></div>
+        <div class="deck-arrow" aria-hidden="true">→</div>
+        <div class="deck-node"><strong>Evaluator · 계산</strong><span>좌표 검증 · 지표 · boolean gate · 재현 보고서</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="card"><h3>구성</h3><p>20 tuning · 10 hold-out</p></div>
+        <div class="card"><h3>좌표</h3><p>path · heading · line · commit · content hash</p></div>
+        <div class="card"><h3>등급</h3><p>3 직접 · 2 보조 · 1 부분 · 0 무관</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>GOLD DATASET</span><span>10</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="stage">
+      <p class="eyebrow">10 · 출시 게이트</p>
+      <h2>검색 품질을 먼저 통과한 설정만 성능을 비교한다</h2>
+      <div class="gate-grid" role="img" aria-label="회수, 순위와 정밀도, 100퍼센트 필수 게이트, RTX 4090 성능 기준으로 구성된 출시 게이트">
+        <div class="deck-node primary">
+          <strong>근거 회수</strong>
+          <div class="metric-line"><span>Recall@5 ≥ 0.85</span><span>Recall@10 ≥ 0.95</span><span>All-required@10 ≥ 0.85</span></div>
+        </div>
+        <div class="deck-node">
+          <strong>순위·정밀도</strong>
+          <div class="metric-line"><span>nDCG@10 ≥ 0.85</span><span>MRR@10 ≥ 0.90</span><span>Context Precision ≥ 0.80</span><span>Duplicate Ratio ≤ 0.10</span></div>
+        </div>
+        <div class="deck-node">
+          <strong>100% 필수</strong>
+          <span>provenance · 권한 · 과거본 · 충돌 양쪽 · no-evidence · 중복 경로</span>
+        </div>
+        <div class="deck-node">
+          <strong>RTX 4090 GPU 0 · warm</strong>
+          <div class="metric-line"><span>concurrency 1 p95 ≤ 2초</span><span>concurrency 5 p95 ≤ 3초</span><span>오류율 &lt; 1%</span><span>초기 색인 ≤ 15분</span></div>
+        </div>
+      </div>
+      <p class="diagram-note">30개 골드 질문을 반복해 최소 100회 warm 요청으로 측정하고, 하이브리드 Recall@10은 가장 좋은 단일 검색보다 낮을 수 없다.</p>
+    </div>
+    <div class="footer"><span>QUALITY &amp; PERFORMANCE</span><span>11</span></div>
+  </section>
+
+  <section class="slide filled">
+    <div class="stage">
+      <p class="eyebrow">11 · 구현 순서</p>
+      <h2>18개 작업은 5단계로 진행하고, 매 작업마다 사용자 확인을 받는다</h2>
+      <div class="phase-track" role="img" aria-label="작업 1부터 18까지 기반, 검색 수직 절편, 평가와 컨테이너, 운영 검증, 인수의 다섯 단계 구현 순서">
+        <div class="deck-node"><strong>A · 기반</strong><span>작업 1–6</span><span>프로젝트·도메인·DB·source·parser·chunk</span></div>
+        <div class="deck-node"><strong>B · 검색</strong><span>작업 7–12</span><span>embedding·색인·롤백·권한·검색·API</span></div>
+        <div class="deck-node"><strong>C · 패키징</strong><span>작업 13–15</span><span>평가·관측·Docker Compose</span></div>
+        <div class="deck-node"><strong>D · 운영 검증</strong><span>작업 16–17</span><span>배포·골드·GPU E2E·성능</span></div>
+        <div class="deck-node primary"><strong>E · 인수</strong><span>작업 18</span><span>전체 증거·운영 절차·최종 사용자 승인</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="card"><h3>작업 단위</h3><p>RED → 최소 GREEN → 정리 → 검증 증거 보고</p></div>
+        <div class="card"><h3>확인 지점</h3><p>각 작업 결과를 확인받은 뒤에만 다음 작업 시작</p></div>
+        <div class="card"><h3>운영 정지점</h3><p>OMF 40자 commit과 외부 변경 입력값은 별도 승인</p></div>
+      </div>
+      <div class="callout"><strong>결론:</strong> 범위는 작게 고정하고, 근거의 정확성·재현성·권한 경계를 단계마다 검증한다.</div>
+    </div>
+    <div class="footer"><span>DELIVERY PLAN</span><span>12</span></div>
+  </section>
+
+</deck-stage>
+
+<script src="./crefle-doc/deck-stage.js"></script>
+<script src="./crefle-doc/crefle-chart.js"></script>
+</body>
+</html>
