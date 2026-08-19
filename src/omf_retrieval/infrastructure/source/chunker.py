@@ -28,6 +28,7 @@ class _Excerpt:
     line_start: int
     line_end: int
     warnings: tuple[ChunkWarning, ...] = ()
+    line_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +392,8 @@ class ParentChildChunker:
         chunks: list[_Excerpt] = []
         normal_blocks: list[ParsedBlock] = []
         for block in blocks:
+            if not block.raw_text.strip():
+                continue
             if block.kind not in {"table", "bullet_list", "ordered_list", "blockquote"}:
                 normal_blocks.append(block)
                 continue
@@ -789,7 +792,14 @@ def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
         line_start=min(first.line_start, second.line_start),
         line_end=max(first.line_end, second.line_end),
         warnings=first.warnings + second.warnings,
+        line_numbers=(*_excerpt_line_numbers(first), *_excerpt_line_numbers(second)),
     )
+
+
+def _excerpt_line_numbers(excerpt: _Excerpt) -> tuple[int, ...]:
+    if excerpt.line_numbers:
+        return excerpt.line_numbers
+    return tuple(range(excerpt.line_start, excerpt.line_end + 1))
 
 
 def _relative_line_excerpt(
@@ -908,6 +918,7 @@ def _with_warning(excerpt: _Excerpt, warning: ChunkWarning) -> _Excerpt:
         line_start=excerpt.line_start,
         line_end=excerpt.line_end,
         warnings=(warning,),
+        line_numbers=excerpt.line_numbers,
     )
 
 
@@ -950,11 +961,15 @@ def _slice_excerpt_with_line_ends(
 
     line_start_offset = bisect_right(cumulative_ends, start)
     line_end_offset = bisect_left(cumulative_ends, end)
+    line_numbers = _excerpt_line_numbers(excerpt)[
+        line_start_offset : line_end_offset + 1
+    ]
     return _Excerpt(
         raw_text=raw_text,
-        line_start=excerpt.line_start + line_start_offset,
-        line_end=excerpt.line_start + line_end_offset,
+        line_start=line_numbers[0],
+        line_end=line_numbers[-1],
         warnings=excerpt.warnings,
+        line_numbers=line_numbers,
     )
 
 

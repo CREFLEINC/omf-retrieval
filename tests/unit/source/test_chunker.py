@@ -546,6 +546,154 @@ def test_empty_or_blank_section_produces_no_children(source: str) -> None:
     assert chunks == ()
 
 
+@pytest.mark.parametrize(
+    ("heading_source", "blank_source", "content_ending", "content_line"),
+    [
+        ("# H\n", "\n", "\n", 3),
+        ("# H\r\n", "\r\n\r\n", "\r\n", 4),
+        ("# H\r", "\r", "\r", 3),
+        ("# H\n", " \t\n\t \n", "\n", 4),
+        ("H\n===\n", "\n", "\n", 4),
+        ("H\r\n===\r\n", "\r\n\r\n", "\r\n", 5),
+        ("H\r===\r", "\r", "\r", 4),
+        ("H\n===\n", " \t\n\t \n", "\n", 5),
+    ],
+    ids=[
+        "atx-lf",
+        "atx-crlf-multiple",
+        "atx-cr",
+        "atx-space-tab",
+        "setext-lf",
+        "setext-crlf-multiple",
+        "setext-cr",
+        "setext-space-tab",
+    ],
+)
+def test_heading_blank_blocks_never_become_normal_children(
+    heading_source: str,
+    blank_source: str,
+    content_ending: str,
+    content_line: int,
+) -> None:
+    """Flushing a heading-adjacent blank invents a heading-only search hit."""
+    content = "x" * 700 + content_ending
+    section = _section(heading_source + blank_source + content)
+
+    chunks = _chunker().split(section, parser_version="parser-v1")
+    repeated = _chunker().split(section, parser_version="parser-v1")
+
+    assert chunks == repeated
+    assert chunks
+    assert all(chunk.raw_text.strip() for chunk in chunks)
+    assert all(chunk.search_text.strip() != "H" for chunk in chunks)
+    assert _reconstruct_character_chunks(chunks) == content
+    assert all(
+        (chunk.line_start, chunk.line_end) == (content_line, content_line)
+        for chunk in chunks
+    )
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.token_count <= 600 and not chunk.warnings for chunk in chunks)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_body", "evidence", "line_end", "atomic"),
+    [
+        (
+            "table",
+            "\n| h |\n|---|\n| " + "x" * 650 + " |\n\n",
+            "| h |\n|---|\n| " + "x" * 650 + " |\n",
+            5,
+            True,
+        ),
+        (
+            "list",
+            "\n- " + "x" * 650 + "\n\n",
+            "- " + "x" * 650 + "\n\n",
+            4,
+            True,
+        ),
+        (
+            "blockquote",
+            "\n> " + "x" * 650 + "\n\n",
+            "> " + "x" * 650 + "\n",
+            3,
+            True,
+        ),
+        (
+            "fenced-code",
+            "\n```text\n" + "x" * 650 + "\n```\n\n",
+            "```text\n" + "x" * 650 + "\n```\n",
+            5,
+            False,
+        ),
+        (
+            "html",
+            "\n<div>\n" + "x" * 650 + "\n</div>\n\n",
+            "<div>\n" + "x" * 650 + "\n</div>\n",
+            5,
+            False,
+        ),
+    ],
+    ids=["table", "list", "blockquote", "fenced-code", "html"],
+)
+def test_blank_blocks_around_long_structures_are_not_evidence_children(
+    kind: str,
+    source_body: str,
+    evidence: str,
+    line_end: int,
+    atomic: bool,
+) -> None:
+    """Leading or trailing blank gaps must not surround structured evidence."""
+    section = _section("# H\n" + source_body)
+
+    chunks = _chunker().split(section, parser_version="parser-v1")
+    repeated = _chunker().split(section, parser_version="parser-v1")
+
+    assert chunks == repeated
+    assert chunks
+    assert all(chunk.raw_text.strip() for chunk in chunks)
+    assert all(chunk.search_text.strip() != "H" for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert chunks[0].line_start == 3
+    assert chunks[-1].line_end == line_end
+    assert all(3 <= chunk.line_start <= chunk.line_end <= line_end for chunk in chunks)
+    assert all(not chunk.warnings for chunk in chunks)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
+    if atomic:
+        assert [chunk.raw_text for chunk in chunks] == [evidence]
+        assert chunks[0].token_count <= 800
+    else:
+        assert _reconstruct_character_chunks(chunks) == evidence
+        assert all(chunk.token_count <= 600 for chunk in chunks)
+
+
+def test_interstitial_and_trailing_blank_blocks_do_not_join_or_overlap() -> None:
+    """A blank separator must not become content, overlap, or a trailing child."""
+    first = "a" * 350 + "\n"
+    second = "b" * 350 + "\n"
+    source = f"# H\n\n{first}\n \t\n{second}\n\t\n"
+    section = _section(source)
+
+    chunks = _chunker().split(section, parser_version="parser-v1")
+    repeated = _chunker().split(section, parser_version="parser-v1")
+
+    assert chunks == repeated
+    assert [chunk.raw_text for chunk in chunks] == [
+        first,
+        first[-64:] + second,
+    ]
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
+        (3, 3),
+        (3, 6),
+    ]
+    assert chunks[0].raw_text + chunks[1].raw_text[64:] == first + second
+    assert all(chunk.raw_text.strip() for chunk in chunks)
+    assert all(chunk.search_text.strip() != "H" for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == [0, 1]
+    assert chunks == repeated
+
+
 def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> None:
     """Splitting at the 600-token inclusive boundary would over-fragment text."""
     body = "x" * 596
@@ -562,10 +710,10 @@ def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> 
 
 def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
     """Ignoring block-aware target packing would fragment or oversize children."""
-    first_paragraph = "a" * 350 + "\n\n"
-    second_paragraph = "b" * 100 + "\n\n"
+    first_paragraph = "a" * 350 + "\n"
+    second_paragraph = "b" * 100 + "\n"
     third_paragraph = "c" * 300 + "\n"
-    section = _section(f"# H\n{first_paragraph}{second_paragraph}{third_paragraph}")
+    section = _section(f"# H\n{first_paragraph}\n{second_paragraph}\n{third_paragraph}")
     counter = _FakeTokenCounter()
 
     chunks = _chunker(counter).split(section, parser_version="parser-v1")
@@ -575,10 +723,10 @@ def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
         first_paragraph[-64:] + second_paragraph,
         second_paragraph[-64:] + third_paragraph,
     ]
-    assert [chunk.token_count for chunk in chunks] == [354, 168, 367]
+    assert [chunk.token_count for chunk in chunks] == [353, 167, 367]
     assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
-        (2, 3),
-        (2, 5),
+        (2, 2),
+        (2, 4),
         (4, 6),
     ]
     assert all(
@@ -889,7 +1037,7 @@ def _reference_block_aware_child_count(
 
 def _normal_paragraph_source(
     prefix_tokens: int, paragraph_lengths: Sequence[int]
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     heading = "H" * (prefix_tokens - 1)
     codepoint = 0x7000
     paragraphs: list[str] = []
@@ -897,14 +1045,16 @@ def _normal_paragraph_source(
         paragraph = "".join(chr(codepoint + index) for index in range(paragraph_length))
         paragraphs.append(paragraph)
         codepoint += paragraph_length
-    return heading, "\n\n".join(paragraphs)
+    return heading, "\n\n".join(paragraphs), "\n".join(paragraphs)
 
 
 def _split_normal_paragraphs(
     prefix_tokens: int, paragraph_lengths: Sequence[int]
 ) -> tuple[str, tuple[object, ...]]:
-    heading, body = _normal_paragraph_source(prefix_tokens, paragraph_lengths)
-    source = f"# {heading}\n{body}"
+    heading, source_body, evidence = _normal_paragraph_source(
+        prefix_tokens, paragraph_lengths
+    )
+    source = f"# {heading}\n{source_body}"
     section = _section(source)
     counter = _CountingTokenCounter()
 
@@ -926,10 +1076,11 @@ def _split_normal_paragraphs(
 
     source_lines = source.splitlines(keepends=True)
     assert all(
-        chunk.raw_text in "".join(source_lines[chunk.line_start - 1 : chunk.line_end])
+        chunk.raw_text.strip()[0] in source_lines[chunk.line_start - 1]
+        and chunk.raw_text.strip()[-1] in source_lines[chunk.line_end - 1]
         for chunk in chunks
     )
-    starts = [body.find(chunk.raw_text) for chunk in chunks]
+    starts = [evidence.find(chunk.raw_text) for chunk in chunks]
     assert starts[0] == 0
     assert all(start >= 0 for start in starts)
     reconstructed = chunks[0].raw_text
@@ -945,21 +1096,22 @@ def _split_normal_paragraphs(
         if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
             assert overlap == _HEADING_OVERLAP_TOKENS
         reconstructed += chunk.raw_text[overlap:]
-    assert reconstructed == body
+    assert reconstructed == evidence
 
-    block_lengths = [len(block.raw_text) for block in section.blocks]
+    content_blocks = [block for block in section.blocks if block.raw_text.strip()]
+    block_lengths = [len(block.raw_text) for block in content_blocks]
     expected_children = _reference_block_aware_child_count(block_lengths, prefix_tokens)
     assert len(chunks) == expected_children
     emitted_search_tokens = sum(actual_counts)
     reference_work = (
-        len(body) + len(section.blocks) * prefix_tokens + emitted_search_tokens
+        len(evidence) + len(content_blocks) * prefix_tokens + emitted_search_tokens
     )
     assert split_work <= _MULTIBLOCK_WORK_MULTIPLIER * reference_work
-    assert split_calls <= 2 * len(section.blocks) + 6 * len(chunks) + 8
+    assert split_calls <= 2 * len(content_blocks) + 6 * len(chunks) + 8
     assert emitted_search_tokens <= (
-        _HEADING_EMITTED_TOKEN_MULTIPLIER * (prefix_tokens + len(body))
+        _HEADING_EMITTED_TOKEN_MULTIPLIER * (prefix_tokens + len(evidence))
     )
-    return body, chunks
+    return evidence, chunks
 
 
 @pytest.mark.parametrize("prefix_tokens", [272, 273, 335, 399, 472, 473])
@@ -980,7 +1132,7 @@ def test_normal_multiblock_splits_only_overlap_plus_block_soft_overflow() -> Non
         starts[index - 1] + len(chunks[index - 1].raw_text) - starts[index]
         for index in range(1, len(chunks))
     ]
-    assert [len(chunk.raw_text) for chunk in chunks] == [127, 127, 64]
+    assert [len(chunk.raw_text) for chunk in chunks] == [126, 127, 64]
     assert overlaps == [63, 63]
 
 
@@ -1165,9 +1317,9 @@ def test_very_long_single_unit_keeps_near_doubling_token_work(kind: str) -> None
 @pytest.mark.parametrize(
     ("atomic_text", "expected_atomic", "expected_after"),
     [
-        ("| h |\n|---|\n| v |\n", "| h |\n|---|\n| v |\n", "\n" + "z" * 300 + "\n"),
+        ("| h |\n|---|\n| v |\n", "| h |\n|---|\n| v |\n", "z" * 300 + "\n"),
         ("- first\n- second\n", "- first\n- second\n\n", "z" * 300 + "\n"),
-        ("> first\n>\n> second\n", "> first\n>\n> second\n", "\n" + "z" * 300 + "\n"),
+        ("> first\n>\n> second\n", "> first\n>\n> second\n", "z" * 300 + "\n"),
     ],
     ids=["table", "list", "quote"],
 )
@@ -1175,9 +1327,9 @@ def test_preserved_atomic_block_stays_separate_from_normal_text(
     atomic_text: str, expected_atomic: str, expected_after: str
 ) -> None:
     """Merging a small atomic block with normal text would lose its boundary."""
-    before = "n" * 300 + "\n\n"
+    before = "n" * 300 + "\n"
     after = "\n" + "z" * 300 + "\n"
-    section = _section(f"# H\n{before}{atomic_text}{after}")
+    section = _section(f"# H\n{before}\n{atomic_text}{after}")
 
     chunks = _chunker().split(section, parser_version="parser-v1")
 
@@ -1186,7 +1338,9 @@ def test_preserved_atomic_block_stays_separate_from_normal_text(
         expected_atomic,
         expected_after,
     ]
-    assert "".join(chunk.raw_text for chunk in chunks) == section.body
+    assert "".join(chunk.raw_text for chunk in chunks) == (
+        before + expected_atomic + expected_after
+    )
     assert chunks[1].warnings == ()
     assert chunks[1].token_count <= 800
 
@@ -1360,10 +1514,10 @@ def test_duplicate_atomic_bodies_keep_lines_ordinals_and_distinct_hashes() -> No
     assert [chunk.ordinal for chunk in chunks] == [0, 1, 2]
     assert chunks[0].raw_text == chunks[2].raw_text == table
     assert (chunks[0].line_start, chunks[0].line_end) == (2, 4)
-    assert chunks[1].raw_text == "\nmiddle\n\n"
+    assert chunks[1].raw_text == "middle\n"
     assert (chunks[2].line_start, chunks[2].line_end) == (8, 10)
     assert chunks[0].chunk_hash != chunks[2].chunk_hash
-    assert "".join(chunk.raw_text for chunk in chunks) == section.body
+    assert "".join(chunk.raw_text for chunk in chunks) == table + "middle\n" + table
 
 
 def test_chunk_hash_matches_literal_task2_and_config_identity_coordinates() -> None:
