@@ -703,6 +703,82 @@ def test_heading_at_soft_max_rejects_nonempty_overflow_without_source_leak() -> 
     assert secret_body not in str(caught.value)
 
 
+def _assert_long_heading_character_chunks(
+    counter: _CountingTokenCounter,
+    chunks: Sequence[object],
+    body: str,
+    *,
+    repeated: Sequence[object],
+) -> None:
+    actual_counts = [len(counter.encode(chunk.search_text)) for chunk in chunks]
+    assert actual_counts == [chunk.token_count for chunk in chunks]
+    assert all(count <= 600 for count in actual_counts)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all((chunk.line_start, chunk.line_end) == (2, 2) for chunk in chunks)
+    assert all(
+        chunk.raw_text.startswith(previous.raw_text[-64:])
+        for previous, chunk in zip(chunks, chunks[1:], strict=False)
+    )
+    assert _reconstruct_character_chunks(chunks) == body
+    assert chunks == repeated
+    assert [chunk.chunk_hash for chunk in chunks] == [
+        chunk.chunk_hash for chunk in repeated
+    ]
+
+
+def test_heading_prefix_399_uses_soft_window_to_avoid_output_amplification() -> None:
+    """A one-token target window must not emit one child per source token."""
+    heading = "H" * 398
+    body = "".join(chr(0x4E00 + index) for index in range(1_000))
+    source = f"# {heading}\n{body}"
+    counter = _CountingTokenCounter()
+
+    chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
+    repeated = _chunker().split(_section(source), parser_version="parser-v1")
+
+    assert len(_FakeTokenCounter().encode(heading + "\n")) == 399
+    assert len(chunks) <= 8, (
+        f"children={len(chunks)}, adapter input work={counter.input_work}"
+    )
+    assert counter.input_work <= 20_000
+    assert len(chunks[0].raw_text) == 201
+    _assert_long_heading_character_chunks(counter, chunks, body, repeated=repeated)
+
+
+@pytest.mark.parametrize(
+    ("heading_length", "expected_first_source", "uses_soft_window"),
+    [
+        (334, 65, False),
+        (335, 264, True),
+        (399, 200, True),
+        (400, 199, True),
+    ],
+)
+def test_heading_overlap_budget_boundary_uses_actual_prefix_token_count(
+    heading_length: int,
+    expected_first_source: int,
+    uses_soft_window: bool,
+) -> None:
+    """The trailing heading newline moves budget 65 to the fallback boundary."""
+    heading = "H" * heading_length
+    body = "".join(chr(0x5200 + index) for index in range(1_000))
+    source = f"# {heading}\n{body}"
+    counter = _CountingTokenCounter()
+
+    chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
+    repeated = _chunker().split(_section(source), parser_version="parser-v1")
+
+    actual_prefix_tokens = len(_FakeTokenCounter().encode(heading + "\n"))
+    assert actual_prefix_tokens == heading_length + 1
+    assert len(chunks[0].raw_text) == expected_first_source
+    if uses_soft_window:
+        assert len(chunks) <= 8
+        assert counter.input_work <= 20_000
+    else:
+        assert chunks[0].token_count == 400
+    _assert_long_heading_character_chunks(counter, chunks, body, repeated=repeated)
+
+
 def _boundary_sensitive_split(
     prefix_tokens: int,
     body: str,

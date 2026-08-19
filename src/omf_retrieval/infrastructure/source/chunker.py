@@ -527,10 +527,11 @@ class ParentChildChunker:
         if soft_budget <= 0:
             raise ValueError("Heading path leaves no room for child source text")
         target_budget = self._config.target_tokens - prefix_tokens
-        window_budget = target_budget if target_budget > 0 else soft_budget
+        use_target_window = target_budget > self._config.overlap_tokens
+        window_budget = target_budget if use_target_window else soft_budget
         window_limit = (
             self._config.target_tokens
-            if target_budget > 0
+            if use_target_window
             else self._config.soft_max_tokens
         )
 
