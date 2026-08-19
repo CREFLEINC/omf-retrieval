@@ -142,6 +142,14 @@ class _OffsetPropertyFailureCounter:
         raise self._error_type("secret-offset-property-detail")
 
 
+class _FailingIterator(Iterator[object]):
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def __next__(self) -> object:
+        raise self._error
+
+
 class _FailingSequence(Sequence[object]):
     def __init__(
         self,
@@ -161,6 +169,8 @@ class _FailingSequence(Sequence[object]):
     def __iter__(self) -> Iterator[object]:
         if self._operation == "iter":
             raise self._error
+        if self._operation == "next":
+            return _FailingIterator(self._error)
         return super().__iter__()
 
     def __getitem__(self, index: int | slice) -> object:
@@ -190,6 +200,143 @@ class _SequenceOperationFailureCounter(_FakeTokenCounter):
         offsets = super().offsets(text)
         if self._side == "offsets":
             return _FailingSequence(offsets, self._operation, self._error)
+        return offsets
+
+
+class _ExplicitMismatchSequence(Sequence[object]):
+    def __init__(
+        self,
+        *,
+        declared_length: int,
+        indexed_items: tuple[object, ...],
+        iterated_items: tuple[object, ...],
+    ) -> None:
+        self._declared_length = declared_length
+        self._indexed_items = indexed_items
+        self._iterated_items = iterated_items
+
+    def __len__(self) -> int:
+        return self._declared_length
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self._iterated_items)
+
+    def __getitem__(self, index: int | slice) -> object:
+        return self._indexed_items[index]
+
+
+class _FallbackMismatchSequence(Sequence[object]):
+    def __init__(
+        self, *, declared_length: int, indexed_items: tuple[object, ...]
+    ) -> None:
+        self._declared_length = declared_length
+        self._indexed_items = indexed_items
+
+    def __len__(self) -> int:
+        return self._declared_length
+
+    def __getitem__(self, index: int | slice) -> object:
+        return self._indexed_items[index]
+
+
+class _GuardedInfiniteIterator(Iterator[object]):
+    def __init__(self, item: object, *, maximum_calls: int) -> None:
+        self._item = item
+        self._maximum_calls = maximum_calls
+        self.calls = 0
+
+    def __next__(self) -> object:
+        self.calls += 1
+        if self.calls > self._maximum_calls:
+            raise _SecretAdapterError("secret-unbounded-materialization")
+        return self._item
+
+
+class _GuardedInfiniteSequence(Sequence[object]):
+    def __init__(self, item: object, *, declared_length: int) -> None:
+        self._item = item
+        self._declared_length = declared_length
+        self.iterator = _GuardedInfiniteIterator(
+            item, maximum_calls=declared_length + 1
+        )
+
+    def __len__(self) -> int:
+        return self._declared_length
+
+    def __iter__(self) -> Iterator[object]:
+        return self.iterator
+
+    def __getitem__(self, index: int | slice) -> object:
+        return self._item
+
+
+class _SequenceLengthMismatchCounter(_FakeTokenCounter):
+    def __init__(self, side: str, mismatch: str) -> None:
+        self._side = side
+        self._mismatch = mismatch
+        self.infinite_sequence: _GuardedInfiniteSequence | None = None
+
+    def _mismatched(self, items: tuple[object, ...]) -> Sequence[object]:
+        declared_length = len(items)
+        if self._mismatch == "len-over":
+            return _ExplicitMismatchSequence(
+                declared_length=declared_length + 1,
+                indexed_items=items,
+                iterated_items=items,
+            )
+        if self._mismatch == "len-under":
+            return _ExplicitMismatchSequence(
+                declared_length=declared_length - 1,
+                indexed_items=items,
+                iterated_items=items,
+            )
+        if self._mismatch == "iterator-short":
+            return _ExplicitMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=items,
+                iterated_items=items[:-1],
+            )
+        if self._mismatch == "iterator-long":
+            return _ExplicitMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=items,
+                iterated_items=(*items, items[-1]),
+            )
+        if self._mismatch == "fallback-short":
+            return _FallbackMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=items[:-1],
+            )
+        if self._mismatch == "fallback-long":
+            return _FallbackMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=(*items, items[-1]),
+            )
+        if self._mismatch == "exact-iterator":
+            return _ExplicitMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=items,
+                iterated_items=items,
+            )
+        if self._mismatch == "exact-fallback":
+            return _FallbackMismatchSequence(
+                declared_length=declared_length,
+                indexed_items=items,
+            )
+        sequence = _GuardedInfiniteSequence(items[-1], declared_length=declared_length)
+        self.infinite_sequence = sequence
+        return sequence
+
+    def encode(self, text: str) -> object:
+        tokens = super().encode(text)
+        if self._side == "encode":
+            return self._mismatched(tokens)
+        return tokens
+
+    def offsets(self, text: str) -> object:
+        offsets = super().offsets(text)
+        if self._side == "offsets":
+            return self._mismatched(offsets)
         return offsets
 
 
@@ -736,17 +883,21 @@ def test_non_exception_base_exceptions_are_never_sanitized(
     [
         ("encode", "len"),
         ("encode", "iter"),
+        ("encode", "next"),
         ("encode", "getitem"),
         ("offsets", "len"),
         ("offsets", "iter"),
+        ("offsets", "next"),
         ("offsets", "getitem"),
     ],
     ids=[
         "encode-len",
         "encode-iter",
+        "encode-next",
         "encode-getitem",
         "offsets-len",
         "offsets-iter",
+        "offsets-next",
         "offsets-getitem",
     ],
 )
@@ -779,17 +930,21 @@ def test_adapter_sequence_exceptions_are_sanitized_without_traceback_leaks(
     [
         ("encode", "len"),
         ("encode", "iter"),
+        ("encode", "next"),
         ("encode", "getitem"),
         ("offsets", "len"),
         ("offsets", "iter"),
+        ("offsets", "next"),
         ("offsets", "getitem"),
     ],
     ids=[
         "encode-len",
         "encode-iter",
+        "encode-next",
         "encode-getitem",
         "offsets-len",
         "offsets-iter",
+        "offsets-next",
         "offsets-getitem",
     ],
 )
@@ -807,6 +962,62 @@ def test_adapter_sequence_base_exceptions_preserve_the_same_object(
         _chunker(counter).split(_section(source), parser_version="parser-v1")
 
     assert caught.value is error
+
+
+@pytest.mark.parametrize("side", ["encode", "offsets"])
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "len-over",
+        "len-under",
+        "iterator-short",
+        "iterator-long",
+        "fallback-short",
+        "fallback-long",
+        "bounded-infinite",
+    ],
+)
+def test_adapter_sequence_length_mismatches_fail_closed_with_bounded_iteration(
+    side: str, mismatch: str
+) -> None:
+    """Trusting declared length or exhausting an iterator admits malformed data."""
+    counter = _SequenceLengthMismatchCounter(side, mismatch)
+    source = "# A\nbody\n" if side == "encode" else "s" * 601
+    caught_error: Exception | None = None
+
+    try:
+        _chunker(counter).split(_section(source), parser_version="parser-v1")
+    except (IndexError, _SecretAdapterError, ValueError) as raised:
+        caught_error = raised
+    else:
+        pytest.fail("adapter Sequence length mismatch was not rejected")
+
+    assert type(caught_error) is ValueError
+    _assert_sanitized_tokenizer_error(
+        caught_error,
+        expected_message="Token counter returned malformed data",
+    )
+    _assert_traceback_has_no_adapter_secret(caught_error)
+    if mismatch == "bounded-infinite":
+        assert counter.infinite_sequence is not None
+        assert counter.infinite_sequence.iterator.calls == (
+            len(counter.infinite_sequence) + 1
+        )
+
+
+@pytest.mark.parametrize("side", ["encode", "offsets"])
+@pytest.mark.parametrize("sequence_kind", ["exact-iterator", "exact-fallback"])
+def test_adapter_sequence_exact_declared_length_preserves_split_behavior(
+    side: str, sequence_kind: str
+) -> None:
+    """Exactly N items followed by StopIteration remain valid adapter output."""
+    source = "# A\nbody\n" if side == "encode" else "s" * 601
+    counter = _SequenceLengthMismatchCounter(side, sequence_kind)
+
+    chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
+    expected = _chunker().split(_section(source), parser_version="parser-v1")
+
+    assert chunks == expected
 
 
 def test_chunk_contract_exposes_stable_version_and_default_config() -> None:

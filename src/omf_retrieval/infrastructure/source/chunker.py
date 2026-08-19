@@ -372,10 +372,20 @@ def _materialize_sequence(result: object) -> object:
         return None
     try:
         declared_length = len(result)
-        items = tuple(result)
+        iterator = iter(result)
+        items: list[object] = []
+        for _ in range(declared_length):
+            try:
+                items.append(next(iterator))
+            except StopIteration:
+                return None
+        try:
+            next(iterator)
+        except StopIteration:
+            return declared_length, tuple(items)
     except Exception:
         return _TOKEN_COUNTER_FAILED
-    return declared_length, items
+    return None
 
 
 def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
