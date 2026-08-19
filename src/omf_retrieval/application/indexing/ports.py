@@ -213,6 +213,36 @@ class ChunkDraft:
             raise ValueError("Chunk warnings must be an exact ChunkWarning tuple")
 
 
+@dataclass(frozen=True, slots=True)
+class ParentContext:
+    """Represent an immutable source-backed context returned around a match.
+
+    Args:
+        raw_text: Non-empty contiguous source excerpt without a heading prefix.
+        token_count: Positive token count for ``raw_text``.
+        line_start: One-based inclusive first excerpt source line.
+        line_end: One-based inclusive last excerpt source line.
+
+    Raises:
+        ValueError: If a type, value, or inclusive source range is invalid.
+    """
+
+    raw_text: str
+    token_count: int
+    line_start: int
+    line_end: int
+
+    def __post_init__(self) -> None:
+        """Validate exact source text, token count, and inclusive lines."""
+        if type(self.raw_text) is not str or not self.raw_text:
+            raise ValueError("Parent context raw_text must be a non-empty exact string")
+        if type(self.token_count) is not int or self.token_count <= 0:
+            raise ValueError(
+                "Parent context token_count must be a positive exact integer"
+            )
+        _require_chunk_inclusive_line_range(self.line_start, self.line_end)
+
+
 def split_physical_lines(source: str) -> tuple[str, ...]:
     """Split source at Markdown physical-line boundaries and retain endings.
 

@@ -8,7 +8,10 @@ from omf_retrieval.application.indexing.ports import (
     ChunkConfig,
     ChunkDraft,
     ChunkWarning,
+    MarkdownParser,
+    ParentContext,
     ParsedBlock,
+    ParsedMarkdown,
     ParsedSection,
     TokenCounter,
     TokenizerDescriptor,
@@ -35,6 +38,290 @@ class _AtomicUnit:
 
 
 _TOKEN_COUNTER_FAILED = object()
+_PARSER_FAILED = object()
+
+
+class ParentContextBuilder:
+    """Build source-backed context around one matched retrieval child."""
+
+    def __init__(
+        self,
+        parser: MarkdownParser,
+        token_counter: TokenCounter,
+        config: ChunkConfig = ChunkConfig(),  # noqa: B008
+    ) -> None:
+        """Bind the approved parser, tokenizer, and parent token limit."""
+        parser_method = _parser_method(parser)
+        token_counter_methods = _token_counter_methods(token_counter)
+        if (
+            parser_method is None
+            or token_counter_methods is None
+            or type(config) is not ChunkConfig
+        ):
+            raise ValueError("Invalid parent context builder contract")
+        self._parse = parser_method
+        self._encode, self._offsets = token_counter_methods
+        self._config = config
+
+    def build(
+        self,
+        section: ParsedSection,
+        *,
+        matched_raw_text: str,
+        matched_line_start: int,
+        matched_line_end: int,
+        parser_version: str,
+    ) -> ParentContext:
+        """Build a source-backed context around one matched child excerpt."""
+        if (
+            type(section) is not ParsedSection
+            or type(matched_raw_text) is not str
+            or not matched_raw_text
+            or type(matched_line_start) is not int
+            or type(matched_line_end) is not int
+            or matched_line_start < 1
+            or matched_line_end < matched_line_start
+            or type(parser_version) is not str
+            or not parser_version.strip()
+        ):
+            raise ValueError("Invalid parent context input contract")
+        parsed = _call_parser(self._parse, section.body)
+        if (
+            type(parsed) is not ParsedMarkdown
+            or parsed.parser_version != parser_version
+            or len(parsed.sections) != 1
+            or parsed.sections[0].level != 0
+            or parsed.sections[0].body != section.body
+            or not _valid_reparsed_root(parsed.sections[0], section.body)
+        ):
+            raise ValueError("Markdown parser returned invalid parent context data")
+
+        source_lines = split_physical_lines(section.body)
+        body_line_start = section.line_end - len(source_lines) + 1
+        if (
+            not source_lines
+            or body_line_start < section.line_start
+            or matched_line_start < body_line_start
+            or matched_line_end > section.line_end
+        ):
+            raise ValueError("Invalid parent context source range")
+        relative_match_start = matched_line_start - body_line_start + 1
+        relative_match_end = matched_line_end - body_line_start + 1
+        matched_line_text = "".join(
+            source_lines[relative_match_start - 1 : relative_match_end]
+        )
+        if matched_raw_text not in matched_line_text:
+            raise ValueError("Matched source is not present in its line range")
+
+        whole_token_count = self._token_count(section.body)
+        if whole_token_count <= self._config.parent_context_max_tokens:
+            return ParentContext(
+                raw_text=section.body,
+                token_count=whole_token_count,
+                line_start=body_line_start,
+                line_end=section.line_end,
+            )
+
+        excerpt = self._select_blocks(
+            parsed.sections[0].blocks,
+            source_lines,
+            body_line_start=body_line_start,
+            matched_line_start=relative_match_start,
+            matched_line_end=relative_match_end,
+            matched_raw_text=matched_raw_text,
+        )
+        token_count = self._token_count(excerpt.raw_text)
+        return ParentContext(
+            raw_text=excerpt.raw_text,
+            token_count=token_count,
+            line_start=excerpt.line_start,
+            line_end=excerpt.line_end,
+        )
+
+    def _select_blocks(
+        self,
+        blocks: tuple[ParsedBlock, ...],
+        source_lines: tuple[str, ...],
+        *,
+        body_line_start: int,
+        matched_line_start: int,
+        matched_line_end: int,
+        matched_raw_text: str,
+    ) -> _Excerpt:
+        seed_indices = tuple(
+            index
+            for index, block in enumerate(blocks)
+            if block.line_start <= matched_line_end
+            and block.line_end >= matched_line_start
+        )
+        if not seed_indices:
+            raise ValueError("Matched source has no parser block")
+        seed_left = seed_indices[0]
+        seed_right = seed_indices[-1]
+        left = seed_left
+        right = seed_right
+        excerpt = _relative_line_excerpt(
+            source_lines,
+            body_line_start=body_line_start,
+            line_start=blocks[left].line_start,
+            line_end=blocks[right].line_end,
+        )
+        if self._token_count(excerpt.raw_text) > (
+            self._config.parent_context_max_tokens
+        ):
+            if seed_left != seed_right:
+                raise ValueError(
+                    "Matched parser blocks exceed the parent context limit"
+                )
+            matched_lines_start = sum(
+                len(line) for line in source_lines[: matched_line_start - 1]
+            )
+            matched_lines_text = "".join(
+                source_lines[matched_line_start - 1 : matched_line_end]
+            )
+            occurrence = _unique_occurrence(matched_lines_text, matched_raw_text)
+            if occurrence is None:
+                raise ValueError("Matched source is ambiguous in its line range")
+            block_start = sum(
+                len(line) for line in source_lines[: blocks[left].line_start - 1]
+            )
+            matched_start = matched_lines_start + occurrence - block_start
+            return self._oversized_block_excerpt(
+                excerpt,
+                matched_start=matched_start,
+                matched_end=matched_start + len(matched_raw_text),
+            )
+
+        while left > 0 or right + 1 < len(blocks):
+            candidates: list[tuple[int, int, str]] = []
+            if left > 0:
+                candidates.append((seed_left - left + 1, 0, "left"))
+            if right + 1 < len(blocks):
+                candidates.append((right - seed_right + 1, 1, "right"))
+            added = False
+            for _, _, side in sorted(candidates):
+                candidate_left = left - 1 if side == "left" else left
+                candidate_right = right + 1 if side == "right" else right
+                candidate = _relative_line_excerpt(
+                    source_lines,
+                    body_line_start=body_line_start,
+                    line_start=blocks[candidate_left].line_start,
+                    line_end=blocks[candidate_right].line_end,
+                )
+                if self._token_count(candidate.raw_text) <= (
+                    self._config.parent_context_max_tokens
+                ):
+                    left = candidate_left
+                    right = candidate_right
+                    excerpt = candidate
+                    added = True
+                    break
+            if not added:
+                break
+        return excerpt
+
+    def _oversized_block_excerpt(
+        self,
+        excerpt: _Excerpt,
+        *,
+        matched_start: int,
+        matched_end: int,
+    ) -> _Excerpt:
+        limit = self._config.parent_context_max_tokens
+        if self._token_count(excerpt.raw_text[matched_start:matched_end]) > limit:
+            raise ValueError("Matched source exceeds the parent context limit")
+        offsets = self._token_offsets(excerpt.raw_text)
+        left_candidates = sorted(
+            {start for start, _ in offsets if start < matched_start}, reverse=True
+        )
+        right_candidates = sorted({end for _, end in offsets if end > matched_end})
+        start = matched_start
+        end = matched_end
+        left_index = 0
+        right_index = 0
+        while left_index < len(left_candidates) or right_index < len(right_candidates):
+            sides: list[tuple[int, int, str]] = []
+            if left_index < len(left_candidates):
+                sides.append((matched_start - left_candidates[left_index], 0, "left"))
+            if right_index < len(right_candidates):
+                sides.append((right_candidates[right_index] - matched_end, 1, "right"))
+            added = False
+            for _, _, side in sorted(sides):
+                candidate_start = (
+                    left_candidates[left_index] if side == "left" else start
+                )
+                candidate_end = (
+                    right_candidates[right_index] if side == "right" else end
+                )
+                if (
+                    self._token_count(excerpt.raw_text[candidate_start:candidate_end])
+                    <= limit
+                ):
+                    start = candidate_start
+                    end = candidate_end
+                    if side == "left":
+                        left_index += 1
+                    else:
+                        right_index += 1
+                    added = True
+                    break
+                if side == "left":
+                    left_index = len(left_candidates)
+                else:
+                    right_index = len(right_candidates)
+            if not added:
+                break
+        return _slice_excerpt(excerpt, start, end)
+
+    def _token_count(self, text: str) -> int:
+        return len(self._encoded_tokens(text))
+
+    def _token_offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        tokens = self._encoded_tokens(text)
+        result = _call_token_counter(self._offsets, text)
+        if result is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        materialized = _materialize_sequence(result)
+        if materialized is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        if materialized is None:
+            raise ValueError("Token counter returned malformed data") from None
+        declared_length, spans = materialized
+        if declared_length != len(tokens):
+            raise ValueError("Token counter returned malformed data") from None
+
+        offsets: list[tuple[int, int]] = []
+        previous_end = 0
+        for span in spans:
+            if (
+                type(span) is not tuple
+                or len(span) != 2
+                or type(span[0]) is not int
+                or type(span[1]) is not int
+            ):
+                raise ValueError("Token counter returned malformed data") from None
+            start, end = span
+            if start < previous_end or start < 0 or end <= start or end > len(text):
+                raise ValueError("Token counter returned malformed data") from None
+            offsets.append((start, end))
+            previous_end = end
+        return tuple(offsets)
+
+    def _encoded_tokens(self, text: str) -> tuple[int, ...]:
+        result = _call_token_counter(self._encode, text)
+        if result is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        materialized = _materialize_sequence(result)
+        if materialized is _TOKEN_COUNTER_FAILED:
+            raise ValueError("Token counter failed") from None
+        if materialized is None:
+            raise ValueError("Token counter returned malformed data") from None
+        declared_length, tokens = materialized
+        if any(type(token) is not int for token in tokens) or (
+            text and declared_length == 0
+        ):
+            raise ValueError("Token counter returned malformed data") from None
+        return tokens
 
 
 class ParentChildChunker:
@@ -360,6 +647,21 @@ def _token_counter_methods(
     return encode, offsets
 
 
+def _parser_method(parser: object) -> Callable[[str], object] | None:
+    try:
+        parse = getattr(parser, "parse", None)
+    except Exception:
+        return None
+    return parse if callable(parse) else None
+
+
+def _call_parser(operation: Callable[[str], object], text: str) -> object:
+    try:
+        return operation(text)
+    except Exception:
+        return _PARSER_FAILED
+
+
 def _call_token_counter(operation: Callable[[str], object], text: str) -> object:
     try:
         return operation(text)
@@ -399,6 +701,52 @@ def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
         line_end=max(first.line_end, second.line_end),
         warnings=first.warnings + second.warnings,
     )
+
+
+def _relative_line_excerpt(
+    source_lines: tuple[str, ...],
+    *,
+    body_line_start: int,
+    line_start: int,
+    line_end: int,
+) -> _Excerpt:
+    return _Excerpt(
+        raw_text="".join(source_lines[line_start - 1 : line_end]),
+        line_start=body_line_start + line_start - 1,
+        line_end=body_line_start + line_end - 1,
+    )
+
+
+def _unique_occurrence(source: str, target: str) -> int | None:
+    first = source.find(target)
+    if first < 0 or source.find(target, first + 1) >= 0:
+        return None
+    return first
+
+
+def _valid_reparsed_root(section: ParsedSection, source: str) -> bool:
+    source_lines = split_physical_lines(source)
+    if (
+        section.ordinal != 0
+        or section.parent_ordinal is not None
+        or section.heading is not None
+        or section.heading_path
+        or section.line_start != 1
+        or section.line_end != len(source_lines)
+        or not section.blocks
+    ):
+        return False
+    cursor = 1
+    for block in section.blocks:
+        if (
+            block.line_start != cursor
+            or block.line_end > len(source_lines)
+            or block.raw_text
+            != "".join(source_lines[block.line_start - 1 : block.line_end])
+        ):
+            return False
+        cursor = block.line_end + 1
+    return cursor == len(source_lines) + 1
 
 
 def _atomic_units(block: ParsedBlock) -> tuple[_AtomicUnit, ...]:
