@@ -73,6 +73,34 @@ class _PairTokenCounter:
         )
 
 
+class _CountingTokenCounter(_FakeTokenCounter):
+    """Count adapter input work and optionally stop superlinear regressions."""
+
+    def __init__(self, *, maximum_work: int | None = None) -> None:
+        self.maximum_work = maximum_work
+        self.encode_inputs: list[str] = []
+        self.offset_inputs: list[str] = []
+        self.input_work = 0
+
+    @property
+    def calls(self) -> int:
+        return len(self.encode_inputs) + len(self.offset_inputs)
+
+    def _record(self, inputs: list[str], text: str) -> None:
+        inputs.append(text)
+        self.input_work += len(text)
+        if self.maximum_work is not None and self.input_work > self.maximum_work:
+            raise RuntimeError("linear token work budget exceeded")
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self._record(self.encode_inputs, text)
+        return super().encode(text)
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        self._record(self.offset_inputs, text)
+        return super().offsets(text)
+
+
 class _EncodeResultCounter(_FakeTokenCounter):
     def __init__(self, result: object) -> None:
         self._result = result
@@ -537,6 +565,155 @@ def test_oversized_normal_block_splits_at_token_offsets_with_exact_overlap() -> 
     assert chunks[1].raw_text[:128] == chunks[0].raw_text[-128:]
     assert chunks[0].raw_text + chunks[1].raw_text[128:] == body
     assert all(chunk.token_count <= 600 for chunk in chunks)
+
+
+def _reconstruct_character_chunks(chunks: Sequence[object]) -> str:
+    first, *remaining = chunks
+    reconstructed = first.raw_text
+    previous = first
+    for chunk in remaining:
+        overlap = min(64, len(previous.raw_text) - 1)
+        if overlap:
+            assert chunk.raw_text.startswith(previous.raw_text[-overlap:])
+        reconstructed += chunk.raw_text[overlap:]
+        previous = chunk
+    return reconstructed
+
+
+@pytest.mark.parametrize("prefix_tokens", [399, 400, 450, 599])
+def test_long_legal_heading_uses_available_source_budget_and_terminates(
+    prefix_tokens: int,
+) -> None:
+    """A legal heading below soft max must leave deterministic source children."""
+    body_length = 602 - prefix_tokens
+    body = "".join(chr(0x4E00 + index) for index in range(body_length))
+    heading = "H" * (prefix_tokens - 1)
+    source = f"# {heading}\n{body}"
+    counter = _CountingTokenCounter(maximum_work=1_000_000)
+
+    chunks = _chunker(counter).split(_section(source), parser_version="parser-v1")
+    repeated = _chunker(_FakeTokenCounter()).split(
+        _section(source), parser_version="parser-v1"
+    )
+
+    assert chunks
+    assert chunks == repeated
+    assert all(chunk.raw_text and chunk.token_count <= 600 for chunk in chunks)
+    assert _reconstruct_character_chunks(chunks) == body
+
+
+@pytest.mark.parametrize(
+    (
+        "prefix_tokens",
+        "expected_first_source",
+        "expected_overlap",
+        "expected_chunks",
+    ),
+    [(599, 1, 0, 3), (598, 2, 1, 2)],
+)
+def test_tiny_heading_source_budget_reduces_overlap_to_preserve_progress(
+    prefix_tokens: int,
+    expected_first_source: int,
+    expected_overlap: int,
+    expected_chunks: int,
+) -> None:
+    """Overlap may never consume every source token in a forced window."""
+    body = "가나다"
+    heading = "H" * (prefix_tokens - 1)
+    counter = _CountingTokenCounter(maximum_work=100_000)
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert len(chunks) == expected_chunks
+    assert len(chunks[0].raw_text) == expected_first_source
+    if expected_overlap:
+        assert chunks[1].raw_text.startswith(chunks[0].raw_text[-expected_overlap:])
+    else:
+        assert not chunks[1].raw_text.startswith(chunks[0].raw_text)
+    assert _reconstruct_character_chunks(chunks) == body
+
+
+def test_heading_at_soft_max_rejects_nonempty_overflow_without_source_leak() -> None:
+    """A heading consuming the soft limit cannot form a nonempty child."""
+    heading = "H" * 599
+    secret_body = "OMF-HEADING-SECRET"
+
+    with pytest.raises(ValueError) as caught:
+        _chunker().split(
+            _section(f"# {heading}\n{secret_body}"), parser_version="parser-v1"
+        )
+
+    assert str(caught.value) == "Heading path leaves no room for child source text"
+    assert caught.value.__cause__ is None
+    assert secret_body not in str(caught.value)
+
+
+_LINEAR_TOKEN_WORK_MULTIPLIER = 12
+
+
+def _long_split_source(kind: str, payload_length: int) -> str:
+    payload = "x" * payload_length
+    if kind == "normal":
+        return payload + "\n"
+    if kind == "table-row":
+        return f"| {payload} |\n|---|\n"
+    if kind == "list-item":
+        return f"- {payload}\n"
+    return f"> {payload}\n"
+
+
+def _assert_long_split_contract(
+    kind: str, source_body: str, chunks: Sequence[object]
+) -> None:
+    limit = 600 if kind == "normal" else 800
+    assert chunks
+    assert all(chunk.raw_text and chunk.token_count <= limit for chunk in chunks)
+    if kind == "normal":
+        assert _reconstruct_character_chunks(chunks) == source_body
+        assert all(
+            chunk.raw_text.startswith(previous.raw_text[-64:])
+            for previous, chunk in zip(chunks, chunks[1:], strict=False)
+        )
+        return
+    assert "".join(chunk.raw_text for chunk in chunks) == source_body
+    assert all(len(chunk.warnings) == 1 for chunk in chunks)
+
+
+def _measure_long_split(
+    kind: str, payload_length: int, *, guarded: bool = False
+) -> tuple[_CountingTokenCounter, str, tuple[object, ...]]:
+    source_body = _long_split_source(kind, payload_length)
+    maximum_work = _LINEAR_TOKEN_WORK_MULTIPLIER * len(source_body) if guarded else None
+    counter = _CountingTokenCounter(maximum_work=maximum_work)
+    chunks = _chunker(counter).split(
+        _section(f"# H\n{source_body}"), parser_version="parser-v1"
+    )
+    _assert_long_split_contract(kind, source_body, chunks)
+    return counter, source_body, chunks
+
+
+@pytest.mark.parametrize("kind", ["normal", "table-row", "list-item", "blockquote"])
+def test_long_single_unit_token_work_scales_linearly(kind: str) -> None:
+    """Doubling one source unit must not repeatedly tokenize its full suffix."""
+    small, small_body, _ = _measure_long_split(kind, 4_000)
+    large, large_body, _ = _measure_long_split(kind, 8_000)
+
+    assert large.input_work / small.input_work < 2.5
+    assert small.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(small_body)
+    assert large.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(large_body)
+    assert sum(len(text) > 800 for text in large.offset_inputs) == 1
+    assert sum(len(text) > 800 for text in large.encode_inputs) <= 4
+    assert large.calls <= 20 + len(large_body) // 100
+
+
+@pytest.mark.parametrize("kind", ["normal", "table-row", "list-item", "blockquote"])
+def test_long_single_unit_has_a_finite_linear_work_guard(kind: str) -> None:
+    """A 16k unit must stay within the documented 12x adapter-input budget."""
+    counter, source_body, _ = _measure_long_split(kind, 16_000, guarded=True)
+
+    assert counter.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(source_body)
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 """Deterministic source-backed parent-child chunking."""
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -448,19 +449,32 @@ class ParentChildChunker:
             line_start=unit.warning_line_start,
             line_end=unit.warning_line_end,
         )
+        offsets = self._token_offsets(unit.excerpt.raw_text)
+        line_ends = _physical_line_ends(unit.excerpt.raw_text)
+        prefix_tokens = self._token_count(heading_prefix)
+        source_budget = self._config.atomic_max_tokens - prefix_tokens
+        if source_budget <= 0:
+            raise ValueError("Heading path leaves no room for child source text")
+
         chunks: list[_Excerpt] = []
-        pending = unit.excerpt
-        while self._token_count(heading_prefix + pending.raw_text) > (
-            self._config.atomic_max_tokens
-        ):
-            piece = self._limit_prefix(
-                pending, heading_prefix, self._config.atomic_max_tokens
+        cursor = 0
+        while cursor < len(offsets):
+            window_end = self._bounded_window_end(
+                unit.excerpt.raw_text,
+                offsets,
+                start=cursor,
+                source_budget=source_budget,
+                heading_prefix=heading_prefix,
+                token_limit=self._config.atomic_max_tokens,
+            )
+            piece = _slice_excerpt_with_line_ends(
+                unit.excerpt,
+                _token_boundary(offsets, cursor, len(unit.excerpt.raw_text)),
+                _token_boundary(offsets, window_end, len(unit.excerpt.raw_text)),
+                line_ends,
             )
             chunks.append(_with_warning(piece, warning))
-            pending = _slice_excerpt(
-                pending, len(piece.raw_text), len(pending.raw_text)
-            )
-        chunks.append(_with_warning(pending, warning))
+            cursor = window_end
         return tuple(chunks)
 
     def _split_normal_blocks(
@@ -504,45 +518,98 @@ class ParentChildChunker:
     def _split_oversized_normal(
         self, excerpt: _Excerpt, heading_prefix: str
     ) -> tuple[tuple[_Excerpt, ...], _Excerpt]:
+        offsets = self._token_offsets(excerpt.raw_text)
+        line_ends = _physical_line_ends(excerpt.raw_text)
+        prefix_tokens = self._token_count(heading_prefix)
+        soft_budget = self._config.soft_max_tokens - prefix_tokens
+        if soft_budget <= 0:
+            raise ValueError("Heading path leaves no room for child source text")
+        target_budget = self._config.target_tokens - prefix_tokens
+        window_budget = target_budget if target_budget > 0 else soft_budget
+        window_limit = (
+            self._config.target_tokens
+            if target_budget > 0
+            else self._config.soft_max_tokens
+        )
+
         chunks: list[_Excerpt] = []
-        pending = excerpt
-        while self._token_count(heading_prefix + pending.raw_text) > (
-            self._config.soft_max_tokens
-        ):
-            piece = self._target_prefix(pending, heading_prefix)
+        cursor = 0
+        while len(offsets) - cursor > soft_budget:
+            window_end = self._bounded_window_end(
+                excerpt.raw_text,
+                offsets,
+                start=cursor,
+                source_budget=window_budget,
+                heading_prefix=heading_prefix,
+                token_limit=window_limit,
+            )
+            piece = _slice_excerpt_with_line_ends(
+                excerpt,
+                _token_boundary(offsets, cursor, len(excerpt.raw_text)),
+                _token_boundary(offsets, window_end, len(excerpt.raw_text)),
+                line_ends,
+            )
             chunks.append(piece)
-            overlap = self._overlap_suffix(piece)
-            pending = _slice_excerpt(
-                pending,
-                len(piece.raw_text) - len(overlap.raw_text),
-                len(pending.raw_text),
+            piece_tokens = window_end - cursor
+            effective_overlap = min(self._config.overlap_tokens, piece_tokens - 1)
+            cursor = window_end - effective_overlap
+
+        pending = _slice_excerpt_with_line_ends(
+            excerpt,
+            _token_boundary(offsets, cursor, len(excerpt.raw_text)),
+            len(excerpt.raw_text),
+            line_ends,
+        )
+        if (
+            self._token_count(heading_prefix + pending.raw_text)
+            > self._config.soft_max_tokens
+        ):
+            window_end = self._bounded_window_end(
+                excerpt.raw_text,
+                offsets,
+                start=cursor,
+                source_budget=soft_budget,
+                heading_prefix=heading_prefix,
+                token_limit=self._config.soft_max_tokens,
+            )
+            piece = _slice_excerpt_with_line_ends(
+                excerpt,
+                _token_boundary(offsets, cursor, len(excerpt.raw_text)),
+                _token_boundary(offsets, window_end, len(excerpt.raw_text)),
+                line_ends,
+            )
+            chunks.append(piece)
+            cursor = window_end - min(
+                self._config.overlap_tokens, window_end - cursor - 1
+            )
+            pending = _slice_excerpt_with_line_ends(
+                excerpt,
+                _token_boundary(offsets, cursor, len(excerpt.raw_text)),
+                len(excerpt.raw_text),
+                line_ends,
             )
         return tuple(chunks), pending
 
-    def _target_prefix(self, excerpt: _Excerpt, heading_prefix: str) -> _Excerpt:
-        return self._limit_prefix(excerpt, heading_prefix, self._config.target_tokens)
-
-    def _limit_prefix(
-        self, excerpt: _Excerpt, heading_prefix: str, token_limit: int
-    ) -> _Excerpt:
-        offsets = self._token_offsets(excerpt.raw_text)
-        prefix_tokens = self._token_count(heading_prefix)
-        candidate_index = min(len(offsets), token_limit - prefix_tokens)
-        if candidate_index <= 0:
-            raise ValueError("Heading path leaves no room for child source text")
-
-        while candidate_index > 0:
-            end = (
-                offsets[candidate_index][0]
-                if candidate_index < len(offsets)
-                else len(excerpt.raw_text)
-            )
+    def _bounded_window_end(
+        self,
+        raw_text: str,
+        offsets: tuple[tuple[int, int], ...],
+        *,
+        start: int,
+        source_budget: int,
+        heading_prefix: str,
+        token_limit: int,
+    ) -> int:
+        candidate = min(start + source_budget, len(offsets))
+        start_offset = _token_boundary(offsets, start, len(raw_text))
+        while candidate > start:
+            end_offset = _token_boundary(offsets, candidate, len(raw_text))
             if (
-                self._token_count(heading_prefix + excerpt.raw_text[:end])
+                self._token_count(heading_prefix + raw_text[start_offset:end_offset])
                 <= token_limit
             ):
-                return _slice_excerpt(excerpt, 0, end)
-            candidate_index -= 1
+                return candidate
+            candidate -= 1
         raise ValueError("Tokenizer offsets cannot form a non-empty child")
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
@@ -825,22 +892,44 @@ def _with_warning(excerpt: _Excerpt, warning: ChunkWarning) -> _Excerpt:
 
 
 def _slice_excerpt(excerpt: _Excerpt, start: int, end: int) -> _Excerpt:
+    return _slice_excerpt_with_line_ends(
+        excerpt, start, end, _physical_line_ends(excerpt.raw_text)
+    )
+
+
+def _physical_line_ends(raw_text: str) -> tuple[int, ...]:
+    cumulative_ends: list[int] = []
+    cursor = 0
+    for physical_line in split_physical_lines(raw_text):
+        cursor += len(physical_line)
+        cumulative_ends.append(cursor)
+    return tuple(cumulative_ends)
+
+
+def _token_boundary(
+    offsets: tuple[tuple[int, int], ...], index: int, text_length: int
+) -> int:
+    if index == 0:
+        return 0
+    if index == len(offsets):
+        return text_length
+    return offsets[index][0]
+
+
+def _slice_excerpt_with_line_ends(
+    excerpt: _Excerpt,
+    start: int,
+    end: int,
+    cumulative_ends: tuple[int, ...],
+) -> _Excerpt:
     raw_text = excerpt.raw_text[start:end]
     if not raw_text:
         return _Excerpt(
             raw_text="", line_start=excerpt.line_end, line_end=excerpt.line_end
         )
 
-    physical_lines = split_physical_lines(excerpt.raw_text)
-    cumulative_ends: list[int] = []
-    cursor = 0
-    for physical_line in physical_lines:
-        cursor += len(physical_line)
-        cumulative_ends.append(cursor)
-    line_start_offset = sum(line_end <= start for line_end in cumulative_ends)
-    line_end_offset = next(
-        index for index, line_end in enumerate(cumulative_ends) if end <= line_end
-    )
+    line_start_offset = bisect_right(cumulative_ends, start)
+    line_end_offset = bisect_left(cumulative_ends, end)
     return _Excerpt(
         raw_text=raw_text,
         line_start=excerpt.line_start + line_start_offset,
