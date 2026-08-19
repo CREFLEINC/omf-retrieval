@@ -482,6 +482,24 @@ class ParentChildChunker:
     def _split_normal_blocks(
         self, blocks: tuple[ParsedBlock, ...], heading_prefix: str
     ) -> tuple[_Excerpt, ...]:
+        if len(blocks) == 1:
+            block = blocks[0]
+            excerpt = _Excerpt(
+                raw_text=block.raw_text,
+                line_start=block.line_start,
+                line_end=block.line_end,
+            )
+            chunks, pending = self._split_oversized_normal(excerpt, heading_prefix)
+            return (*chunks, pending)
+
+        prefix_tokens = self._token_count(heading_prefix)
+        target_budget = self._config.target_tokens - prefix_tokens
+        use_target_window = target_budget >= max(1, 2 * self._config.overlap_tokens)
+        window_limit = (
+            self._config.target_tokens
+            if use_target_window
+            else self._config.soft_max_tokens
+        )
         chunks: list[_Excerpt] = []
         pending: _Excerpt | None = None
         for block in blocks:
@@ -494,24 +512,24 @@ class ParentChildChunker:
                 pending = block_excerpt
             else:
                 candidate = _join_excerpts(pending, block_excerpt)
-                pending_tokens = self._token_count(heading_prefix + pending.raw_text)
                 candidate_tokens = self._token_count(
                     heading_prefix + candidate.raw_text
                 )
-                if candidate_tokens <= self._config.target_tokens or (
-                    pending_tokens < self._config.target_tokens
-                    and candidate_tokens <= self._config.soft_max_tokens
-                ):
+                if candidate_tokens <= window_limit:
                     pending = candidate
                 else:
                     chunks.append(pending)
                     pending = _join_excerpts(
                         self._overlap_suffix(pending), block_excerpt
                     )
-            oversized_chunks, pending = self._split_oversized_normal(
-                pending, heading_prefix
-            )
-            chunks.extend(oversized_chunks)
+            if (
+                self._token_count(heading_prefix + pending.raw_text)
+                > self._config.soft_max_tokens
+            ):
+                oversized_chunks, pending = self._split_oversized_normal(
+                    pending, heading_prefix
+                )
+                chunks.extend(oversized_chunks)
 
         if pending is not None:
             chunks.append(pending)
@@ -615,10 +633,10 @@ class ParentChildChunker:
         return None
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
-        if self._config.overlap_tokens == 0:
-            return _slice_excerpt(excerpt, len(excerpt.raw_text), len(excerpt.raw_text))
         offsets = self._token_offsets(excerpt.raw_text)
-        overlap_count = min(self._config.overlap_tokens, len(offsets))
+        overlap_count = min(self._config.overlap_tokens, len(offsets) // 2)
+        if overlap_count == 0:
+            return _slice_excerpt(excerpt, len(excerpt.raw_text), len(excerpt.raw_text))
         start = offsets[-overlap_count][0]
         return _slice_excerpt(excerpt, start, len(excerpt.raw_text))
 

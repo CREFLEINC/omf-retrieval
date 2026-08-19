@@ -570,13 +570,17 @@ def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
 
     chunks = _chunker(counter).split(section, parser_version="parser-v1")
 
-    assert len(chunks) == 2
-    assert chunks[0].raw_text == first_paragraph + second_paragraph[:-1]
-    assert chunks[0].token_count == 455
-    assert chunks[1].raw_text == (chunks[0].raw_text[-64:] + "\n" + third_paragraph)
-    assert chunks[1].raw_text.startswith(chunks[0].raw_text[-64:])
-    assert (chunks[0].line_start, chunks[0].line_end) == (2, 4)
-    assert (chunks[1].line_start, chunks[1].line_end) == (4, 6)
+    assert [chunk.raw_text for chunk in chunks] == [
+        first_paragraph,
+        first_paragraph[-64:] + second_paragraph,
+        second_paragraph[-64:] + third_paragraph,
+    ]
+    assert [chunk.token_count for chunk in chunks] == [354, 168, 367]
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
+        (2, 3),
+        (2, 5),
+        (4, 6),
+    ]
     assert all(
         chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
         for chunk in chunks
@@ -848,6 +852,136 @@ def test_soft_window_half_progress_boundary_catches_threshold_mutations(
     actual_overlap = first_start + len(chunks[0].raw_text) - second_start
     assert len(chunks[0].raw_text) == expected_first_source
     assert actual_overlap == expected_overlap
+
+
+_MULTIBLOCK_WORK_MULTIPLIER = 4
+
+
+def _reference_block_aware_child_count(
+    block_lengths: Sequence[int], prefix_tokens: int
+) -> int:
+    target_budget = _HEADING_TARGET_TOKENS - prefix_tokens
+    soft_budget = _HEADING_SOFT_MAX_TOKENS - prefix_tokens
+    selected_budget = (
+        target_budget
+        if target_budget >= _HEADING_MIN_TARGET_SOURCE_TOKENS
+        else soft_budget
+    )
+    children = 0
+    pending_tokens: int | None = None
+    for block_tokens in block_lengths:
+        if pending_tokens is None:
+            pending_tokens = block_tokens
+        elif pending_tokens + block_tokens <= selected_budget:
+            pending_tokens += block_tokens
+        else:
+            children += 1
+            pending_tokens = (
+                min(_HEADING_OVERLAP_TOKENS, pending_tokens // 2) + block_tokens
+            )
+        while pending_tokens > soft_budget:
+            piece_tokens = min(selected_budget, pending_tokens)
+            overlap = min(_HEADING_OVERLAP_TOKENS, piece_tokens // 2)
+            children += 1
+            pending_tokens -= piece_tokens - overlap
+    return children + (pending_tokens is not None)
+
+
+def _normal_paragraph_source(
+    prefix_tokens: int, paragraph_lengths: Sequence[int]
+) -> tuple[str, str]:
+    heading = "H" * (prefix_tokens - 1)
+    codepoint = 0x7000
+    paragraphs: list[str] = []
+    for paragraph_length in paragraph_lengths:
+        paragraph = "".join(chr(codepoint + index) for index in range(paragraph_length))
+        paragraphs.append(paragraph)
+        codepoint += paragraph_length
+    return heading, "\n\n".join(paragraphs)
+
+
+def _split_normal_paragraphs(
+    prefix_tokens: int, paragraph_lengths: Sequence[int]
+) -> tuple[str, tuple[object, ...]]:
+    heading, body = _normal_paragraph_source(prefix_tokens, paragraph_lengths)
+    source = f"# {heading}\n{body}"
+    section = _section(source)
+    counter = _CountingTokenCounter()
+
+    chunks = _chunker(counter).split(section, parser_version="parser-v1")
+    split_work = counter.input_work
+    split_calls = counter.calls
+    repeated = _chunker().split(section, parser_version="parser-v1")
+
+    assert chunks == repeated
+    assert len(_FakeTokenCounter().encode(heading + "\n")) == prefix_tokens
+    actual_counts = [len(counter.encode(chunk.search_text)) for chunk in chunks]
+    assert actual_counts == [chunk.token_count for chunk in chunks]
+    assert all(count <= _HEADING_SOFT_MAX_TOKENS for count in actual_counts)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert [chunk.chunk_hash for chunk in chunks] == [
+        chunk.chunk_hash for chunk in repeated
+    ]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
+
+    source_lines = source.splitlines(keepends=True)
+    assert all(
+        chunk.raw_text in "".join(source_lines[chunk.line_start - 1 : chunk.line_end])
+        for chunk in chunks
+    )
+    starts = [body.find(chunk.raw_text) for chunk in chunks]
+    assert starts[0] == 0
+    assert all(start >= 0 for start in starts)
+    reconstructed = chunks[0].raw_text
+    for index, (previous, chunk) in enumerate(
+        zip(chunks, chunks[1:], strict=False), start=1
+    ):
+        previous_start = starts[index - 1]
+        chunk_start = starts[index]
+        previous_end = previous_start + len(previous.raw_text)
+        overlap = previous_end - chunk_start
+        assert chunk_start - previous_start >= (len(previous.raw_text) + 1) // 2
+        assert overlap == min(_HEADING_OVERLAP_TOKENS, len(previous.raw_text) // 2)
+        if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
+            assert overlap == _HEADING_OVERLAP_TOKENS
+        reconstructed += chunk.raw_text[overlap:]
+    assert reconstructed == body
+
+    block_lengths = [len(block.raw_text) for block in section.blocks]
+    expected_children = _reference_block_aware_child_count(block_lengths, prefix_tokens)
+    assert len(chunks) == expected_children
+    emitted_search_tokens = sum(actual_counts)
+    reference_work = (
+        len(body) + len(section.blocks) * prefix_tokens + emitted_search_tokens
+    )
+    assert split_work <= _MULTIBLOCK_WORK_MULTIPLIER * reference_work
+    assert split_calls <= 2 * len(section.blocks) + 6 * len(chunks) + 8
+    assert emitted_search_tokens <= (
+        _HEADING_EMITTED_TOKEN_MULTIPLIER * (prefix_tokens + len(body))
+    )
+    return body, chunks
+
+
+@pytest.mark.parametrize("prefix_tokens", [272, 273, 335, 399, 472, 473])
+@pytest.mark.parametrize("paragraph_count", [15, 60])
+def test_normal_multiblock_packing_obeys_selected_window_and_half_progress(
+    prefix_tokens: int, paragraph_count: int
+) -> None:
+    """Whole paragraph packing must share the single-block window invariant."""
+    _split_normal_paragraphs(prefix_tokens, [65] * paragraph_count)
+
+
+def test_normal_multiblock_splits_only_overlap_plus_block_soft_overflow() -> None:
+    """A bounded pending block stays whole until overlap plus its successor overflows."""
+    body, chunks = _split_normal_paragraphs(473, [125, 65])
+
+    starts = [body.find(chunk.raw_text) for chunk in chunks]
+    overlaps = [
+        starts[index - 1] + len(chunks[index - 1].raw_text) - starts[index]
+        for index in range(1, len(chunks))
+    ]
+    assert [len(chunk.raw_text) for chunk in chunks] == [127, 127, 64]
+    assert overlaps == [63, 63]
 
 
 def _boundary_sensitive_split(
