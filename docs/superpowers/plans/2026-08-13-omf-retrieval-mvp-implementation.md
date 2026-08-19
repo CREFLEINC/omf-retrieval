@@ -6,10 +6,10 @@
 
 | 문서 항목 | 값 |
 |---|---|
-| 작성자 | CREFLE Inc. CTO 김정규 |
-| 작성일시 | 2026-08-14 17:08 KST |
-| 문서 버전 | 1.1 |
-| 열람 대상 | 프로젝트 관련자 |
+| 작성자 | CREFLE / Codex |
+| 작성일시 | 2026-08-19 KST |
+| 문서 버전 | v1.2 |
+| 열람 대상 | CREFLE 개발자·검토자 |
 | 기준 설계 | <code>docs/design/2026-08-13-omf-retrieval-mvp-system-design.html</code> v1.0 |
 | 상태 | 최종 승인 · 개발 착수 가능 |
 
@@ -17,6 +17,7 @@
 
 | 버전 | 작성일시 | 변경 | 작성자 |
 |---|---|---|---|
+| v1.2 | 2026-08-19 KST | OMF commit 선행조건, 버전 검색 정책, 성능 workload, 토큰 회전 절차, 작업 단위별 확인 지점을 확정 설계·협업 정책과 정합화 | CREFLE / Codex |
 | 1.1 | 2026-08-14 17:08 KST | 작업 1의 RED를 import 오류가 아닌 구현 부재에 따른 assertion 실패로 재구성 | CREFLE Inc. CTO 김정규 |
 | 1.0 | 2026-08-13 15:50 KST | 최초 승인본 | CREFLE Inc. CTO 김정규 |
 
@@ -84,13 +85,15 @@ MVP는 근거 검색까지만 담당한다. LLM 요약·분석, MCP, Codex funct
 | Embedding dimension | 1024 |
 | Query instruction | <code>Instruct: Retrieve passages from Korean internal software design documents that provide the requirements, policies, API definitions, data models, or decisions needed to answer the query.\nQuery: {query}</code> |
 
-### 3.3 보수적 문서 메타데이터 판정
+### 3.3 보수적 문서 메타데이터 판정과 버전 검색 정책
 
-문서 전체의 의미를 추론하지 않는다. 다음 명시적 신호만 사용한다.
+문서 전체의 의미를 추론하지 않는다. 메타데이터는 다음 명시적 신호만 사용하고,
+버전 범위는 확정된 색인·검색 정책을 따른다.
 
 - 날짜: 상단 40행의 <code>작성일:</code>, 없으면 파일명 선두 <code>YYYY-MM-DD</code>, 없으면 <code>null</code>
 - 버전: 상단 40행의 <code>vN[.N...]</code>, 없으면 파일명 버전, 없으면 <code>null</code>
-- 과거본: source path에 <code>/versions/</code>가 있는 문서만 <code>historical</code>; 나머지는 <code>current</code>
+- 버전 범위: 전체 문서와 명시적 버전 스냅샷을 색인하되 일반 검색은 현재본을 우선한다. 사용자가 이전 버전·변경 전·최초 결정을 요구하면 과거본을 검색한다.
+- source path의 <code>/versions/</code>는 명시적 버전 스냅샷의 한 형태이며, 이를 과거본의 유일한 조건으로 제한하거나 이 계획에서 새로운 판정 휴리스틱을 추가하지 않는다.
 - 결정 상태:
 - <code>confirmed</code>: 파일명 <code>확정기록</code>·<code>결정서</code>, 상단 메타데이터의 <code>[확정]</code>·<code>확정</code>, 또는 식별 표의 <code>신뢰도=확정</code>
   - <code>draft</code>: 파일명·상단 제목의 <code>초안</code>·<code>제안안</code>·<code>가설</code>·<code>진행메모</code>
@@ -158,12 +161,16 @@ MVP는 근거 검색까지만 담당한다. LLM 요약·분석, MCP, Codex funct
 
 ## 5. 단계와 사용자 확인 지점
 
+아래 단계는 진행 현황을 묶어 보고하기 위한 구분이며 여러 작업 단위를 연속 실행하는
+승인이 아니다. 각 작업 단위의 결과와 검증 증거를 사용자에게 공유하고 확인받은 뒤
+다음 작업 단위를 시작한다.
+
 | 단계 | 범위 | 완료 조건 | 사용자 확인 |
 |---|---|---|---|
-| A · 기반 | 작업 1~6 | 프로젝트·도메인·DB·source·parser·chunk unit/integration 통과 | 결과 공유 후 확인 |
-| B · 검색 수직 절편 | 작업 7~12 | fake embedding 색인부터 인증된 API·CLI 검색까지 통과 | 결과 공유 후 확인 |
-| C · 평가·컨테이너 | 작업 13~15 | 평가기·로그·Docker/Compose와 로컬 계약 통과 | 결과 공유 후 확인 |
-| D · 운영 검증 | 작업 16~17 | 30개 골드 승인, server GPU E2E, 품질·성능 기준 통과 | 각 외부 변경 전 확인 |
+| A · 기반 | 작업 1~6 | 프로젝트·도메인·DB·source·parser·chunk unit/integration 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
+| B · 검색 수직 절편 | 작업 7~12 | fake embedding 색인부터 인증된 API·CLI 검색까지 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
+| C · 평가·컨테이너 | 작업 13~15 | 평가기·로그·Docker/Compose와 로컬 계약 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
+| D · 운영 검증 | 작업 16~17 | 30개 골드 승인, server GPU E2E, 품질·성능 기준 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작; 외부 변경 전 별도 확인 |
 | E · 인수 | 작업 18 | 전체 검증 증거와 운영 인계 완료 | 최종 승인 |
 
 ---
@@ -613,7 +620,9 @@ def test_parser_preserves_heading_hierarchy_and_lines() -> None:
 
 **5.4 보수적 metadata extractor 실패 test**
 
-실제 OMF 표기를 축약한 fixture로 날짜, 버전, 확정 상태, owner, versions path를 검증한다.
+실제 OMF 표기를 축약한 fixture로 날짜, 버전, 확정 상태, owner와 확정된 현재본·과거본
+검색 정책 적용 결과를 검증한다. <code>/versions/</code> path만을 과거본의 유일한 판정
+조건으로 두지 않는다.
 
 ~~~python
 metadata = extract_metadata(
@@ -932,6 +941,8 @@ def test_issued_token_is_shown_once_and_only_hash_is_persisted() -> None:
 - search repository를 부르기 전에 client와 requested source grant를 검사한다.
 - 없는 source와 무권한 source의 내부 차이를 외부 message로 노출하지 않는다.
 - create/revoke/list는 application admin service만 제공하며 HTTP admin route는 만들지 않는다.
+- 여러 token을 동시에 활성(<code>active</code>) 상태로 둘 수 있는 기존 기능과 create/list/revoke를 사용한다. 회전은 새 토큰 생성 → list에서 새 토큰과 기존 토큰이 둘 다 활성인지 확인 → 소비자 전환 → 기존 토큰 폐기 순서로 수행한다.
+- 별도 rotate CLI나 HTTP API는 추가하지 않는다.
 
 **10.4 query HMAC 규약**
 
@@ -1123,6 +1134,12 @@ git commit -m "feat(api): 검색·헬스체크·운영 CLI 계약 구현"
 ---
 
 ## 작업 13. 검색 전용 평가 dataset과 metric
+
+**13.0 선행조건: OMF full commit SHA 승인 checkpoint**
+
+작업 13을 시작하기 전에 평가와 이후 색인에 사용할 OMF의 40자 full commit SHA를
+사용자가 확인해 고정한다. Agent는 특정 SHA를 임의로 선택하지 않으며, 기존의 고정
+commit 조건과 승인 checkpoint를 작업 13의 선행조건으로 앞당긴다.
 
 **파일**
 
@@ -1460,7 +1477,7 @@ push digest, server pull digest, running container digest가 모두 같아야 �
 
 - model prepare 결과가 고정 revision인지 확인
 - container에서 visible device가 1개이고 <code>cuda:0</code>가 physical GPU 0인지 확인
-- clean OMF host clone의 full commit SHA를 기록
+- clean OMF host clone의 HEAD가 작업 13 전에 사용자 확인으로 고정한 full commit SHA와 같은지 확인
 - <code>index --source omf --commit &lt;sha&gt;</code>
 - active run pointer, counts, excluded files, duplicate origins, embedding dimension 검증
 - 초기 전체 index 15분 이하
@@ -1504,7 +1521,7 @@ push digest, server pull digest, running container digest가 모두 같아야 �
 
 <code>run_search_benchmark.py</code>는 HTTPX와 표준 <code>concurrent.futures</code>만 사용한다.
 
-- warm request 최소 100회
+- 30개 골드 질문을 반복하여 최소 100회 warm 요청
 - concurrency 1 p95 ≤ 2초
 - concurrency 5 p95 ≤ 3초
 - server error rate &lt; 1%
@@ -1535,7 +1552,7 @@ git commit -m "test(acceptance): GPU 검색 품질과 성능 검증 추가"
 
 - local CPU test와 PostgreSQL integration 실행법
 - model cache 준비, 최초 index, status, evaluate
-- client create/revoke/rotation
+- client token 회전: 새 토큰 생성 → list에서 둘 다 활성(<code>active</code>) 확인 → 소비자 전환 → 기존 토큰 폐기
 - active/previous 의미와 rollback
 - health endpoint와 stable error code
 - central Nginx Gateway upstream 요구사항

@@ -19,11 +19,10 @@
   <table data-document-info>
     <caption>문서 정보</caption>
     <tbody>
-      <tr><th>작성자</th><td>CREFLE Inc. CTO 김정규</td></tr>
-      <tr><th>작성일</th><td>2026-08-14</td></tr>
-      <tr><th>작성시간</th><td>17:08 KST</td></tr>
-      <tr><th>문서 버전</th><td>1.1</td></tr>
-      <tr><th>열람 대상</th><td>프로젝트 관련자</td></tr>
+      <tr><th>작성자</th><td>CREFLE / Codex</td></tr>
+      <tr><th>작성일시</th><td>2026-08-19 KST</td></tr>
+      <tr><th>문서 버전</th><td>v1.2</td></tr>
+      <tr><th>열람 대상</th><td>CREFLE 개발자·검토자</td></tr>
       <tr><th>상태</th><td>최종 승인 · 개발 착수 가능</td></tr>
     </tbody>
   </table>
@@ -32,14 +31,14 @@
 <h2>문서 관계와 결론</h2>
 
 <div class="callout">
-  <p><strong>정본과 열람본.</strong> 같은 경로의 <code>2026-08-13-omf-retrieval-mvp-implementation.md</code>가 1,500여 행의 실행 정본이다. 이 HTML은 프로젝트 관련자가 단계·책임·게이트를 빠르게 검토하기 위한 파생 열람본이다. 구현 시에는 Markdown의 파일 목록, 실패 테스트, 예상 결과와 검증 명령을 따른다.</p>
+  <p><strong>정본과 열람본.</strong> 같은 경로의 <code>2026-08-13-omf-retrieval-mvp-implementation.md</code>가 1,500여 행의 실행 정본이다. 이 HTML은 CREFLE 개발자·검토자가 단계·책임·게이트를 빠르게 검토하기 위한 파생 열람본이다. 구현 시에는 Markdown의 파일 목록, 실패 테스트, 예상 결과와 검증 명령을 따른다.</p>
 </div>
 
-<p>구현은 <strong>18개 논리적 작업</strong>을 5개 승인 단계로 진행한다. 각 기능은 실패 테스트에서 시작하고, PostgreSQL 통합은 실제 pgvector 컨테이너에서, 최종 품질·성능은 지정 서버의 RTX 4090 GPU 0에서 검증한다. 단계 결과를 공유하고 사용자 확인을 받은 뒤 다음 단계로 이동한다.</p>
+<p>구현은 <strong>18개 논리적 작업</strong>을 5개 진행 단계로 나누어 보고한다. 각 기능은 실패 테스트에서 시작하고, PostgreSQL 통합은 실제 pgvector 컨테이너에서, 최종 품질·성능은 지정 서버의 RTX 4090 GPU 0에서 검증한다. 각 작업 단위의 결과와 검증 증거를 공유하고 사용자 확인을 받은 뒤 다음 작업 단위를 시작한다.</p>
 
 <div class="kpi">
   <div><span class="big">18</span><span class="lbl">논리적 구현<br>작업</span></div>
-  <div><span class="big">5</span><span class="lbl">사용자 승인<br>게이트</span></div>
+  <div><span class="big">5</span><span class="lbl">진행 현황<br>보고 단계</span></div>
   <div><span class="big">3일</span><span class="lbl">MVP 학습·구현<br>목표</span></div>
 </div>
 
@@ -149,7 +148,7 @@ interfaces.cli ─────┼──► application use cases ──► domai
   </thead>
   <tbody>
     <tr><th>행 좌표</th><td>1-based inclusive</td><td>markdown-it source map에서 원본 slice</td></tr>
-    <tr><th>과거본</th><td><code>/versions/</code> path만 historical</td><td>이름의 v1·v2만으로 관계 추론 금지</td></tr>
+    <tr><th>버전 검색</th><td>전체 문서와 명시적 버전 snapshot을 색인하고 일반 검색은 현재본을 우선</td><td>이전 버전·변경 전·최초 결정 요청 시 과거본 검색; <code>/versions/</code>를 유일한 판정 조건으로 제한하거나 새 heuristic을 추가하지 않음</td></tr>
     <tr><th>문서 상태</th><td>파일명·상단 구조화 metadata·신뢰도 표</td><td>미확정·불확정 등 부정 표현 제외</td></tr>
     <tr><th>문서 관계</th><td><code>omf-relations.json</code>의 명시적 path·행</td><td>supersedes·conflict 자동 추론 금지</td></tr>
     <tr><th>내용 hash</th><td>Git archive UTF-8 bytes 그대로 SHA-256</td><td>개행 정규화 금지</td></tr>
@@ -165,6 +164,8 @@ interfaces.cli ─────┼──► application use cases ──► domai
 
 <h2>단계별 실행 흐름</h2>
 
+<p>아래 단계는 진행 현황을 묶어 보고하기 위한 구분이며 여러 작업 단위를 연속 실행하는 승인이 아니다. 각 작업 단위의 결과와 검증 증거를 사용자에게 공유하고 확인받은 뒤 다음 작업 단위를 시작한다.</p>
+
 <div class="process-flow-scroll">
   <table class="process-flow">
     <caption>5단계 구현·검증·승인 흐름</caption>
@@ -176,25 +177,25 @@ interfaces.cli ─────┼──► application use cases ──► domai
         <th scope="row"><strong>A · 기반</strong><small>작업 1~6</small></th>
         <td data-transition="enter"><span class="process-flow-transition">시작</span><div class="process-flow-items">Project · Domain · Schema · Git · Parser · Chunk</div></td>
         <td><div class="process-flow-items">unit · PostgreSQL migration · source integration</div></td>
-        <td><div class="process-flow-items">test 수 · coverage · migration 공유</div></td>
+        <td><div class="process-flow-items">각 작업 결과 공유·확인 후 다음 작업 시작</div></td>
       </tr>
       <tr>
         <th scope="row"><strong>B · 검색 절편</strong><small>작업 7~12</small></th>
         <td><div class="process-flow-items">Embedding · Index · Activation · Auth · Search · API/CLI</div></td>
         <td><div class="process-flow-items">fake model vertical slice · 계약 · 권한 누출 test</div></td>
-        <td><div class="process-flow-items">sample evidence response 검토</div></td>
+        <td><div class="process-flow-items">각 작업 결과 공유·확인 후 다음 작업 시작</div></td>
       </tr>
       <tr>
         <th scope="row"><strong>C · 제품화</strong><small>작업 13~15</small></th>
         <td><div class="process-flow-items">Evaluation · Audit · Docker · Compose</div></td>
         <td><div class="process-flow-items">품질 metric fixture · log redaction · image contract</div></td>
-        <td><div class="process-flow-items">image size · Compose · 보안 기준 검토</div></td>
+        <td><div class="process-flow-items">각 작업 결과 공유·확인 후 다음 작업 시작</div></td>
       </tr>
       <tr>
         <th scope="row"><strong>D · 운영 검증</strong><small>작업 16~17</small></th>
         <td><div class="process-flow-items">Buildx push · Deploy · Full index · Gold evaluation</div></td>
         <td><div class="process-flow-items">GPU E2E · rollback · 품질 · 성능</div></td>
-        <td><div class="process-flow-items">외부 변경 전 승인 · gold 사람 검토</div></td>
+        <td><div class="process-flow-items">각 작업 결과 공유·확인 후 다음 작업 시작 · 외부 변경 전 별도 확인</div></td>
       </tr>
       <tr>
         <th scope="row"><strong>E · 인수</strong><small>작업 18</small></th>
@@ -305,6 +306,8 @@ RTX 4090 server E2E ──► Gold 품질 ──► 성능 ──► 운영 인�
   </tbody>
 </table>
 
+<p>Client token 회전은 기존 create/list/revoke 절차로 수행한다. 새 토큰 생성 → list에서 새 토큰과 기존 토큰이 둘 다 활성(<code>active</code>)인지 확인 → 소비자 전환 → 기존 토큰 폐기 순서이며, 별도 rotate CLI나 HTTP API는 추가하지 않는다.</p>
+
 <figure>
 <pre><code>Bearer·source grant
         │ 후보 전에 강제
@@ -323,6 +326,10 @@ authorized occurrences ──► unique chunks
 </figure>
 
 <h2>평가와 출시 기준</h2>
+
+<div class="callout">
+  <p><strong>OMF full commit SHA 승인 checkpoint.</strong> 작업 13을 시작하기 전에 평가와 이후 색인에 사용할 OMF의 40자 full commit SHA를 사용자가 확인해 고정한다. Agent는 특정 SHA를 임의로 선택하지 않는다.</p>
+</div>
 
 <table>
   <caption>30개 골드 질문 구성</caption>
@@ -357,6 +364,8 @@ authorized occurrences ──► unique chunks
     <tr><th>Duplicate Evidence Ratio</th><td class="num">≤ 0.10</td></tr>
   </tbody>
 </table>
+
+<p>검색 성능 workload는 30개 골드 질문을 반복하여 최소 100회 warm 요청으로 구성한다. concurrency 1 p95는 2초 이하, concurrency 5 p95는 3초 이하이고 server error rate는 1% 미만이어야 한다.</p>
 
 <p>provenance, 권한 누출, 과거본 선택, 충돌 노출, no-evidence, duplicate origins는 평균이 아니라 100% 통과해야 한다. 사람의 gold 검토 전에는 품질 완료로 표시하지 않는다.</p>
 
@@ -434,14 +443,16 @@ phoebe-onpremise-test
 <h2>승인된 계획 사항</h2>
 
 <ol>
-  <li>18개 작업과 5개 사용자 확인 지점</li>
-  <li><code>/versions/</code>만 historical로 보는 보수적 version 규칙</li>
+  <li>18개 작업을 5개 진행 단계로 보고하되 각 작업 단위의 결과와 검증 증거를 확인받은 뒤 다음 작업을 시작하는 진행 방식</li>
+  <li>일반 검색은 현재본을 우선하고 이전 버전·변경 전·최초 결정 요청 시 과거본을 검색하는 version scope 정책</li>
   <li>명시적 sidecar만 supersedes·potential conflict로 저장하는 규칙</li>
   <li>API token SHA-256과 질의 audit HMAC-SHA256의 분리</li>
   <li><code>audit_hmac_key</code> secret file 추가</li>
   <li>인증된 client만 readiness를 호출하는 정책</li>
   <li>운영 전 <code>model prepare</code> CLI로 고정 revision을 cache하는 방식</li>
-  <li>단계 A부터 순차 구현하고 각 단계 결과를 확인받는 진행 방식</li>
+  <li>기존 create/list/revoke를 이용한 새 토큰 생성·확인·소비자 전환·기존 토큰 폐기 순서의 회전 절차</li>
+  <li>작업 13 전에 평가와 이후 색인에 사용할 OMF 40자 full commit SHA를 사용자가 확인하는 checkpoint</li>
+  <li>30개 골드 질문을 반복하는 최소 100회 warm 요청 성능 workload</li>
 </ol>
 
 <h2>개정 이력</h2>
@@ -452,6 +463,7 @@ phoebe-onpremise-test
     <tr><th>버전</th><th>작성일시</th><th>변경</th><th>작성자</th></tr>
   </thead>
   <tbody>
+    <tr><th>v1.2</th><td>2026-08-19 KST</td><td>OMF commit 선행조건, 버전 검색 정책, 성능 workload, 토큰 회전 절차, 작업 단위별 확인 지점을 확정 설계·협업 정책과 정합화</td><td>CREFLE / Codex</td></tr>
     <tr><th>v1.1</th><td>2026-08-14 17:08 KST</td><td>작업 1의 RED를 import 오류가 아닌 구현 부재에 따른 assertion 실패로 재구성</td><td>CREFLE Inc. CTO 김정규</td></tr>
     <tr><th>v1.0</th><td>2026-08-13 15:50 KST</td><td>최초 승인본</td><td>CREFLE Inc. CTO 김정규</td></tr>
   </tbody>
