@@ -281,7 +281,7 @@ class ParentContextBuilder:
         result = _call_token_counter(self._offsets, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result)
+        materialized = _materialize_sequence(result, max_items=len(text))
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -311,7 +311,7 @@ class ParentContextBuilder:
         result = _call_token_counter(self._encode, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result)
+        materialized = _materialize_sequence(result, max_items=len(text))
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -591,7 +591,7 @@ class ParentChildChunker:
         result = _call_token_counter(self._offsets, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result)
+        materialized = _materialize_sequence(result, max_items=len(text))
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -621,7 +621,7 @@ class ParentChildChunker:
         result = _call_token_counter(self._encode, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result)
+        materialized = _materialize_sequence(result, max_items=len(text))
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -669,11 +669,13 @@ def _call_token_counter(operation: Callable[[str], object], text: str) -> object
         return _TOKEN_COUNTER_FAILED
 
 
-def _materialize_sequence(result: object) -> object:
+def _materialize_sequence(result: object, *, max_items: int) -> object:
     if not isinstance(result, Sequence) or isinstance(result, (str, bytes, bytearray)):
         return None
     try:
         declared_length = len(result)
+        if declared_length > max_items:
+            return None
         iterator = iter(result)
         items: list[object] = []
         for _ in range(declared_length):

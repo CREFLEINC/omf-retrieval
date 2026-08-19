@@ -242,6 +242,100 @@ class _InfiniteResultCounter(_CharacterTokenCounter):
         return super().offsets(text)
 
 
+class _HugeDeclaredIterator(Iterator[object]):
+    def __init__(self, item: object) -> None:
+        self._item = item
+        self.next_count = 0
+
+    def __next__(self) -> object:
+        self.next_count += 1
+        if self.next_count > 2:
+            raise _SecretDependencyError("secret-huge-declared-length-consumption")
+        return self._item
+
+
+class _HugeDeclaredSequence(Sequence[object]):
+    def __init__(self, item: object) -> None:
+        self._item = item
+        self.iterator = _HugeDeclaredIterator(item)
+        self.iter_count = 0
+        self.getitem_count = 0
+
+    def __len__(self) -> int:
+        return 10**9
+
+    def __iter__(self) -> Iterator[object]:
+        self.iter_count += 1
+        return self.iterator
+
+    def __getitem__(self, index: int | slice) -> object:
+        self.getitem_count += 1
+        return self._item
+
+
+class _HugeDeclaredLengthCounter(_CharacterTokenCounter):
+    def __init__(self, side: str) -> None:
+        self._side = side
+        self.result: _HugeDeclaredSequence | None = None
+
+    def _huge_result(self, item: object) -> _HugeDeclaredSequence:
+        result = _HugeDeclaredSequence(item)
+        self.result = result
+        return result
+
+    def encode(self, text: str) -> object:
+        if self._side == "encode":
+            return self._huge_result(1)
+        return super().encode(text)
+
+    def offsets(self, text: str) -> object:
+        if self._side == "offsets":
+            return self._huge_result((0, 1))
+        return super().offsets(text)
+
+
+class _DeclaredLengthSequence(Sequence[object]):
+    def __init__(self, items: tuple[object, ...], *, declared_length: int) -> None:
+        self._items = items
+        self._declared_length = declared_length
+        self.iter_count = 0
+        self.getitem_count = 0
+
+    def __len__(self) -> int:
+        return self._declared_length
+
+    def __iter__(self) -> Iterator[object]:
+        self.iter_count += 1
+        return iter(self._items)
+
+    def __getitem__(self, index: int | slice) -> object:
+        self.getitem_count += 1
+        return self._items[index]
+
+
+class _DeclaredLengthCounter(_CharacterTokenCounter):
+    def __init__(self, side: str, *, extra_declared_items: int) -> None:
+        self._side = side
+        self._extra_declared_items = extra_declared_items
+        self.results: list[_DeclaredLengthSequence] = []
+
+    def _result(self, items: tuple[object, ...]) -> _DeclaredLengthSequence:
+        result = _DeclaredLengthSequence(
+            items,
+            declared_length=len(items) + self._extra_declared_items,
+        )
+        self.results.append(result)
+        return result
+
+    def encode(self, text: str) -> object:
+        tokens = super().encode(text)
+        return self._result(tokens) if self._side == "encode" else tokens
+
+    def offsets(self, text: str) -> object:
+        offsets = super().offsets(text)
+        return self._result(offsets) if self._side == "offsets" else offsets
+
+
 class _MalformedCounter(_CharacterTokenCounter):
     def __init__(self, side: str, result: object) -> None:
         self._side = side
@@ -1034,6 +1128,76 @@ def test_tokenizer_sequence_materialization_is_bounded(side: str) -> None:
 
     assert counter.result is not None
     assert counter.result.iterator.next_count == 2
+
+
+@pytest.mark.parametrize("side", ["encode", "offsets"])
+def test_tokenizer_huge_declared_length_is_rejected_without_sequence_consumption(
+    side: str,
+) -> None:
+    """An impossible declared length must fail before iterator consumption."""
+    counter = _HugeDeclaredLengthCounter(side)
+    builder = _builder(
+        token_counter=counter,
+        limit=5 if side == "offsets" else 1200,
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _build_with(builder, oversized=side == "offsets")
+
+    _assert_sanitized(caught.value)
+    assert str(caught.value) == "Token counter returned malformed data"
+    assert counter.result is not None
+    assert counter.result.iter_count == 0
+    assert counter.result.iterator.next_count == 0
+    assert counter.result.getitem_count == 0
+
+
+@pytest.mark.parametrize("side", ["encode", "offsets"])
+def test_tokenizer_declared_length_text_boundary_preserves_unicode_context(
+    side: str,
+) -> None:
+    """Exactly one token per Unicode character remains a valid upper boundary."""
+    body = "한🙂MATCH문맥\n"
+    section = _section(f"# H\n{body}")
+    counter = _DeclaredLengthCounter(side, extra_declared_items=0)
+    limit = 5 if side == "offsets" else 1200
+
+    context = _builder(token_counter=counter, limit=limit).build(
+        section,
+        matched_raw_text="MATCH" if side == "offsets" else body,
+        matched_line_start=2,
+        matched_line_end=2,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+    expected = _builder(limit=limit).build(
+        section,
+        matched_raw_text="MATCH" if side == "offsets" else body,
+        matched_line_start=2,
+        matched_line_end=2,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert context == expected
+    assert counter.results
+
+
+@pytest.mark.parametrize("side", ["encode", "offsets"])
+def test_tokenizer_declared_length_one_over_text_is_rejected_without_consumption(
+    side: str,
+) -> None:
+    """A one-item impossible declaration must fail before Sequence iteration."""
+    counter = _DeclaredLengthCounter(side, extra_declared_items=1)
+    builder = _builder(
+        token_counter=counter,
+        limit=5 if side == "offsets" else 1200,
+    )
+
+    with pytest.raises(ValueError, match="^Token counter returned malformed data$"):
+        _build_with(builder, oversized=side == "offsets")
+
+    assert counter.results
+    assert counter.results[0].iter_count == 0
+    assert counter.results[0].getitem_count == 0
 
 
 @pytest.mark.parametrize(
