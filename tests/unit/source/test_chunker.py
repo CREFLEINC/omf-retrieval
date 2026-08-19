@@ -101,6 +101,38 @@ class _CountingTokenCounter(_FakeTokenCounter):
         return super().offsets(text)
 
 
+class _BoundarySensitiveTokenCounter:
+    """Retokenize a heading boundary while keeping every offset source-backed."""
+
+    def __init__(
+        self, heading_prefix: str, *, raw_widths: tuple[int, ...] = (1,)
+    ) -> None:
+        self._heading_prefix = heading_prefix
+        self._raw_widths = raw_widths
+
+    def _spans(self, text: str) -> tuple[tuple[int, int], ...]:
+        if text == self._heading_prefix:
+            return ((0, len(text)),)
+        if text.startswith(self._heading_prefix):
+            return tuple((index, index + 1) for index in range(len(text)))
+
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        width_index = 0
+        while cursor < len(text):
+            end = min(cursor + self._raw_widths[width_index], len(text))
+            spans.append((cursor, end))
+            cursor = end
+            width_index = (width_index + 1) % len(self._raw_widths)
+        return tuple(spans)
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(ord(text[start]) for start, _ in self._spans(text))
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return self._spans(text)
+
+
 class _EncodeResultCounter(_FakeTokenCounter):
     def __init__(self, result: object) -> None:
         self._result = result
@@ -580,6 +612,27 @@ def _reconstruct_character_chunks(chunks: Sequence[object]) -> str:
     return reconstructed
 
 
+def _reconstruct_variable_overlap(chunks: Sequence[object]) -> str:
+    first, *remaining = chunks
+    reconstructed = first.raw_text
+    previous = first
+    for chunk in remaining:
+        overlap = next(
+            (
+                length
+                for length in range(
+                    min(len(previous.raw_text), len(chunk.raw_text)), 0, -1
+                )
+                if previous.raw_text[-length:] == chunk.raw_text[:length]
+            ),
+            0,
+        )
+        assert overlap < len(chunk.raw_text)
+        reconstructed += chunk.raw_text[overlap:]
+        previous = chunk
+    return reconstructed
+
+
 @pytest.mark.parametrize("prefix_tokens", [399, 400, 450, 599])
 def test_long_legal_heading_uses_available_source_budget_and_terminates(
     prefix_tokens: int,
@@ -650,6 +703,107 @@ def test_heading_at_soft_max_rejects_nonempty_overflow_without_source_leak() -> 
     assert secret_body not in str(caught.value)
 
 
+def _boundary_sensitive_split(
+    prefix_tokens: int,
+    body: str,
+    *,
+    raw_widths: tuple[int, ...] = (1,),
+) -> tuple[_BoundarySensitiveTokenCounter, tuple[object, ...]]:
+    heading = "H" * (prefix_tokens - 1)
+    heading_prefix = heading + "\n"
+    counter = _BoundarySensitiveTokenCounter(heading_prefix, raw_widths=raw_widths)
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    return counter, chunks
+
+
+def _assert_boundary_sensitive_chunks(
+    counter: _BoundarySensitiveTokenCounter,
+    chunks: Sequence[object],
+    body: str,
+) -> None:
+    actual_counts = [len(counter.encode(chunk.search_text)) for chunk in chunks]
+    assert actual_counts == [chunk.token_count for chunk in chunks]
+    assert all(count <= 600 for count in actual_counts), (
+        f"raw lengths={[len(chunk.raw_text) for chunk in chunks]}, "
+        f"actual counts={actual_counts}"
+    )
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert _reconstruct_variable_overlap(chunks) == body
+
+
+def test_boundary_sensitive_final_pending_is_rechecked_until_within_soft_max() -> None:
+    """One corrective window cannot justify returning an unchecked remainder."""
+    body = "".join(chr(0x4E00 + index) for index in range(9))
+
+    counter, chunks = _boundary_sensitive_split(599, body)
+    repeated_counter, repeated = _boundary_sensitive_split(599, body)
+
+    _assert_boundary_sensitive_chunks(counter, chunks, body)
+    _assert_boundary_sensitive_chunks(repeated_counter, repeated, body)
+    assert chunks == repeated
+
+
+@pytest.mark.parametrize(
+    ("prefix_tokens", "body_length"),
+    [(399, 410), (400, 405), (450, 310), (599, 9)],
+)
+def test_boundary_sensitive_heading_may_require_multiple_corrective_windows(
+    prefix_tokens: int, body_length: int
+) -> None:
+    """Every bounded remainder is rechecked after each overlap adjustment."""
+    body = "".join(chr(0x5000 + index) for index in range(body_length))
+
+    counter, chunks = _boundary_sensitive_split(prefix_tokens, body)
+
+    _assert_boundary_sensitive_chunks(counter, chunks, body)
+    assert len(chunks) >= 2
+
+
+@pytest.mark.parametrize(
+    ("prefix_tokens", "raw_widths", "body_length"),
+    [
+        (599, (1,), 9),
+        (598, (2,), 12),
+        (597, (1, 3, 2), 18),
+    ],
+    ids=["character", "pair", "nonuniform"],
+)
+def test_boundary_sensitive_correction_preserves_raw_token_boundaries(
+    prefix_tokens: int,
+    raw_widths: tuple[int, ...],
+    body_length: int,
+) -> None:
+    """Character, pair, and nonuniform source offsets all make progress."""
+    body = "".join(chr(0x5200 + index) for index in range(body_length))
+
+    counter, chunks = _boundary_sensitive_split(
+        prefix_tokens, body, raw_widths=raw_widths
+    )
+
+    _assert_boundary_sensitive_chunks(counter, chunks, body)
+
+
+def test_boundary_sensitive_atomic_unit_remains_bounded_without_overlap() -> None:
+    """The already-complete atomic cursor loop keeps every forced piece bounded."""
+    heading = "H" * 798
+    heading_prefix = heading + "\n"
+    body = "- " + "".join(chr(0x5400 + index) for index in range(7))
+    counter = _BoundarySensitiveTokenCounter(heading_prefix)
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert "".join(chunk.raw_text for chunk in chunks) == body
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+    assert all(chunk.warnings for chunk in chunks)
+
+
 _LINEAR_TOKEN_WORK_MULTIPLIER = 12
 
 
@@ -714,6 +868,17 @@ def test_long_single_unit_has_a_finite_linear_work_guard(kind: str) -> None:
     counter, source_body, _ = _measure_long_split(kind, 16_000, guarded=True)
 
     assert counter.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(source_body)
+
+
+@pytest.mark.parametrize("kind", ["normal", "table-row", "list-item", "blockquote"])
+def test_very_long_single_unit_keeps_near_doubling_token_work(kind: str) -> None:
+    """The corrective remainder check must retain linear 32k-to-64k scaling."""
+    small, small_body, _ = _measure_long_split(kind, 32_000, guarded=True)
+    large, large_body, _ = _measure_long_split(kind, 64_000, guarded=True)
+
+    assert large.input_work / small.input_work < 2.2
+    assert small.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(small_body)
+    assert large.input_work <= _LINEAR_TOKEN_WORK_MULTIPLIER * len(large_body)
 
 
 @pytest.mark.parametrize(

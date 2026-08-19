@@ -467,6 +467,8 @@ class ParentChildChunker:
                 heading_prefix=heading_prefix,
                 token_limit=self._config.atomic_max_tokens,
             )
+            if window_end is None:
+                raise ValueError("Tokenizer offsets cannot form a non-empty child")
             piece = _slice_excerpt_with_line_ends(
                 unit.excerpt,
                 _token_boundary(offsets, cursor, len(unit.excerpt.raw_text)),
@@ -534,15 +536,49 @@ class ParentChildChunker:
 
         chunks: list[_Excerpt] = []
         cursor = 0
-        while len(offsets) - cursor > soft_budget:
+        covered_end = 0
+        while True:
+            remaining_tokens = len(offsets) - cursor
+            if remaining_tokens <= soft_budget:
+                pending = _slice_excerpt_with_line_ends(
+                    excerpt,
+                    _token_boundary(offsets, cursor, len(excerpt.raw_text)),
+                    len(excerpt.raw_text),
+                    line_ends,
+                )
+                if (
+                    self._token_count(heading_prefix + pending.raw_text)
+                    <= self._config.soft_max_tokens
+                ):
+                    return tuple(chunks), pending
+                source_budget = soft_budget
+                token_limit = self._config.soft_max_tokens
+            else:
+                source_budget = window_budget
+                token_limit = window_limit
+
             window_end = self._bounded_window_end(
                 excerpt.raw_text,
                 offsets,
                 start=cursor,
-                source_budget=window_budget,
+                source_budget=source_budget,
                 heading_prefix=heading_prefix,
-                token_limit=window_limit,
+                token_limit=token_limit,
             )
+            if window_end is None and token_limit < self._config.soft_max_tokens:
+                window_end = self._bounded_window_end(
+                    excerpt.raw_text,
+                    offsets,
+                    start=cursor,
+                    source_budget=soft_budget,
+                    heading_prefix=heading_prefix,
+                    token_limit=self._config.soft_max_tokens,
+                )
+            if window_end is None:
+                raise ValueError("Tokenizer offsets cannot form a non-empty child")
+            if window_end <= covered_end:
+                cursor = covered_end
+                continue
             piece = _slice_excerpt_with_line_ends(
                 excerpt,
                 _token_boundary(offsets, cursor, len(excerpt.raw_text)),
@@ -552,43 +588,8 @@ class ParentChildChunker:
             chunks.append(piece)
             piece_tokens = window_end - cursor
             effective_overlap = min(self._config.overlap_tokens, piece_tokens - 1)
+            covered_end = window_end
             cursor = window_end - effective_overlap
-
-        pending = _slice_excerpt_with_line_ends(
-            excerpt,
-            _token_boundary(offsets, cursor, len(excerpt.raw_text)),
-            len(excerpt.raw_text),
-            line_ends,
-        )
-        if (
-            self._token_count(heading_prefix + pending.raw_text)
-            > self._config.soft_max_tokens
-        ):
-            window_end = self._bounded_window_end(
-                excerpt.raw_text,
-                offsets,
-                start=cursor,
-                source_budget=soft_budget,
-                heading_prefix=heading_prefix,
-                token_limit=self._config.soft_max_tokens,
-            )
-            piece = _slice_excerpt_with_line_ends(
-                excerpt,
-                _token_boundary(offsets, cursor, len(excerpt.raw_text)),
-                _token_boundary(offsets, window_end, len(excerpt.raw_text)),
-                line_ends,
-            )
-            chunks.append(piece)
-            cursor = window_end - min(
-                self._config.overlap_tokens, window_end - cursor - 1
-            )
-            pending = _slice_excerpt_with_line_ends(
-                excerpt,
-                _token_boundary(offsets, cursor, len(excerpt.raw_text)),
-                len(excerpt.raw_text),
-                line_ends,
-            )
-        return tuple(chunks), pending
 
     def _bounded_window_end(
         self,
@@ -599,7 +600,7 @@ class ParentChildChunker:
         source_budget: int,
         heading_prefix: str,
         token_limit: int,
-    ) -> int:
+    ) -> int | None:
         candidate = min(start + source_budget, len(offsets))
         start_offset = _token_boundary(offsets, start, len(raw_text))
         while candidate > start:
@@ -610,7 +611,7 @@ class ParentChildChunker:
             ):
                 return candidate
             candidate -= 1
-        raise ValueError("Tokenizer offsets cannot form a non-empty child")
+        return None
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
         if self._config.overlap_tokens == 0:
