@@ -611,8 +611,8 @@ def test_heading_blank_blocks_never_become_normal_children(
         (
             "list",
             "\n- " + "x" * 650 + "\n\n",
-            "- " + "x" * 650 + "\n\n",
-            4,
+            "- " + "x" * 650 + "\n",
+            3,
             True,
         ),
         (
@@ -670,8 +670,8 @@ def test_blank_blocks_around_long_structures_are_not_evidence_children(
         assert all(chunk.token_count <= 600 for chunk in chunks)
 
 
-def test_interstitial_blanks_are_preserved_but_edge_blanks_are_trimmed() -> None:
-    """Interstitial blanks stay source-backed while edge blanks stay trimmed."""
+def test_nonfitting_interstitial_blanks_become_a_normal_run_boundary() -> None:
+    """A separator outside the selected window must not become evidence."""
     first = "a" * 350 + "\n"
     second = "b" * 350 + "\n"
     separator = "\n \t\n"
@@ -683,21 +683,23 @@ def test_interstitial_blanks_are_preserved_but_edge_blanks_are_trimmed() -> None
 
     assert chunks == repeated
     assert [chunk.raw_text for chunk in chunks] == [
-        first + separator,
-        (first + separator)[-64:] + second,
+        first,
+        second,
     ]
     assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
-        (3, 5),
-        (3, 6),
+        (3, 3),
+        (6, 6),
     ]
-    assert chunks[0].raw_text + chunks[1].raw_text[64:] == (first + separator + second)
+    assert chunks[0].raw_text + chunks[1].raw_text == first + second
     assert all(chunk.raw_text.strip() for chunk in chunks)
     assert all(chunk.search_text.strip() != "H" for chunk in chunks)
     assert [chunk.ordinal for chunk in chunks] == [0, 1]
     assert chunks == repeated
 
 
-def _assert_child_parent_context_contract(source: str) -> None:
+def _assert_child_parent_context_contract(
+    source: str, *, atomic_raws: Sequence[str] = ()
+) -> None:
     parser = MarkdownItParser()
     parsed = parser.parse(source)
     section = parsed.sections[-1]
@@ -735,7 +737,8 @@ def _assert_child_parent_context_contract(source: str) -> None:
         for chunk in chunks
     )
     assert all(
-        chunk.token_count <= (800 if chunk.warnings else 600) for chunk in chunks
+        chunk.token_count <= (800 if chunk.raw_text in atomic_raws else 600)
+        for chunk in chunks
     )
     assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
 
@@ -782,6 +785,218 @@ def test_every_child_builds_parent_context_from_its_exact_source_slice(
     _assert_child_parent_context_contract(source)
 
 
+def _whitespace_physical_line(length: int, line_ending: str) -> str:
+    content_length = length - len(line_ending)
+    content = (" \t" * ((content_length + 1) // 2))[:content_length]
+    return content + line_ending
+
+
+def _assert_expected_source_children(
+    source: str,
+    expected_raws: Sequence[str],
+    expected_lines: Sequence[tuple[int, int]],
+    *,
+    atomic_raws: Sequence[str] = (),
+) -> None:
+    _assert_child_parent_context_contract(source, atomic_raws=atomic_raws)
+    parsed = MarkdownItParser().parse(source)
+    chunks = _chunker().split(parsed.sections[-1], parser_version=parsed.parser_version)
+
+    assert [chunk.raw_text for chunk in chunks] == list(expected_raws)
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == list(
+        expected_lines
+    )
+    assert all(chunk.raw_text.strip() for chunk in chunks)
+    assert all(not chunk.warnings for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    ("heading_source", "line_ending", "first_line"),
+    [
+        ("# H\n", "\n", 2),
+        ("# H\r\n", "\r\n", 2),
+        ("# H\r", "\r", 2),
+        ("H\n===\n", "\n", 3),
+        ("H\r\n===\r\n", "\r\n", 3),
+        ("H\r===\r", "\r", 3),
+    ],
+    ids=[
+        "atx-lf",
+        "atx-crlf",
+        "atx-cr",
+        "setext-lf",
+        "setext-crlf",
+        "setext-cr",
+    ],
+)
+@pytest.mark.parametrize("separator_length", [599, 600, 601, 1_000, 2_000])
+def test_oversized_interstitial_separator_becomes_a_normal_run_boundary(
+    heading_source: str,
+    line_ending: str,
+    first_line: int,
+    separator_length: int,
+) -> None:
+    """Preserving every separator would force whitespace-only children."""
+    first = "a" + line_ending
+    second = "b" + line_ending
+    separator = _whitespace_physical_line(separator_length, line_ending)
+
+    _assert_expected_source_children(
+        heading_source + first + separator + second,
+        [first, second],
+        [(first_line, first_line), (first_line + 2, first_line + 2)],
+    )
+
+
+@pytest.mark.parametrize(
+    "atomic",
+    [
+        "| h |\n|---|\n| t |\n",
+        "- list\n",
+        "> quote\n",
+    ],
+    ids=["table", "list", "quote"],
+)
+@pytest.mark.parametrize("separator_length", [599, 600, 601, 1_000, 2_000])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+@pytest.mark.parametrize(
+    "normal_first", [True, False], ids=["normal-first", "normal-last"]
+)
+def test_atomic_boundary_separator_is_trimmed_without_changing_semantic_raw(
+    atomic: str,
+    separator_length: int,
+    line_ending: str,
+    *,
+    normal_first: bool,
+) -> None:
+    """Trimming all atomic whitespace would damage content or internal layout."""
+    atomic = atomic.replace("\n", line_ending)
+    normal = "paragraph" + line_ending
+    separator = _whitespace_physical_line(separator_length, line_ending)
+    structure_line_count = len(split_physical_lines(atomic))
+    if normal_first:
+        body = normal + separator + atomic
+        expected_raws = [normal, atomic]
+        expected_lines = [(2, 2), (4, 3 + structure_line_count)]
+    else:
+        body = atomic + separator + normal
+        expected_raws = [atomic, normal]
+        expected_lines = [
+            (2, 1 + structure_line_count),
+            (3 + structure_line_count, 3 + structure_line_count),
+        ]
+
+    _assert_expected_source_children(
+        "# H\n" + body,
+        expected_raws,
+        expected_lines,
+        atomic_raws=[atomic],
+    )
+
+
+@pytest.mark.parametrize(
+    "structure",
+    ["```text\ncode\n```\n", "<div>html</div>\n"],
+    ids=["fence", "html"],
+)
+@pytest.mark.parametrize(
+    "normal_first", [True, False], ids=["normal-first", "normal-last"]
+)
+def test_normal_structure_boundary_omits_an_oversized_separator(
+    structure: str, *, normal_first: bool
+) -> None:
+    """Normal fenced and HTML blocks use the same separator admission rule."""
+    normal = "paragraph\n"
+    separator = _whitespace_physical_line(1_000, "\n")
+    structure_line_count = len(split_physical_lines(structure))
+    if normal_first:
+        body = normal + separator + structure
+        expected_raws = [normal, structure]
+        expected_lines = [(2, 2), (4, 3 + structure_line_count)]
+    else:
+        body = structure + separator + normal
+        expected_raws = [structure, normal]
+        expected_lines = [
+            (2, 1 + structure_line_count),
+            (3 + structure_line_count, 3 + structure_line_count),
+        ]
+
+    _assert_expected_source_children(
+        "# H\n" + body,
+        expected_raws,
+        expected_lines,
+    )
+
+
+def test_atomic_boundary_trim_preserves_internal_list_whitespace() -> None:
+    """Boundary trimming must not collapse whitespace between semantic list items."""
+    semantic_list = "- first\n\n- second\n"
+    separator = _whitespace_physical_line(1_000, "\n")
+
+    _assert_expected_source_children(
+        "# H\n" + semantic_list + separator + "normal\n",
+        [semantic_list, "normal\n"],
+        [(2, 4), (6, 6)],
+        atomic_raws=[semantic_list],
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "heading_source",
+        "expected_prefix_tokens",
+        "first_line",
+        "separator_length",
+        "preserved",
+    ),
+    [
+        ("# H\n", 2, 2, 394, True),
+        ("# H\n", 2, 2, 395, False),
+        ("H" * 398 + "\n" + "=" * 398 + "\n", 399, 3, 197, True),
+        ("H" * 398 + "\n" + "=" * 398 + "\n", 399, 3, 198, False),
+    ],
+    ids=["target-fit", "target-overflow", "soft-fit", "soft-overflow"],
+)
+def test_separator_admission_uses_the_selected_window_inclusive_boundary(
+    heading_source: str,
+    expected_prefix_tokens: int,
+    first_line: int,
+    separator_length: int,
+    *,
+    preserved: bool,
+) -> None:
+    """Changing either selected-window comparison by one must alter this result."""
+    first = "a\n"
+    second = "b\n"
+    separator = _whitespace_physical_line(separator_length, "\n")
+    table = "| h |\n|---|\n| " + "t" * 300 + " |\n"
+    source = heading_source + first + separator + second + table
+    section = _section(source)
+    heading_prefix = "\n".join(section.heading_path) + "\n"
+
+    assert len(_FakeTokenCounter().encode(heading_prefix)) == expected_prefix_tokens
+    if preserved:
+        expected_raws = [first + separator + second, table]
+        expected_lines = [
+            (first_line, first_line + 2),
+            (first_line + 3, first_line + 5),
+        ]
+    else:
+        expected_raws = [first, second, table]
+        expected_lines = [
+            (first_line, first_line),
+            (first_line + 2, first_line + 2),
+            (first_line + 3, first_line + 5),
+        ]
+
+    _assert_expected_source_children(
+        source,
+        expected_raws,
+        expected_lines,
+        atomic_raws=[table],
+    )
+
+
 def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> None:
     """Splitting at the 600-token inclusive boundary would over-fragment text."""
     body = "x" * 596
@@ -797,7 +1012,7 @@ def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> 
 
 
 def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
-    """Ignoring block-aware target packing would fragment or oversize children."""
+    """Nonfitting separators create exact source-backed normal-run boundaries."""
     first_paragraph = "a" * 350 + "\n\n"
     second_paragraph = "b" * 100 + "\n\n"
     third_paragraph = "c" * 300 + "\n"
@@ -807,15 +1022,15 @@ def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
     chunks = _chunker(counter).split(section, parser_version="parser-v1")
 
     assert [chunk.raw_text for chunk in chunks] == [
-        first_paragraph,
-        first_paragraph[-64:] + second_paragraph,
-        second_paragraph[-64:] + third_paragraph,
+        "a" * 350 + "\n",
+        "b" * 100 + "\n",
+        third_paragraph,
     ]
-    assert [chunk.token_count for chunk in chunks] == [354, 168, 367]
+    assert [chunk.token_count for chunk in chunks] == [353, 103, 303]
     assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
-        (2, 3),
-        (2, 5),
-        (4, 6),
+        (2, 2),
+        (4, 4),
+        (6, 6),
     ]
     assert all(
         chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
@@ -1094,7 +1309,7 @@ _MULTIBLOCK_WORK_MULTIPLIER = 4
 
 
 def _reference_block_aware_child_count(
-    block_lengths: Sequence[int], prefix_tokens: int
+    block_specs: Sequence[tuple[int, bool]], prefix_tokens: int
 ) -> int:
     target_budget = _HEADING_TARGET_TOKENS - prefix_tokens
     soft_budget = _HEADING_SOFT_MAX_TOKENS - prefix_tokens
@@ -1103,24 +1318,51 @@ def _reference_block_aware_child_count(
         if target_budget >= _HEADING_MIN_TARGET_SOURCE_TOKENS
         else soft_budget
     )
+
+    def run_child_count(block_lengths: Sequence[int]) -> int:
+        children = 0
+        pending_tokens: int | None = None
+        for block_tokens in block_lengths:
+            if pending_tokens is None:
+                pending_tokens = block_tokens
+            elif pending_tokens + block_tokens <= selected_budget:
+                pending_tokens += block_tokens
+            else:
+                children += 1
+                pending_tokens = (
+                    min(_HEADING_OVERLAP_TOKENS, pending_tokens // 2) + block_tokens
+                )
+            while pending_tokens > soft_budget:
+                piece_tokens = min(selected_budget, pending_tokens)
+                overlap = min(_HEADING_OVERLAP_TOKENS, piece_tokens // 2)
+                children += 1
+                pending_tokens -= piece_tokens - overlap
+        return children + (pending_tokens is not None)
+
     children = 0
-    pending_tokens: int | None = None
-    for block_tokens in block_lengths:
-        if pending_tokens is None:
-            pending_tokens = block_tokens
-        elif pending_tokens + block_tokens <= selected_budget:
-            pending_tokens += block_tokens
+    current_run: list[int] = []
+    separators: list[int] = []
+    current_tokens = 0
+    for block_tokens, nonblank in block_specs:
+        if not nonblank:
+            if current_run:
+                separators.append(block_tokens)
+            continue
+        if not current_run:
+            current_run.append(block_tokens)
+            current_tokens = block_tokens
+            continue
+        candidate_tokens = current_tokens + sum(separators) + block_tokens
+        if separators and candidate_tokens > selected_budget:
+            children += run_child_count(current_run)
+            current_run = [block_tokens]
+            current_tokens = block_tokens
         else:
-            children += 1
-            pending_tokens = (
-                min(_HEADING_OVERLAP_TOKENS, pending_tokens // 2) + block_tokens
-            )
-        while pending_tokens > soft_budget:
-            piece_tokens = min(selected_budget, pending_tokens)
-            overlap = min(_HEADING_OVERLAP_TOKENS, piece_tokens // 2)
-            children += 1
-            pending_tokens -= piece_tokens - overlap
-    return children + (pending_tokens is not None)
+            current_run.extend(separators)
+            current_run.append(block_tokens)
+            current_tokens = candidate_tokens
+        separators.clear()
+    return children + run_child_count(current_run)
 
 
 def _normal_paragraph_source(
@@ -1168,8 +1410,7 @@ def _split_normal_paragraphs(
     starts = [body.find(chunk.raw_text) for chunk in chunks]
     assert starts[0] == 0
     assert all(start >= 0 for start in starts)
-    reconstructed = chunks[0].raw_text
-    for index, (previous, chunk) in enumerate(
+    for index, (previous, _chunk) in enumerate(
         zip(chunks, chunks[1:], strict=False), start=1
     ):
         previous_start = starts[index - 1]
@@ -1177,14 +1418,23 @@ def _split_normal_paragraphs(
         previous_end = previous_start + len(previous.raw_text)
         overlap = previous_end - chunk_start
         assert chunk_start - previous_start >= (len(previous.raw_text) + 1) // 2
-        assert overlap == min(_HEADING_OVERLAP_TOKENS, len(previous.raw_text) // 2)
-        if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
-            assert overlap == _HEADING_OVERLAP_TOKENS
-        reconstructed += chunk.raw_text[overlap:]
-    assert reconstructed == body
+        if overlap >= 0:
+            assert overlap == min(_HEADING_OVERLAP_TOKENS, len(previous.raw_text) // 2)
+            if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
+                assert overlap == _HEADING_OVERLAP_TOKENS
+        else:
+            omitted_separator = body[previous_end:chunk_start]
+            assert omitted_separator and not omitted_separator.strip()
 
-    block_lengths = [len(block.raw_text) for block in section.blocks]
-    expected_children = _reference_block_aware_child_count(block_lengths, prefix_tokens)
+    emitted_raw = "".join(chunk.raw_text for chunk in chunks)
+    assert all(
+        paragraph in emitted_raw for paragraph in body.replace("\n\n", "\0").split("\0")
+    )
+
+    block_specs = [
+        (len(block.raw_text), bool(block.raw_text.strip())) for block in section.blocks
+    ]
+    expected_children = _reference_block_aware_child_count(block_specs, prefix_tokens)
     assert len(chunks) == expected_children
     emitted_search_tokens = sum(actual_counts)
     reference_work = (
@@ -1207,8 +1457,8 @@ def test_normal_multiblock_packing_obeys_selected_window_and_half_progress(
     _split_normal_paragraphs(prefix_tokens, [65] * paragraph_count)
 
 
-def test_normal_multiblock_splits_only_overlap_plus_block_soft_overflow() -> None:
-    """A bounded pending block stays whole until overlap plus its successor overflows."""
+def test_normal_multiblock_omits_a_separator_outside_the_soft_window() -> None:
+    """The 127/128 separator boundary may not create a noncontiguous overlap."""
     body, chunks = _split_normal_paragraphs(473, [125, 65])
 
     starts = [body.find(chunk.raw_text) for chunk in chunks]
@@ -1216,8 +1466,8 @@ def test_normal_multiblock_splits_only_overlap_plus_block_soft_overflow() -> Non
         starts[index - 1] + len(chunks[index - 1].raw_text) - starts[index]
         for index in range(1, len(chunks))
     ]
-    assert [len(chunk.raw_text) for chunk in chunks] == [127, 127, 64]
-    assert overlaps == [63, 63]
+    assert [len(chunk.raw_text) for chunk in chunks] == [126, 65]
+    assert overlaps == [-1]
 
 
 def _boundary_sensitive_split(
@@ -1402,7 +1652,7 @@ def test_very_long_single_unit_keeps_near_doubling_token_work(kind: str) -> None
     ("atomic_text", "expected_atomic", "expected_after"),
     [
         ("| h |\n|---|\n| v |\n", "| h |\n|---|\n| v |\n", "z" * 300 + "\n"),
-        ("- first\n- second\n", "- first\n- second\n\n", "z" * 300 + "\n"),
+        ("- first\n- second\n", "- first\n- second\n", "z" * 300 + "\n"),
         ("> first\n>\n> second\n", "> first\n>\n> second\n", "z" * 300 + "\n"),
     ],
     ids=["table", "list", "quote"],

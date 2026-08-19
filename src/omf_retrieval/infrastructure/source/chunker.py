@@ -389,6 +389,7 @@ class ParentChildChunker:
     def _split_blocks(
         self, blocks: tuple[ParsedBlock, ...], heading_prefix: str
     ) -> tuple[_Excerpt, ...]:
+        window_limit: int | None = None
         chunks: list[_Excerpt] = []
         normal_blocks: list[ParsedBlock] = []
         separator_blocks: list[ParsedBlock] = []
@@ -398,7 +399,31 @@ class ParentChildChunker:
                     separator_blocks.append(block)
                 continue
             if block.kind not in {"table", "bullet_list", "ordered_list", "blockquote"}:
-                normal_blocks.extend(separator_blocks)
+                if separator_blocks:
+                    candidate_blocks = (*normal_blocks, *separator_blocks, block)
+                    candidate_raw = "".join(
+                        candidate.raw_text for candidate in candidate_blocks
+                    )
+                    if window_limit is None:
+                        prefix_tokens = self._token_count(heading_prefix)
+                        target_budget = self._config.target_tokens - prefix_tokens
+                        use_target_window = target_budget >= max(
+                            1, 2 * self._config.overlap_tokens
+                        )
+                        window_limit = (
+                            self._config.target_tokens
+                            if use_target_window
+                            else self._config.soft_max_tokens
+                        )
+                    if self._token_count(heading_prefix + candidate_raw) > window_limit:
+                        chunks.extend(
+                            self._split_normal_blocks(
+                                tuple(normal_blocks), heading_prefix
+                            )
+                        )
+                        normal_blocks.clear()
+                    else:
+                        normal_blocks.extend(separator_blocks)
                 separator_blocks.clear()
                 normal_blocks.append(block)
                 continue
@@ -418,15 +443,19 @@ class ParentChildChunker:
     def _split_atomic_block(
         self, block: ParsedBlock, heading_prefix: str
     ) -> tuple[_Excerpt, ...]:
-        whole_block = _Excerpt(block.raw_text, block.line_start, block.line_end)
-        if self._token_count(heading_prefix + block.raw_text) <= (
+        whole_block = _trim_excerpt_whitespace_lines(
+            _Excerpt(block.raw_text, block.line_start, block.line_end)
+        )
+        if not whole_block.raw_text:
+            return ()
+        if self._token_count(heading_prefix + whole_block.raw_text) <= (
             self._config.atomic_max_tokens
         ):
             return (whole_block,)
 
         chunks: list[_Excerpt] = []
         pending: _Excerpt | None = None
-        for unit in _atomic_units(block):
+        for unit in _trim_atomic_boundary_units(_atomic_units(block)):
             if self._token_count(heading_prefix + unit.excerpt.raw_text) > (
                 self._config.atomic_max_tokens
             ):
@@ -890,6 +919,46 @@ def _atomic_units(block: ParsedBlock) -> tuple[_AtomicUnit, ...]:
             )
         )
     return tuple(units)
+
+
+def _trim_atomic_boundary_units(
+    units: tuple[_AtomicUnit, ...],
+) -> tuple[_AtomicUnit, ...]:
+    trimmed_units: list[_AtomicUnit] = []
+    for index, unit in enumerate(units):
+        excerpt = _trim_excerpt_whitespace_lines(
+            unit.excerpt,
+            leading=index == 0,
+            trailing=index == len(units) - 1,
+        )
+        if not excerpt.raw_text:
+            continue
+        trimmed_units.append(
+            _AtomicUnit(
+                excerpt=excerpt,
+                block_kind=unit.block_kind,
+                warning_line_start=max(unit.warning_line_start, excerpt.line_start),
+                warning_line_end=min(unit.warning_line_end, excerpt.line_end),
+            )
+        )
+    return tuple(trimmed_units)
+
+
+def _trim_excerpt_whitespace_lines(
+    excerpt: _Excerpt, *, leading: bool = True, trailing: bool = True
+) -> _Excerpt:
+    physical_lines = split_physical_lines(excerpt.raw_text)
+    first = 0
+    last = len(physical_lines)
+    if leading:
+        while first < last and not physical_lines[first].strip():
+            first += 1
+    if trailing:
+        while last > first and not physical_lines[last - 1].strip():
+            last -= 1
+    start = sum(len(line) for line in physical_lines[:first])
+    end = sum(len(line) for line in physical_lines[:last])
+    return _slice_excerpt(excerpt, start, end)
 
 
 def _descendants(block: ParsedBlock, kind: str) -> tuple[ParsedBlock, ...]:
