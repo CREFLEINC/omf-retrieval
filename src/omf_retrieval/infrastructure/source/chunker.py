@@ -39,8 +39,23 @@ class _AtomicUnit:
     warning_line_end: int
 
 
+@dataclass(slots=True)
+class _WindowSearchBudget:
+    calls_left: int
+    input_chars_left: int
+
+    def consume(self, input_chars: int) -> None:
+        if self.calls_left <= 0 or input_chars > self.input_chars_left:
+            raise ValueError("Tokenizer offsets cannot form a non-empty child")
+        self.calls_left -= 1
+        self.input_chars_left -= input_chars
+
+
 _TOKEN_COUNTER_FAILED = object()
 _PARSER_FAILED = object()
+_MAX_WINDOW_SEARCH_CALLS = 1_024
+_WINDOW_SEARCH_INPUT_MULTIPLIER = 128
+_TINY_CORRECTIVE_REMAINDER_TOKENS = 64
 
 
 class ParentContextBuilder:
@@ -493,6 +508,7 @@ class ParentChildChunker:
         source_budget = self._config.atomic_max_tokens - prefix_tokens
         if source_budget <= 0:
             raise ValueError("Heading path leaves no room for child source text")
+        search_budget = _window_search_budget(unit.excerpt.raw_text, heading_prefix)
 
         chunks: list[_Excerpt] = []
         cursor = 0
@@ -504,6 +520,7 @@ class ParentChildChunker:
                 source_budget=source_budget,
                 heading_prefix=heading_prefix,
                 token_limit=self._config.atomic_max_tokens,
+                search_budget=search_budget,
             )
             if window_end is None:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
@@ -590,6 +607,7 @@ class ParentChildChunker:
             if use_target_window
             else self._config.soft_max_tokens
         )
+        search_budget = _window_search_budget(excerpt.raw_text, heading_prefix)
 
         chunks: list[_Excerpt] = []
         cursor = 0
@@ -621,6 +639,7 @@ class ParentChildChunker:
                 source_budget=source_budget,
                 heading_prefix=heading_prefix,
                 token_limit=token_limit,
+                search_budget=search_budget,
             )
             if window_end is None and token_limit < self._config.soft_max_tokens:
                 window_end = self._bounded_window_end(
@@ -630,6 +649,7 @@ class ParentChildChunker:
                     source_budget=soft_budget,
                     heading_prefix=heading_prefix,
                     token_limit=self._config.soft_max_tokens,
+                    search_budget=search_budget,
                 )
             if window_end is None:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
@@ -657,18 +677,51 @@ class ParentChildChunker:
         source_budget: int,
         heading_prefix: str,
         token_limit: int,
+        search_budget: _WindowSearchBudget,
     ) -> int | None:
         candidate = min(start + source_budget, len(offsets))
         start_offset = _token_boundary(offsets, start, len(raw_text))
-        while candidate > start:
-            end_offset = _token_boundary(offsets, candidate, len(raw_text))
-            if (
-                self._token_count(heading_prefix + raw_text[start_offset:end_offset])
-                <= token_limit
-            ):
-                return candidate
-            candidate -= 1
-        return None
+        available_tokens = candidate - start
+        if available_tokens <= 0:
+            return None
+
+        remaining_tokens = len(offsets) - start
+        minimum_progress = (
+            1
+            if remaining_tokens <= _TINY_CORRECTIVE_REMAINDER_TOKENS
+            else min(
+                available_tokens,
+                max(1, 2 * self._config.overlap_tokens),
+            )
+        )
+        probe_limit = available_tokens.bit_length() + 2
+        probes = 0
+
+        def fits(end: int) -> bool:
+            nonlocal probes
+            probes += 1
+            if probes > probe_limit:
+                raise ValueError("Tokenizer offsets cannot form a non-empty child")
+            end_offset = _token_boundary(offsets, end, len(raw_text))
+            probe_text = heading_prefix + raw_text[start_offset:end_offset]
+            search_budget.consume(len(probe_text))
+            return self._token_count(probe_text) <= token_limit
+
+        if fits(candidate):
+            return candidate
+
+        lower = start + minimum_progress
+        if lower == candidate or not fits(lower):
+            return None
+
+        upper = candidate
+        while upper - lower > 1:
+            midpoint = (lower + upper) // 2
+            if fits(midpoint):
+                lower = midpoint
+            else:
+                upper = midpoint
+        return lower
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
         offsets = self._token_offsets(excerpt.raw_text)
@@ -757,6 +810,14 @@ class ParentChildChunker:
         ):
             raise ValueError("Token counter returned malformed data") from None
         return tokens
+
+
+def _window_search_budget(raw_text: str, heading_prefix: str) -> _WindowSearchBudget:
+    return _WindowSearchBudget(
+        calls_left=_MAX_WINDOW_SEARCH_CALLS,
+        input_chars_left=_WINDOW_SEARCH_INPUT_MULTIPLIER
+        * max(1, len(raw_text) + len(heading_prefix)),
+    )
 
 
 def _token_counter_methods(

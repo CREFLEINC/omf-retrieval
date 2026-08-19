@@ -107,10 +107,27 @@ class _BoundarySensitiveTokenCounter:
     """Retokenize a heading boundary while keeping every offset source-backed."""
 
     def __init__(
-        self, heading_prefix: str, *, raw_widths: tuple[int, ...] = (1,)
+        self,
+        heading_prefix: str,
+        *,
+        raw_widths: tuple[int, ...] = (1,),
+        maximum_calls: int | None = None,
+        maximum_work: int | None = None,
     ) -> None:
         self._heading_prefix = heading_prefix
         self._raw_widths = raw_widths
+        self.maximum_calls = maximum_calls
+        self.maximum_work = maximum_work
+        self.calls = 0
+        self.input_work = 0
+
+    def _record(self, text: str) -> None:
+        self.calls += 1
+        self.input_work += len(text)
+        if (self.maximum_calls is not None and self.calls > self.maximum_calls) or (
+            self.maximum_work is not None and self.input_work > self.maximum_work
+        ):
+            raise RuntimeError("boundary probe budget exceeded")
 
     def _spans(self, text: str) -> tuple[tuple[int, int], ...]:
         if text == self._heading_prefix:
@@ -129,9 +146,11 @@ class _BoundarySensitiveTokenCounter:
         return tuple(spans)
 
     def encode(self, text: str) -> tuple[int, ...]:
+        self._record(text)
         return tuple(ord(text[start]) for start, _ in self._spans(text))
 
     def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        self._record(text)
         return self._spans(text)
 
 
@@ -1569,6 +1588,147 @@ def test_boundary_sensitive_atomic_unit_remains_bounded_without_overlap() -> Non
         for chunk in chunks
     )
     assert all(chunk.warnings for chunk in chunks)
+
+
+_BOUNDARY_PROBE_CALL_CAP = 1_024
+_BOUNDARY_PROBE_WORK_MULTIPLIER = 200
+
+
+def _guarded_boundary_sensitive_split(
+    prefix_tokens: int, body: str
+) -> tuple[_BoundarySensitiveTokenCounter, tuple[object, ...]]:
+    heading = "H" * (prefix_tokens - 1)
+    heading_prefix = heading + "\n"
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=_BOUNDARY_PROBE_CALL_CAP,
+        maximum_work=_BOUNDARY_PROBE_WORK_MULTIPLIER
+        * (len(heading_prefix) + len(body)),
+    )
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    return counter, chunks
+
+
+@pytest.mark.parametrize("prefix_tokens", [272, 399])
+@pytest.mark.parametrize("body_length", [1_000, 4_000])
+def test_boundary_sensitive_long_normal_uses_bounded_window_probes(
+    prefix_tokens: int, body_length: int
+) -> None:
+    """Boundary correction must not decrement through every raw token candidate."""
+    body = "".join(chr(0x6000 + index) for index in range(body_length))
+
+    counter, chunks = _guarded_boundary_sensitive_split(prefix_tokens, body)
+    repeated_counter, repeated = _guarded_boundary_sensitive_split(prefix_tokens, body)
+
+    split_calls = counter.calls
+    split_work = counter.input_work
+    _assert_boundary_sensitive_chunks(counter, chunks, body)
+    _assert_boundary_sensitive_chunks(repeated_counter, repeated, body)
+    assert chunks == repeated
+    assert split_calls <= _BOUNDARY_PROBE_CALL_CAP
+    assert split_work <= _BOUNDARY_PROBE_WORK_MULTIPLIER * (prefix_tokens + body_length)
+    selected_window = (
+        400 - prefix_tokens if 400 - prefix_tokens >= 128 else 600 - prefix_tokens
+    )
+    advance = selected_window - min(64, selected_window // 2)
+    theoretical_children = (
+        1 + max(0, body_length - selected_window + advance - 1) // advance
+    )
+    assert len(chunks[0].raw_text) == selected_window
+    assert len(chunks) <= theoretical_children
+    assert all(chunk.line_start == chunk.line_end == 2 for chunk in chunks)
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert all(
+        chunk.raw_text.startswith(previous.raw_text[-64:])
+        for previous, chunk in zip(chunks, chunks[1:], strict=False)
+    )
+
+
+@pytest.mark.parametrize("prefix_tokens", [272, 399])
+@pytest.mark.parametrize("body_length", [1_000, 4_000])
+def test_boundary_sensitive_oversized_atomic_uses_bounded_window_probes(
+    prefix_tokens: int, body_length: int
+) -> None:
+    """The no-overlap atomic cursor shares the bounded corrective search."""
+    heading = "H" * (prefix_tokens - 1)
+    heading_prefix = heading + "\n"
+    semantic_body = "- " + "".join(chr(0x7000 + index) for index in range(body_length))
+    body = semantic_body + "\n"
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=_BOUNDARY_PROBE_CALL_CAP,
+        maximum_work=_BOUNDARY_PROBE_WORK_MULTIPLIER
+        * (len(heading_prefix) + len(body)),
+    )
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    split_calls = counter.calls
+    split_work = counter.input_work
+    repeated_counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=_BOUNDARY_PROBE_CALL_CAP,
+        maximum_work=_BOUNDARY_PROBE_WORK_MULTIPLIER
+        * (len(heading_prefix) + len(body)),
+    )
+    repeated = _chunker(repeated_counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert chunks == repeated
+    assert "".join(chunk.raw_text for chunk in chunks) == body
+    assert len(chunks[0].raw_text) == 800 - prefix_tokens
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+    assert all(chunk.warnings for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.line_start == chunk.line_end == 2 for chunk in chunks)
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert split_calls <= _BOUNDARY_PROBE_CALL_CAP
+    assert split_work <= _BOUNDARY_PROBE_WORK_MULTIPLIER * (prefix_tokens + len(body))
+
+
+@pytest.mark.parametrize(
+    ("prefix_tokens", "body", "config", "call_ceiling"),
+    [
+        (599, "x" * 1_000, ChunkConfig(), 10),
+        (599, "x" * 1_000, ChunkConfig(overlap_tokens=0), 512),
+        (599, "x" * 10_000, ChunkConfig(overlap_tokens=0), 1_400),
+        (799, "- " + "x" * 1_000 + "\n", ChunkConfig(), 10),
+    ],
+    ids=[
+        "normal-minimum-progress",
+        "normal-input-cap",
+        "normal-call-cap",
+        "atomic-minimum-progress",
+    ],
+)
+def test_one_token_only_large_boundary_correction_fails_closed(
+    prefix_tokens: int, body: str, config: ChunkConfig, call_ceiling: int
+) -> None:
+    """A valid but adversarial boundary may not amplify one raw token per child."""
+    heading = "H" * (prefix_tokens - 1)
+    heading_prefix = heading + "\n"
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=2_500,
+        maximum_work=_BOUNDARY_PROBE_WORK_MULTIPLIER
+        * (len(heading_prefix) + len(body)),
+    )
+
+    with pytest.raises(
+        ValueError, match="^Tokenizer offsets cannot form a non-empty child$"
+    ):
+        _chunker(counter, config=config).split(
+            _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+        )
+
+    assert counter.calls < call_ceiling
 
 
 _LINEAR_TOKEN_WORK_MULTIPLIER = 12
