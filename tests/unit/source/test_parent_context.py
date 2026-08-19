@@ -12,8 +12,12 @@ from omf_retrieval.application.indexing.ports import (
     ParentContext,
     ParsedMarkdown,
     ParsedSection,
+    TokenizerDescriptor,
 )
-from omf_retrieval.infrastructure.source.chunker import ParentContextBuilder
+from omf_retrieval.infrastructure.source.chunker import (
+    ParentChildChunker,
+    ParentContextBuilder,
+)
 from omf_retrieval.infrastructure.source.markdown import MarkdownItParser
 
 
@@ -57,6 +61,34 @@ class _PairTokenCounter:
         return tuple(
             (index, min(index + 2, len(text))) for index in range(0, len(text), 2)
         )
+
+
+class _BoundarySensitiveContextCounter:
+    """Keep proper offsets while making only the full source tokenize densely."""
+
+    def __init__(self, source: str, *, maximum_work: int) -> None:
+        self._source = source
+        self.maximum_work = maximum_work
+        self.calls = 0
+        self.input_work = 0
+
+    def _record(self, text: str) -> None:
+        self.calls += 1
+        self.input_work += len(text)
+        if self.input_work > self.maximum_work:
+            raise RuntimeError("parent context probe budget exceeded")
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self._record(text)
+        if text == self._source:
+            return tuple(ord(character) for character in text)
+        return (ord(text[0]),) if text else ()
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        self._record(text)
+        if text == self._source:
+            return tuple((index, index + 1) for index in range(len(text)))
+        return ((0, len(text)),) if text else ()
 
 
 class _RecordingParser:
@@ -644,6 +676,83 @@ def test_oversized_single_block_uses_offsets_around_unique_match() -> None:
     assert "MATCH" in first.raw_text
     assert first.token_count <= 7
     assert first.line_start == first.line_end == 2
+
+
+_CONTEXT_PROBE_WORK_MULTIPLIER = 64
+
+
+def _measure_boundary_sensitive_parent(
+    source_length: int,
+) -> tuple[_BoundarySensitiveContextCounter, ParentContext]:
+    body = "MATCH" + "x" * (source_length - 6) + "\n"
+    section = _section(f"# H\n{body}")
+    counter = _BoundarySensitiveContextCounter(
+        body,
+        maximum_work=_CONTEXT_PROBE_WORK_MULTIPLIER * (len(body) + 1_200),
+    )
+    context = _builder(token_counter=counter).build(
+        section,
+        matched_raw_text="MATCH",
+        matched_line_start=2,
+        matched_line_end=2,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert context.raw_text in body
+    assert "MATCH" in context.raw_text
+    assert context.token_count == len(counter.encode(context.raw_text)) <= 1_200
+    assert context.line_start == context.line_end == 2
+    return counter, context
+
+
+def test_boundary_sensitive_parent_expansion_has_linear_bounded_probe_work() -> None:
+    """Parent expansion may not retokenize every one-character larger substring."""
+    small_counter, small = _measure_boundary_sensitive_parent(4_005)
+    large_counter, large = _measure_boundary_sensitive_parent(8_005)
+    repeated_counter, repeated = _measure_boundary_sensitive_parent(8_005)
+
+    assert large == repeated
+    assert small_counter.calls <= 64
+    assert large_counter.calls <= 80
+    assert repeated_counter.calls <= 80
+    assert small_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (4_005 + 1_200)
+    assert large_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (8_005 + 1_200)
+    assert large_counter.input_work / small_counter.input_work < 2.5
+
+
+def test_public_child_builds_boundary_sensitive_parent_without_quadratic_work() -> None:
+    """A public child's exact source coordinates remain usable by parent expansion."""
+    body = "MATCH" + "".join(chr(0x6000 + index) for index in range(4_000)) + "\n"
+    section = _section(f"# H\n{body}")
+    descriptor = TokenizerDescriptor(
+        model_name="model",
+        revision="revision",
+        library_name="library",
+        library_version="1.0",
+        add_special_tokens=False,
+    )
+    child = ParentChildChunker(_CharacterTokenCounter(), descriptor).split(
+        section, parser_version="markdown-it-py-4.2.0-omf-v1"
+    )[0]
+    counter = _BoundarySensitiveContextCounter(
+        body,
+        maximum_work=_CONTEXT_PROBE_WORK_MULTIPLIER * (len(body) + 1_200),
+    )
+
+    context = _builder(token_counter=counter).build(
+        section,
+        matched_raw_text=child.raw_text,
+        matched_line_start=child.line_start,
+        matched_line_end=child.line_end,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert child.raw_text in context.raw_text
+    assert context.raw_text in body
+    assert context.token_count == len(counter.encode(context.raw_text)) <= 1_200
+    assert context.line_start <= child.line_start <= child.line_end <= context.line_end
+    assert counter.calls <= 64
+    assert counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (len(body) + 1_200)
 
 
 @pytest.mark.parametrize(

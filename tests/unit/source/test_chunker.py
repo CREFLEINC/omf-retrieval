@@ -113,11 +113,15 @@ class _BoundarySensitiveTokenCounter:
         raw_widths: tuple[int, ...] = (1,),
         maximum_calls: int | None = None,
         maximum_work: int | None = None,
+        standalone_prefix_tokens: int = 1,
+        combined_token_counts: dict[int, int] | None = None,
     ) -> None:
         self._heading_prefix = heading_prefix
         self._raw_widths = raw_widths
         self.maximum_calls = maximum_calls
         self.maximum_work = maximum_work
+        self._standalone_prefix_tokens = standalone_prefix_tokens
+        self._combined_token_counts = combined_token_counts or {}
         self.calls = 0
         self.input_work = 0
 
@@ -131,9 +135,11 @@ class _BoundarySensitiveTokenCounter:
 
     def _spans(self, text: str) -> tuple[tuple[int, int], ...]:
         if text == self._heading_prefix:
-            return ((0, len(text)),)
+            return self._fixed_count_spans(text, self._standalone_prefix_tokens)
         if text.startswith(self._heading_prefix):
-            return tuple((index, index + 1) for index in range(len(text)))
+            raw_length = len(text) - len(self._heading_prefix)
+            token_count = self._combined_token_counts.get(raw_length, len(text))
+            return self._fixed_count_spans(text, token_count)
 
         spans: list[tuple[int, int]] = []
         cursor = 0
@@ -144,6 +150,13 @@ class _BoundarySensitiveTokenCounter:
             cursor = end
             width_index = (width_index + 1) % len(self._raw_widths)
         return tuple(spans)
+
+    @staticmethod
+    def _fixed_count_spans(text: str, token_count: int) -> tuple[tuple[int, int], ...]:
+        first_end = len(text) - token_count + 1
+        return ((0, first_end),) + tuple(
+            (index, index + 1) for index in range(first_end, len(text))
+        )
 
     def encode(self, text: str) -> tuple[int, ...]:
         self._record(text)
@@ -1696,10 +1709,10 @@ def test_boundary_sensitive_oversized_atomic_uses_bounded_window_probes(
 @pytest.mark.parametrize(
     ("prefix_tokens", "body", "config", "call_ceiling"),
     [
-        (599, "x" * 1_000, ChunkConfig(), 10),
+        (599, "x" * 1_000, ChunkConfig(), 50),
         (599, "x" * 1_000, ChunkConfig(overlap_tokens=0), 512),
         (599, "x" * 10_000, ChunkConfig(overlap_tokens=0), 1_400),
-        (799, "- " + "x" * 1_000 + "\n", ChunkConfig(), 10),
+        (799, "- " + "x" * 1_000 + "\n", ChunkConfig(), 30),
     ],
     ids=[
         "normal-minimum-progress",
@@ -1729,6 +1742,115 @@ def test_one_token_only_large_boundary_correction_fails_closed(
         )
 
     assert counter.calls < call_ceiling
+
+
+def test_nonmonotonic_boundary_probe_checks_adjacent_candidate_above_capacity() -> None:
+    """An invalid lower candidate may not hide an adjacent verified upper fit."""
+    heading = "H" * 474
+    heading_prefix = heading + "\n"
+    body = "".join(chr(0x7800 + index) for index in range(1_000))
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        standalone_prefix_tokens=473,
+        combined_token_counts={128: 601, 129: 600},
+        maximum_calls=512,
+        maximum_work=500 * (len(heading_prefix) + len(body)),
+    )
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    repeated_counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        standalone_prefix_tokens=473,
+        combined_token_counts={128: 601, 129: 600},
+        maximum_calls=512,
+        maximum_work=500 * (len(heading_prefix) + len(body)),
+    )
+    repeated = _chunker(repeated_counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert len(counter.encode(heading_prefix)) == 473
+    assert len(counter.encode(heading_prefix + body[:128])) == 601
+    assert len(counter.encode(heading_prefix + body[:129])) == 600
+    assert chunks == repeated
+    assert len(chunks[0].raw_text) == 129
+    assert _reconstruct_variable_overlap(chunks) == body
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
+        for chunk in chunks
+    )
+    assert all(chunk.line_start == chunk.line_end == 2 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert counter.calls <= 512
+    assert counter.input_work <= 500 * (len(heading_prefix) + len(body))
+
+
+@pytest.mark.parametrize("kind", ["normal", "atomic"])
+@pytest.mark.parametrize("body_length", [1_024, 1_025, 2_000])
+def test_one_token_config_scales_budget_with_expected_window_count(
+    kind: str, body_length: int
+) -> None:
+    """A configured one-token window may emit beyond an absolute 1,024 cap."""
+    config = ChunkConfig(
+        target_tokens=1,
+        soft_max_tokens=1,
+        overlap_tokens=0,
+        atomic_max_tokens=1,
+        parent_context_max_tokens=1_200,
+    )
+    payload = "".join(chr(0x5000 + index) for index in range(body_length))
+    body = payload if kind == "normal" else f"- {payload}\n"
+    counter = _CountingTokenCounter(maximum_work=12 * len(body))
+
+    chunks = _chunker(counter, config=config).split(
+        _section(body), parser_version="parser-v1"
+    )
+    repeated = _chunker(_FakeTokenCounter(), config=config).split(
+        _section(body), parser_version="parser-v1"
+    )
+
+    assert chunks == repeated
+    assert len(chunks) == len(body)
+    assert all(chunk.token_count == 1 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_hash for chunk in chunks)
+    if kind == "normal":
+        assert "".join(chunk.raw_text for chunk in chunks) == body
+        assert all(not chunk.warnings for chunk in chunks)
+    else:
+        assert "".join(chunk.raw_text for chunk in chunks) == body
+        assert all(chunk.warnings for chunk in chunks)
+    assert counter.calls <= 2 * len(body) + 10
+    assert counter.input_work <= 12 * len(body)
+
+
+def test_hostile_one_token_boundary_fails_before_expected_window_amplification() -> (
+    None
+):
+    """Dynamic budgets may not legitimize hostile one-token corrective pieces."""
+    heading = "H" * 598
+    heading_prefix = heading + "\n"
+    secret_body = "OMF-HOSTILE-" + "x" * 4_000
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        standalone_prefix_tokens=399,
+        maximum_calls=100,
+        maximum_work=50_000,
+    )
+
+    with pytest.raises(
+        ValueError, match="^Tokenizer offsets cannot form a non-empty child$"
+    ) as caught:
+        _chunker(counter).split(
+            _section(f"# {heading}\n{secret_body}"), parser_version="parser-v1"
+        )
+
+    assert secret_body not in str(caught.value)
+    assert counter.calls < 100
+    assert counter.input_work < 50_000
 
 
 _LINEAR_TOKEN_WORK_MULTIPLIER = 12

@@ -51,11 +51,29 @@ class _WindowSearchBudget:
         self.input_chars_left -= input_chars
 
 
+@dataclass(slots=True)
+class _ContextSearchBudget:
+    calls_left: int
+    input_chars_left: int
+
+    def consume(self, input_chars: int) -> bool:
+        if self.calls_left <= 0 or input_chars > self.input_chars_left:
+            return False
+        self.calls_left -= 1
+        self.input_chars_left -= input_chars
+        return True
+
+
 _TOKEN_COUNTER_FAILED = object()
 _PARSER_FAILED = object()
-_MAX_WINDOW_SEARCH_CALLS = 1_024
-_WINDOW_SEARCH_INPUT_MULTIPLIER = 128
+_WINDOW_PROBE_LIMIT = 24
+_WINDOW_NEIGHBOR_RADIUS = 2
+_WINDOW_SEARCH_INPUT_MULTIPLIER = 64
 _TINY_CORRECTIVE_REMAINDER_TOKENS = 64
+_CONTEXT_BASE_PROBES = 16
+_CONTEXT_PROBES_PER_SOURCE_WINDOW = 4
+_CONTEXT_SEARCH_INPUT_MULTIPLIER = 32
+_CONTEXT_NEIGHBOR_RADIUS = 2
 
 
 class ParentContextBuilder:
@@ -245,50 +263,38 @@ class ParentContextBuilder:
         matched_end: int,
     ) -> _Excerpt:
         limit = self._config.parent_context_max_tokens
-        if self._token_count(excerpt.raw_text[matched_start:matched_end]) > limit:
+        matched_token_count = self._token_count(
+            excerpt.raw_text[matched_start:matched_end]
+        )
+        if matched_token_count > limit:
             raise ValueError("Matched source exceeds the parent context limit")
         offsets = self._token_offsets(excerpt.raw_text)
-        left_candidates = sorted(
-            {start for start, _ in offsets if start < matched_start}, reverse=True
+        windows = _context_expansion_windows(
+            offsets,
+            matched_start=matched_start,
+            matched_end=matched_end,
         )
-        right_candidates = sorted({end for _, end in offsets if end > matched_end})
-        start = matched_start
-        end = matched_end
-        left_index = 0
-        right_index = 0
-        while left_index < len(left_candidates) or right_index < len(right_candidates):
-            sides: list[tuple[int, int, str]] = []
-            if left_index < len(left_candidates):
-                sides.append((matched_start - left_candidates[left_index], 0, "left"))
-            if right_index < len(right_candidates):
-                sides.append((right_candidates[right_index] - matched_end, 1, "right"))
-            added = False
-            for _, _, side in sorted(sides):
-                candidate_start = (
-                    left_candidates[left_index] if side == "left" else start
-                )
-                candidate_end = (
-                    right_candidates[right_index] if side == "right" else end
-                )
-                if (
-                    self._token_count(excerpt.raw_text[candidate_start:candidate_end])
-                    <= limit
-                ):
-                    start = candidate_start
-                    end = candidate_end
-                    if side == "left":
-                        left_index += 1
-                    else:
-                        right_index += 1
-                    added = True
-                    break
-                if side == "left":
-                    left_index = len(left_candidates)
-                else:
-                    right_index = len(right_candidates)
-            if not added:
+        candidate_indices = _context_probe_indices(
+            len(windows),
+            expected_expansions=max(0, limit - matched_token_count),
+        )
+        budget = _context_search_budget(len(excerpt.raw_text), limit)
+        best_start = matched_start
+        best_end = matched_end
+        for index in candidate_indices:
+            candidate_start, candidate_end = windows[index]
+            candidate_text = excerpt.raw_text[candidate_start:candidate_end]
+            if not budget.consume(len(candidate_text)):
                 break
-        return _slice_excerpt(excerpt, start, end)
+            if self._token_count(candidate_text) > limit:
+                continue
+            if (candidate_end - candidate_start) > (best_end - best_start) or (
+                candidate_end - candidate_start == best_end - best_start
+                and candidate_start < best_start
+            ):
+                best_start = candidate_start
+                best_end = candidate_end
+        return _slice_excerpt(excerpt, best_start, best_end)
 
     def _token_count(self, text: str) -> int:
         return len(self._encoded_tokens(text))
@@ -508,7 +514,13 @@ class ParentChildChunker:
         source_budget = self._config.atomic_max_tokens - prefix_tokens
         if source_budget <= 0:
             raise ValueError("Heading path leaves no room for child source text")
-        search_budget = _window_search_budget(unit.excerpt.raw_text, heading_prefix)
+        search_budget = _window_search_budget(
+            unit.excerpt.raw_text,
+            heading_prefix,
+            source_tokens=len(offsets),
+            source_budget=source_budget,
+            overlap_tokens=self._config.overlap_tokens,
+        )
 
         chunks: list[_Excerpt] = []
         cursor = 0
@@ -607,7 +619,13 @@ class ParentChildChunker:
             if use_target_window
             else self._config.soft_max_tokens
         )
-        search_budget = _window_search_budget(excerpt.raw_text, heading_prefix)
+        search_budget = _window_search_budget(
+            excerpt.raw_text,
+            heading_prefix,
+            source_tokens=len(offsets),
+            source_budget=window_budget,
+            overlap_tokens=self._config.overlap_tokens,
+        )
 
         chunks: list[_Excerpt] = []
         cursor = 0
@@ -689,39 +707,50 @@ class ParentChildChunker:
         minimum_progress = (
             1
             if remaining_tokens <= _TINY_CORRECTIVE_REMAINDER_TOKENS
-            else min(
-                available_tokens,
-                max(1, 2 * self._config.overlap_tokens),
-            )
+            else min(available_tokens, _minimum_window_progress(source_budget))
         )
-        probe_limit = available_tokens.bit_length() + 2
         probes = 0
 
-        def fits(end: int) -> bool:
+        def token_count(end: int) -> int:
             nonlocal probes
             probes += 1
-            if probes > probe_limit:
+            if probes > _WINDOW_PROBE_LIMIT:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
             end_offset = _token_boundary(offsets, end, len(raw_text))
             probe_text = heading_prefix + raw_text[start_offset:end_offset]
             search_budget.consume(len(probe_text))
-            return self._token_count(probe_text) <= token_limit
+            return self._token_count(probe_text)
 
-        if fits(candidate):
+        candidate_count = token_count(candidate)
+        if candidate_count <= token_limit:
             return candidate
 
-        lower = start + minimum_progress
-        if lower == candidate or not fits(lower):
-            return None
+        minimum_end = start + minimum_progress
+        maximum_end = min(len(offsets), candidate + _WINDOW_NEIGHBOR_RADIUS)
+        centers = [
+            candidate - max(1, candidate_count - token_limit),
+            candidate,
+            minimum_end,
+            (minimum_end + candidate) // 2,
+            minimum_end + (candidate - minimum_end) // 4,
+            minimum_end + 3 * (candidate - minimum_end) // 4,
+        ]
+        candidates: list[int] = []
+        seen = {candidate}
+        for center_index, center in enumerate(centers):
+            radius = _WINDOW_NEIGHBOR_RADIUS if center_index < len(centers) - 2 else 0
+            for end in range(center - radius, center + radius + 1):
+                if minimum_end <= end <= maximum_end and end not in seen:
+                    seen.add(end)
+                    candidates.append(end)
+        if len(candidates) + probes > _WINDOW_PROBE_LIMIT:
+            raise ValueError("Tokenizer offsets cannot form a non-empty child")
 
-        upper = candidate
-        while upper - lower > 1:
-            midpoint = (lower + upper) // 2
-            if fits(midpoint):
-                lower = midpoint
-            else:
-                upper = midpoint
-        return lower
+        best: int | None = None
+        for end in candidates:
+            if token_count(end) <= token_limit and (best is None or end > best):
+                best = end
+        return best
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
         offsets = self._token_offsets(excerpt.raw_text)
@@ -812,11 +841,88 @@ class ParentChildChunker:
         return tokens
 
 
-def _window_search_budget(raw_text: str, heading_prefix: str) -> _WindowSearchBudget:
+def _minimum_window_progress(source_budget: int) -> int:
+    return min(128, max(1, source_budget // 2))
+
+
+def _window_search_budget(
+    raw_text: str,
+    heading_prefix: str,
+    *,
+    source_tokens: int,
+    source_budget: int,
+    overlap_tokens: int,
+) -> _WindowSearchBudget:
+    minimum_progress = _minimum_window_progress(source_budget)
+    minimum_overlap = min(overlap_tokens, minimum_progress // 2)
+    minimum_advance = max(1, minimum_progress - minimum_overlap)
+    expected_windows = (source_tokens + minimum_advance - 1) // minimum_advance + 1
     return _WindowSearchBudget(
-        calls_left=_MAX_WINDOW_SEARCH_CALLS,
+        calls_left=2 * _WINDOW_PROBE_LIMIT * expected_windows,
         input_chars_left=_WINDOW_SEARCH_INPUT_MULTIPLIER
-        * max(1, len(raw_text) + len(heading_prefix)),
+        * max(1, len(raw_text) + expected_windows * len(heading_prefix)),
+    )
+
+
+def _context_expansion_windows(
+    offsets: tuple[tuple[int, int], ...],
+    *,
+    matched_start: int,
+    matched_end: int,
+) -> tuple[tuple[int, int], ...]:
+    left_candidates = sorted(
+        {start for start, _ in offsets if start < matched_start}, reverse=True
+    )
+    right_candidates = sorted({end for _, end in offsets if end > matched_end})
+    start = matched_start
+    end = matched_end
+    left_index = 0
+    right_index = 0
+    windows = [(start, end)]
+    while left_index < len(left_candidates) or right_index < len(right_candidates):
+        sides: list[tuple[int, int, str]] = []
+        if left_index < len(left_candidates):
+            sides.append((matched_start - left_candidates[left_index], 0, "left"))
+        if right_index < len(right_candidates):
+            sides.append((right_candidates[right_index] - matched_end, 1, "right"))
+        _, _, side = min(sides)
+        if side == "left":
+            start = left_candidates[left_index]
+            left_index += 1
+        else:
+            end = right_candidates[right_index]
+            right_index += 1
+        windows.append((start, end))
+    return tuple(windows)
+
+
+def _context_probe_indices(
+    window_count: int, *, expected_expansions: int
+) -> tuple[int, ...]:
+    last = window_count - 1
+    expected = min(expected_expansions, last)
+    centers = (last, expected, last // 2, last // 4, 3 * last // 4)
+    indices: list[int] = []
+    seen: set[int] = set()
+    for center_index, center in enumerate(centers):
+        candidates = [center]
+        if center_index < 2:
+            for distance in range(1, _CONTEXT_NEIGHBOR_RADIUS + 1):
+                candidates.extend((center - distance, center + distance))
+        for candidate in candidates:
+            if 0 <= candidate <= last and candidate not in seen:
+                seen.add(candidate)
+                indices.append(candidate)
+    return tuple(indices)
+
+
+def _context_search_budget(source_length: int, limit: int) -> _ContextSearchBudget:
+    source_windows = max(1, (source_length + limit - 1) // limit)
+    return _ContextSearchBudget(
+        calls_left=(
+            _CONTEXT_BASE_PROBES + _CONTEXT_PROBES_PER_SOURCE_WINDOW * source_windows
+        ),
+        input_chars_left=_CONTEXT_SEARCH_INPUT_MULTIPLIER * (source_length + limit),
     )
 
 
