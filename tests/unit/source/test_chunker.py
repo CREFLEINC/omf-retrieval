@@ -13,9 +13,11 @@ from omf_retrieval.application.indexing.ports import (
     ChunkConfig,
     ParsedSection,
     TokenizerDescriptor,
+    split_physical_lines,
 )
 from omf_retrieval.infrastructure.source.chunker import (
     CHUNKER_VERSION,
+    ParentContextBuilder,
     chunk_config_identity_hash,
 )
 from omf_retrieval.infrastructure.source.markdown import MarkdownItParser
@@ -668,11 +670,12 @@ def test_blank_blocks_around_long_structures_are_not_evidence_children(
         assert all(chunk.token_count <= 600 for chunk in chunks)
 
 
-def test_interstitial_and_trailing_blank_blocks_do_not_join_or_overlap() -> None:
-    """A blank separator must not become content, overlap, or a trailing child."""
+def test_interstitial_blanks_are_preserved_but_edge_blanks_are_trimmed() -> None:
+    """Interstitial blanks stay source-backed while edge blanks stay trimmed."""
     first = "a" * 350 + "\n"
     second = "b" * 350 + "\n"
-    source = f"# H\n\n{first}\n \t\n{second}\n\t\n"
+    separator = "\n \t\n"
+    source = f"# H\n\n{first}{separator}{second}\n\t\n"
     section = _section(source)
 
     chunks = _chunker().split(section, parser_version="parser-v1")
@@ -680,18 +683,103 @@ def test_interstitial_and_trailing_blank_blocks_do_not_join_or_overlap() -> None
 
     assert chunks == repeated
     assert [chunk.raw_text for chunk in chunks] == [
-        first,
-        first[-64:] + second,
+        first + separator,
+        (first + separator)[-64:] + second,
     ]
     assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
-        (3, 3),
+        (3, 5),
         (3, 6),
     ]
-    assert chunks[0].raw_text + chunks[1].raw_text[64:] == first + second
+    assert chunks[0].raw_text + chunks[1].raw_text[64:] == (first + separator + second)
     assert all(chunk.raw_text.strip() for chunk in chunks)
     assert all(chunk.search_text.strip() != "H" for chunk in chunks)
     assert [chunk.ordinal for chunk in chunks] == [0, 1]
     assert chunks == repeated
+
+
+def _assert_child_parent_context_contract(source: str) -> None:
+    parser = MarkdownItParser()
+    parsed = parser.parse(source)
+    section = parsed.sections[-1]
+    chunks = _chunker().split(section, parser_version=parsed.parser_version)
+    repeated = _chunker().split(section, parser_version=parsed.parser_version)
+    builder = ParentContextBuilder(parser, _FakeTokenCounter())
+    source_lines = split_physical_lines(source)
+
+    assert chunks == repeated
+    assert chunks
+    assert all(chunk.raw_text.strip() for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    contexts = []
+    for chunk in chunks:
+        declared_slice = "".join(source_lines[chunk.line_start - 1 : chunk.line_end])
+        assert chunk.raw_text in declared_slice
+        context = builder.build(
+            section,
+            matched_raw_text=chunk.raw_text,
+            matched_line_start=chunk.line_start,
+            matched_line_end=chunk.line_end,
+            parser_version=parsed.parser_version,
+        )
+        assert chunk.raw_text in context.raw_text
+        assert context.token_count <= 1_200
+        contexts.append(context)
+    assert tuple(contexts) == tuple(
+        builder.build(
+            section,
+            matched_raw_text=chunk.raw_text,
+            matched_line_start=chunk.line_start,
+            matched_line_end=chunk.line_end,
+            parser_version=parsed.parser_version,
+        )
+        for chunk in chunks
+    )
+    assert all(
+        chunk.token_count <= (800 if chunk.warnings else 600) for chunk in chunks
+    )
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "# H\n\n" + "a" * 350 + "\n\n" + "b" * 350 + "\n\n",
+        "H\r\n===\r\n \t\r\n\r\n"
+        + "a" * 350
+        + "\r\n \t\r\n\r\n"
+        + "b" * 350
+        + "\r\n\t \r\n",
+        "# H\r\r" + "a" * 350 + "\r\r \t\r" + "b" * 350 + "\r\r",
+        "# H\n\n" + "a" * 300 + "\n\n| h |\n|---|\n| " + "t" * 300 + " |\n\n",
+        "# H\n\n" + "a" * 300 + "\n\n- " + "l" * 310 + "\n\n",
+        "# H\n\n" + "a" * 300 + "\n\n> " + "q" * 310 + "\n\n",
+        "# H\n\n| h |\n|---|\n| " + "t" * 300 + " |\n\n" + "b" * 300 + "\n\n",
+        "# H\n\n- " + "l" * 310 + "\n\n" + "b" * 300 + "\n\n",
+        "# H\n\n> " + "q" * 310 + "\n\n" + "b" * 300 + "\n\n",
+        "# H\n\n```text\n"
+        + "f" * 300
+        + "\n```\n\n<div>\n"
+        + "h" * 300
+        + "\n</div>\n\n",
+    ],
+    ids=[
+        "normal-normal-atx-lf",
+        "normal-normal-setext-crlf-space",
+        "normal-normal-atx-cr-space",
+        "normal-table",
+        "normal-list",
+        "normal-quote",
+        "table-normal",
+        "list-normal",
+        "quote-normal",
+        "fence-html",
+    ],
+)
+def test_every_child_builds_parent_context_from_its_exact_source_slice(
+    source: str,
+) -> None:
+    """A noncontiguous child cannot be consumed by the approved parent builder."""
+    _assert_child_parent_context_contract(source)
 
 
 def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> None:
@@ -710,10 +798,10 @@ def test_search_text_at_exact_soft_max_remains_one_child_with_heading_path() -> 
 
 def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
     """Ignoring block-aware target packing would fragment or oversize children."""
-    first_paragraph = "a" * 350 + "\n"
-    second_paragraph = "b" * 100 + "\n"
+    first_paragraph = "a" * 350 + "\n\n"
+    second_paragraph = "b" * 100 + "\n\n"
     third_paragraph = "c" * 300 + "\n"
-    section = _section(f"# H\n{first_paragraph}\n{second_paragraph}\n{third_paragraph}")
+    section = _section(f"# H\n{first_paragraph}{second_paragraph}{third_paragraph}")
     counter = _FakeTokenCounter()
 
     chunks = _chunker(counter).split(section, parser_version="parser-v1")
@@ -723,10 +811,10 @@ def test_long_normal_blocks_pack_to_target_without_exceeding_soft_max() -> None:
         first_paragraph[-64:] + second_paragraph,
         second_paragraph[-64:] + third_paragraph,
     ]
-    assert [chunk.token_count for chunk in chunks] == [353, 167, 367]
+    assert [chunk.token_count for chunk in chunks] == [354, 168, 367]
     assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [
-        (2, 2),
-        (2, 4),
+        (2, 3),
+        (2, 5),
         (4, 6),
     ]
     assert all(
@@ -1037,7 +1125,7 @@ def _reference_block_aware_child_count(
 
 def _normal_paragraph_source(
     prefix_tokens: int, paragraph_lengths: Sequence[int]
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     heading = "H" * (prefix_tokens - 1)
     codepoint = 0x7000
     paragraphs: list[str] = []
@@ -1045,16 +1133,14 @@ def _normal_paragraph_source(
         paragraph = "".join(chr(codepoint + index) for index in range(paragraph_length))
         paragraphs.append(paragraph)
         codepoint += paragraph_length
-    return heading, "\n\n".join(paragraphs), "\n".join(paragraphs)
+    return heading, "\n\n".join(paragraphs)
 
 
 def _split_normal_paragraphs(
     prefix_tokens: int, paragraph_lengths: Sequence[int]
 ) -> tuple[str, tuple[object, ...]]:
-    heading, source_body, evidence = _normal_paragraph_source(
-        prefix_tokens, paragraph_lengths
-    )
-    source = f"# {heading}\n{source_body}"
+    heading, body = _normal_paragraph_source(prefix_tokens, paragraph_lengths)
+    source = f"# {heading}\n{body}"
     section = _section(source)
     counter = _CountingTokenCounter()
 
@@ -1076,11 +1162,10 @@ def _split_normal_paragraphs(
 
     source_lines = source.splitlines(keepends=True)
     assert all(
-        chunk.raw_text.strip()[0] in source_lines[chunk.line_start - 1]
-        and chunk.raw_text.strip()[-1] in source_lines[chunk.line_end - 1]
+        chunk.raw_text in "".join(source_lines[chunk.line_start - 1 : chunk.line_end])
         for chunk in chunks
     )
-    starts = [evidence.find(chunk.raw_text) for chunk in chunks]
+    starts = [body.find(chunk.raw_text) for chunk in chunks]
     assert starts[0] == 0
     assert all(start >= 0 for start in starts)
     reconstructed = chunks[0].raw_text
@@ -1096,22 +1181,21 @@ def _split_normal_paragraphs(
         if len(previous.raw_text) >= 2 * _HEADING_OVERLAP_TOKENS:
             assert overlap == _HEADING_OVERLAP_TOKENS
         reconstructed += chunk.raw_text[overlap:]
-    assert reconstructed == evidence
+    assert reconstructed == body
 
-    content_blocks = [block for block in section.blocks if block.raw_text.strip()]
-    block_lengths = [len(block.raw_text) for block in content_blocks]
+    block_lengths = [len(block.raw_text) for block in section.blocks]
     expected_children = _reference_block_aware_child_count(block_lengths, prefix_tokens)
     assert len(chunks) == expected_children
     emitted_search_tokens = sum(actual_counts)
     reference_work = (
-        len(evidence) + len(content_blocks) * prefix_tokens + emitted_search_tokens
+        len(body) + len(section.blocks) * prefix_tokens + emitted_search_tokens
     )
     assert split_work <= _MULTIBLOCK_WORK_MULTIPLIER * reference_work
-    assert split_calls <= 2 * len(content_blocks) + 6 * len(chunks) + 8
+    assert split_calls <= 2 * len(section.blocks) + 6 * len(chunks) + 8
     assert emitted_search_tokens <= (
-        _HEADING_EMITTED_TOKEN_MULTIPLIER * (prefix_tokens + len(evidence))
+        _HEADING_EMITTED_TOKEN_MULTIPLIER * (prefix_tokens + len(body))
     )
-    return evidence, chunks
+    return body, chunks
 
 
 @pytest.mark.parametrize("prefix_tokens", [272, 273, 335, 399, 472, 473])
@@ -1132,7 +1216,7 @@ def test_normal_multiblock_splits_only_overlap_plus_block_soft_overflow() -> Non
         starts[index - 1] + len(chunks[index - 1].raw_text) - starts[index]
         for index in range(1, len(chunks))
     ]
-    assert [len(chunk.raw_text) for chunk in chunks] == [126, 127, 64]
+    assert [len(chunk.raw_text) for chunk in chunks] == [127, 127, 64]
     assert overlaps == [63, 63]
 
 

@@ -391,12 +391,18 @@ class ParentChildChunker:
     ) -> tuple[_Excerpt, ...]:
         chunks: list[_Excerpt] = []
         normal_blocks: list[ParsedBlock] = []
+        separator_blocks: list[ParsedBlock] = []
         for block in blocks:
             if not block.raw_text.strip():
+                if normal_blocks:
+                    separator_blocks.append(block)
                 continue
             if block.kind not in {"table", "bullet_list", "ordered_list", "blockquote"}:
+                normal_blocks.extend(separator_blocks)
+                separator_blocks.clear()
                 normal_blocks.append(block)
                 continue
+            separator_blocks.clear()
             if normal_blocks:
                 chunks.extend(
                     self._split_normal_blocks(tuple(normal_blocks), heading_prefix)
