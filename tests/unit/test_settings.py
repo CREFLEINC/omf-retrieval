@@ -19,6 +19,8 @@ def test_settings_expose_approved_retrieval_defaults() -> None:
     )
     assert settings.embedding_dimension == 1024
     assert settings.embedding_device == "cpu"
+    assert settings.embedding_cache_dir is None
+    assert settings.embedding_batch_size == 32
     assert settings.query_instruction == (
         "Instruct: Retrieve passages from Korean internal software design documents "
         "that provide the requirements, policies, API definitions, data models, or "
@@ -41,8 +43,39 @@ def test_settings_read_prefixed_environment_values(
 ) -> None:
     """The OMF_RETRIEVAL_ prefix supplies settings from the environment."""
     monkeypatch.setenv("OMF_RETRIEVAL_EMBEDDING_DEVICE", "cuda:0")
+    monkeypatch.setenv("OMF_RETRIEVAL_EMBEDDING_BATCH_SIZE", "64")
+    monkeypatch.setenv("OMF_RETRIEVAL_EMBEDDING_CACHE_DIR", "/srv/model-cache")
 
-    assert Settings().embedding_device == "cuda:0"
+    settings = Settings()
+    assert settings.embedding_device == "cuda:0"
+    assert settings.embedding_batch_size == 64
+    assert settings.embedding_cache_dir == Path("/srv/model-cache")
+
+
+@pytest.mark.parametrize("batch_size", [1, 256])
+def test_embedding_batch_size_accepts_approved_boundaries(batch_size: int) -> None:
+    """The inclusive batch-size boundaries remain configurable."""
+    assert Settings(embedding_batch_size=batch_size).embedding_batch_size == batch_size
+
+
+@pytest.mark.parametrize("batch_size", [0, 257, True, 32.0, "32"])
+def test_embedding_batch_size_rejects_out_of_range_or_non_exact_ints(
+    batch_size: object,
+) -> None:
+    """Unsafe bounds and coercible non-integers cannot alter inference batching."""
+    with pytest.raises(ValidationError):
+        Settings(embedding_batch_size=batch_size)  # type: ignore[arg-type]
+
+
+def test_development_embedding_cache_accepts_none_or_an_explicit_path(
+    tmp_path: Path,
+) -> None:
+    """Local development may use the HF default or an explicit cache location."""
+    assert Settings(embedding_cache_dir=None).embedding_cache_dir is None
+    assert (
+        Settings(embedding_cache_dir=tmp_path / "model-cache").embedding_cache_dir
+        == tmp_path / "model-cache"
+    )
 
 
 def test_production_requires_gpu_zero_and_secret_files(tmp_path: Path) -> None:
@@ -66,12 +99,29 @@ def test_production_accepts_gpu_zero_with_regular_secret_files(tmp_path: Path) -
     settings = Settings(
         environment="production",
         embedding_device="cuda:0",
+        embedding_cache_dir=tmp_path / "model-cache",
         postgres_password_file=postgres_password_file,
         audit_hmac_key_file=audit_hmac_key_file,
     )
 
     assert settings.postgres_password_file == postgres_password_file
     assert settings.audit_hmac_key_file == audit_hmac_key_file
+
+
+def test_production_requires_an_explicit_embedding_cache_path(tmp_path: Path) -> None:
+    """Production cannot silently depend on the process-global HF cache."""
+    postgres_password_file = tmp_path / "postgres-password"
+    audit_hmac_key_file = tmp_path / "audit-hmac-key"
+    postgres_password_file.write_text("postgres-password", encoding="utf-8")
+    audit_hmac_key_file.write_text("audit-hmac-key", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="embedding_cache_dir"):
+        Settings(
+            environment="production",
+            embedding_device="cuda:0",
+            postgres_password_file=postgres_password_file,
+            audit_hmac_key_file=audit_hmac_key_file,
+        )
 
 
 def test_settings_reject_invalid_retrieval_limits() -> None:
