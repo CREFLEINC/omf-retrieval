@@ -1,6 +1,7 @@
 """Application contracts for immutable source snapshots and parsed Markdown."""
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -12,6 +13,234 @@ class SourceSnapshotValidationError(ValueError):
 
 class MarkdownStructureValidationError(ValueError):
     """Raised when immutable parsed-Markdown values are invalid."""
+
+
+class TokenCounter(Protocol):
+    """Describe token IDs and their exact source-backed character offsets.
+
+    Implementations return one offset for every encoded token. Offsets are
+    monotonic and non-overlapping, satisfy ``0 <= start < end <= len(text)``,
+    and never represent special tokens with zero-length source offsets.
+    """
+
+    def encode(self, text: str) -> Sequence[int]:
+        """Encode source text without losing deterministic token order.
+
+        Args:
+            text: Exact source text to tokenize.
+
+        Returns:
+            Token identifiers aligned one-for-one with ``offsets(text)``.
+        """
+
+    def offsets(self, text: str) -> Sequence[tuple[int, int]]:
+        """Return exact character spans for the encoded source tokens.
+
+        Args:
+            text: Exact source text passed to ``encode``.
+
+        Returns:
+            Monotonic, non-overlapping half-open source character spans.
+        """
+
+
+@dataclass(frozen=True, slots=True)
+class TokenizerDescriptor:
+    """Identify the exact tokenizer behavior used for chunk boundaries.
+
+    Args:
+        model_name: Non-blank tokenizer model identifier.
+        revision: Non-blank immutable tokenizer revision.
+        library_name: Non-blank tokenizer library identifier.
+        library_version: Non-blank installed tokenizer library version.
+        add_special_tokens: Whether tokenization includes special tokens.
+
+    Raises:
+        ValueError: If any value is blank or not its exact built-in type.
+    """
+
+    model_name: str
+    revision: str
+    library_name: str
+    library_version: str
+    add_special_tokens: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate exact tokenizer identity values."""
+        identity_fields = (
+            ("model_name", self.model_name),
+            ("revision", self.revision),
+            ("library_name", self.library_name),
+            ("library_version", self.library_version),
+        )
+        if any(
+            type(value) is not str or not value.strip() for _, value in identity_fields
+        ):
+            raise ValueError(
+                "Tokenizer identity fields must be non-blank exact strings"
+            )
+        if type(self.add_special_tokens) is not bool:
+            raise ValueError("Tokenizer add_special_tokens must be an exact boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkConfig:
+    """Define deterministic child and parent token limits.
+
+    Args:
+        target_tokens: Preferred child size for ordinary text.
+        soft_max_tokens: Largest ordinary child size before a required split.
+        overlap_tokens: Prior-child token count repeated in the next child.
+        atomic_max_tokens: Largest preserved table, list, or quote unit.
+        parent_context_max_tokens: Largest parent context returned with a match.
+
+    Raises:
+        ValueError: If values are not exact integers or token limits conflict.
+    """
+
+    target_tokens: int = 400
+    soft_max_tokens: int = 600
+    overlap_tokens: int = 64
+    atomic_max_tokens: int = 800
+    parent_context_max_tokens: int = 1200
+
+    def __post_init__(self) -> None:
+        """Validate exact integer types and coherent token limits."""
+        token_limits = (
+            self.target_tokens,
+            self.soft_max_tokens,
+            self.overlap_tokens,
+            self.atomic_max_tokens,
+            self.parent_context_max_tokens,
+        )
+        if any(type(token_limit) is not int for token_limit in token_limits):
+            raise ValueError("Chunk token limits must be exact integers")
+        if (
+            self.target_tokens <= 0
+            or self.soft_max_tokens <= 0
+            or self.atomic_max_tokens <= 0
+            or self.parent_context_max_tokens <= 0
+        ):
+            raise ValueError("Chunk size limits must be positive")
+        if not self.target_tokens <= self.soft_max_tokens <= self.atomic_max_tokens:
+            raise ValueError("Chunk size limits must be monotonically ordered")
+        if not 0 <= self.overlap_tokens < self.target_tokens:
+            raise ValueError("Chunk overlap must be smaller than the target")
+
+
+_OVERSIZED_ATOMIC_UNIT_WARNING_CODE = "oversized_atomic_unit_token_split"
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkWarning:
+    """Represent safe metadata for a forced oversized atomic-unit split.
+
+    Args:
+        block_kind: Non-empty parser block kind that required token splitting.
+        line_start: One-based inclusive first affected source line.
+        line_end: One-based inclusive last affected source line.
+        code: Stable warning code for oversized atomic-unit token splitting.
+
+    Raises:
+        ValueError: If the code, block kind, or source range is invalid.
+    """
+
+    block_kind: str
+    line_start: int
+    line_end: int
+    code: str = _OVERSIZED_ATOMIC_UNIT_WARNING_CODE
+
+    def __post_init__(self) -> None:
+        """Validate stable safe warning metadata."""
+        if (
+            type(self.code) is not str
+            or self.code != _OVERSIZED_ATOMIC_UNIT_WARNING_CODE
+        ):
+            raise ValueError("Chunk warning code must be the stable approved value")
+        if type(self.block_kind) is not str or not self.block_kind:
+            raise ValueError(
+                "Chunk warning block_kind must be a non-empty exact string"
+            )
+        _require_chunk_inclusive_line_range(self.line_start, self.line_end)
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkDraft:
+    """Represent immutable storage-ready output from the child chunker.
+
+    Args:
+        ordinal: Zero-based deterministic child position within its section.
+        raw_text: Non-empty exact source excerpt retained by the child.
+        search_text: Non-empty heading-enriched text used for retrieval.
+        token_count: Positive token count for ``search_text``.
+        line_start: One-based inclusive first excerpt source line.
+        line_end: One-based inclusive last excerpt source line.
+        chunk_hash: Lowercase 64-character hexadecimal child identity digest.
+        warnings: Exact immutable tuple of safe child warnings.
+
+    Raises:
+        ValueError: If a type, value, source range, hash, or warning is invalid.
+    """
+
+    ordinal: int
+    raw_text: str
+    search_text: str
+    token_count: int
+    line_start: int
+    line_end: int
+    chunk_hash: str
+    warnings: tuple[ChunkWarning, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate deterministic chunk output without generating its identity."""
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("Chunk ordinal must be a non-negative exact integer")
+        if type(self.raw_text) is not str or not self.raw_text:
+            raise ValueError("Chunk raw_text must be a non-empty exact string")
+        if type(self.search_text) is not str or not self.search_text:
+            raise ValueError("Chunk search_text must be a non-empty exact string")
+        if type(self.token_count) is not int or self.token_count <= 0:
+            raise ValueError("Chunk token_count must be a positive exact integer")
+        _require_chunk_inclusive_line_range(self.line_start, self.line_end)
+        if (
+            type(self.chunk_hash) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", self.chunk_hash) is None
+        ):
+            raise ValueError("Chunk hash must be lowercase 64-character hexadecimal")
+        if type(self.warnings) is not tuple or not all(
+            type(warning) is ChunkWarning for warning in self.warnings
+        ):
+            raise ValueError("Chunk warnings must be an exact ChunkWarning tuple")
+
+
+@dataclass(frozen=True, slots=True)
+class ParentContext:
+    """Represent an immutable source-backed context returned around a match.
+
+    Args:
+        raw_text: Non-empty contiguous source excerpt without a heading prefix.
+        token_count: Positive token count for ``raw_text``.
+        line_start: One-based inclusive first excerpt source line.
+        line_end: One-based inclusive last excerpt source line.
+
+    Raises:
+        ValueError: If a type, value, or inclusive source range is invalid.
+    """
+
+    raw_text: str
+    token_count: int
+    line_start: int
+    line_end: int
+
+    def __post_init__(self) -> None:
+        """Validate exact source text, token count, and inclusive lines."""
+        if type(self.raw_text) is not str or not self.raw_text:
+            raise ValueError("Parent context raw_text must be a non-empty exact string")
+        if type(self.token_count) is not int or self.token_count <= 0:
+            raise ValueError(
+                "Parent context token_count must be a positive exact integer"
+            )
+        _require_chunk_inclusive_line_range(self.line_start, self.line_end)
 
 
 def split_physical_lines(source: str) -> tuple[str, ...]:
@@ -313,6 +542,16 @@ class MarkdownParser(Protocol):
         Raises:
             MarkdownStructureValidationError: If ``source`` is not an exact string.
         """
+
+
+def _require_chunk_inclusive_line_range(line_start: object, line_end: object) -> None:
+    if (
+        type(line_start) is not int
+        or type(line_end) is not int
+        or line_start < 1
+        or line_end < line_start
+    ):
+        raise ValueError("Chunk lines must be a positive inclusive range")
 
 
 def _require_inclusive_line_range(
