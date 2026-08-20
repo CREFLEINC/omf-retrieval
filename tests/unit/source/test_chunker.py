@@ -1831,6 +1831,110 @@ def test_combined_character_boundary_derives_progress_from_actual_soft_capacity(
     assert counter.input_work <= 500 * (len(heading_prefix) + len(body))
 
 
+@pytest.mark.parametrize(
+    ("physical_prefix_length", "first_piece_tokens", "effective_overlap"),
+    [(535, 65, 32), (536, 64, 32)],
+)
+def test_normal_boundary_uses_actual_piece_overlap_for_reduced_soft_capacity(
+    physical_prefix_length: int,
+    first_piece_tokens: int,
+    effective_overlap: int,
+) -> None:
+    """A fitting soft piece advances by its own effective half overlap."""
+    heading = "H" * (physical_prefix_length - 1)
+    heading_prefix = heading + "\n"
+    body = "".join(chr(0x6800 + index) for index in range(1_000))
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix,
+        maximum_calls=1_024,
+        maximum_work=500 * (len(heading_prefix) + len(body)),
+    )
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+    repeated = _chunker(_BoundarySensitiveTokenCounter(heading_prefix)).split(
+        _section(f"# {heading}\n{body}"), parser_version="parser-v1"
+    )
+
+    assert chunks == repeated
+    assert len(counter.encode(heading_prefix)) == 1
+    assert len(chunks[0].raw_text) == first_piece_tokens
+    assert chunks[1].raw_text.startswith(chunks[0].raw_text[-effective_overlap:])
+    assert _reconstruct_variable_overlap(chunks) == body
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
+        for chunk in chunks
+    )
+    assert all(chunk.line_start == chunk.line_end == 2 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert counter.calls <= 1_024
+    assert counter.input_work <= 500 * (len(heading_prefix) + len(body))
+
+
+@pytest.mark.parametrize(
+    ("body_template", "warning_kind"),
+    [
+        ("| h |{eol}|---|{eol}| {payload} |{eol}", "table_row"),
+        ("- {payload}{eol}", "list_item"),
+        ("> {payload}{eol}", "paragraph"),
+    ],
+    ids=["table", "list", "quote"],
+)
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+@pytest.mark.parametrize(
+    ("physical_prefix_length", "first_piece_tokens"), [(672, 128), (673, 127)]
+)
+def test_atomic_boundary_uses_no_overlap_progress_for_reduced_capacity(
+    body_template: str,
+    warning_kind: str,
+    line_ending: str,
+    physical_prefix_length: int,
+    first_piece_tokens: int,
+) -> None:
+    """Atomic windows advance without applying the configured normal overlap floor."""
+    heading = "H" * (physical_prefix_length - 1)
+    heading_prefix = heading + "\n"
+    payload = "".join(chr(0x7400 + index) for index in range(1_000))
+    body = body_template.format(eol=line_ending, payload=payload)
+    maximum_work = 500 * (len(heading_prefix) + len(body))
+    counter = _BoundarySensitiveTokenCounter(
+        heading_prefix, maximum_calls=512, maximum_work=maximum_work
+    )
+
+    chunks = _chunker(counter).split(
+        _section(f"# {heading}{line_ending}{body}"), parser_version="parser-v1"
+    )
+    repeated = _chunker(_BoundarySensitiveTokenCounter(heading_prefix)).split(
+        _section(f"# {heading}{line_ending}{body}"), parser_version="parser-v1"
+    )
+    warning_chunks = tuple(chunk for chunk in chunks if chunk.warnings)
+    body_lines = split_physical_lines(body)
+
+    assert chunks == repeated
+    assert "".join(chunk.raw_text for chunk in chunks) == body
+    assert warning_chunks
+    assert len(warning_chunks[0].raw_text) == first_piece_tokens
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+    assert all(
+        chunk.raw_text in "".join(body_lines[chunk.line_start - 2 : chunk.line_end - 1])
+        for chunk in chunks
+    )
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_hash for chunk in chunks)
+    assert all(
+        chunk.warnings
+        and all(warning.block_kind == warning_kind for warning in chunk.warnings)
+        for chunk in warning_chunks
+    )
+    assert counter.calls <= 512
+    assert counter.input_work <= maximum_work
+
+
 @pytest.mark.parametrize("kind", ["normal", "atomic"])
 @pytest.mark.parametrize("body_length", [1_024, 1_025, 2_000])
 def test_one_token_config_scales_budget_with_expected_window_count(

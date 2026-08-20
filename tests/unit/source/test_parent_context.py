@@ -64,6 +64,29 @@ class _PairTokenCounter:
         )
 
 
+class _CountingCharacterContextCounter(_CharacterTokenCounter):
+    """Count adapter work while retaining exact character token semantics."""
+
+    def __init__(self, *, maximum_work: int) -> None:
+        self.maximum_work = maximum_work
+        self.calls = 0
+        self.input_work = 0
+
+    def _record(self, text: str) -> None:
+        self.calls += 1
+        self.input_work += len(text)
+        if self.input_work > self.maximum_work:
+            raise RuntimeError("parent character work budget exceeded")
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self._record(text)
+        return super().encode(text)
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        self._record(text)
+        return super().offsets(text)
+
+
 class _BoundarySensitiveContextCounter:
     """Keep proper offsets while making only the full source tokenize densely."""
 
@@ -801,6 +824,88 @@ def test_boundary_sensitive_multiblock_parent_has_linear_bounded_probe_work() ->
     assert small_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (1_507 + 1_200)
     assert large_counter.input_work <= _CONTEXT_PROBE_WORK_MULTIPLIER * (3_007 + 1_200)
     assert large_counter.input_work / small_counter.input_work < 2.5
+
+
+_DISTANT_BLOCK_BODY = "x\n\n" * 1_000 + "x\n"
+
+
+@pytest.mark.parametrize(
+    ("paragraph_index", "expected_raw", "expected_lines"),
+    [
+        (0, _DISTANT_BLOCK_BODY[:1_200], (2, 801)),
+        (500, _DISTANT_BLOCK_BODY[900:2_100], (602, 1_401)),
+        (1_000, _DISTANT_BLOCK_BODY[-1_200:], (1_203, 2_002)),
+    ],
+    ids=["first", "middle", "last"],
+)
+def test_character_multiblock_parent_finds_nearest_greedy_token_boundary(
+    paragraph_index: int,
+    expected_raw: str,
+    expected_lines: tuple[int, int],
+) -> None:
+    """A token allowance may not be mistaken for a distant block index."""
+    section = _section(f"# H\n{_DISTANT_BLOCK_BODY}")
+    matched_line = 2 + 2 * paragraph_index
+    maximum_work = _CONTEXT_PROBE_WORK_MULTIPLIER * (len(_DISTANT_BLOCK_BODY) + 1_200)
+    counter = _CountingCharacterContextCounter(maximum_work=maximum_work)
+
+    context = _builder(token_counter=counter).build(
+        section,
+        matched_raw_text="x\n",
+        matched_line_start=matched_line,
+        matched_line_end=matched_line,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+    repeated = _builder(
+        token_counter=_CountingCharacterContextCounter(maximum_work=maximum_work)
+    ).build(
+        section,
+        matched_raw_text="x\n",
+        matched_line_start=matched_line,
+        matched_line_end=matched_line,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert context == repeated
+    assert context.raw_text == expected_raw
+    assert context.token_count == len(expected_raw) == 1_200
+    assert (context.line_start, context.line_end) == expected_lines
+    assert "x\n" in context.raw_text
+    assert counter.calls <= 80
+    assert counter.input_work <= maximum_work
+
+
+def test_last_multiblock_child_expands_to_nearest_character_parent_boundary() -> None:
+    """A real last child must expand beyond its seed blocks to the parent limit."""
+    section = _section(f"# H\n{_DISTANT_BLOCK_BODY}")
+    descriptor = TokenizerDescriptor(
+        model_name="model",
+        revision="revision",
+        library_name="library",
+        library_version="1.0",
+        add_special_tokens=False,
+    )
+    child = ParentChildChunker(_CharacterTokenCounter(), descriptor).split(
+        section, parser_version="markdown-it-py-4.2.0-omf-v1"
+    )[-1]
+    maximum_work = _CONTEXT_PROBE_WORK_MULTIPLIER * (len(_DISTANT_BLOCK_BODY) + 1_200)
+    counter = _CountingCharacterContextCounter(maximum_work=maximum_work)
+
+    context = _builder(token_counter=counter).build(
+        section,
+        matched_raw_text=child.raw_text,
+        matched_line_start=child.line_start,
+        matched_line_end=child.line_end,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert len(child.raw_text) < 1_200
+    assert context.raw_text == _DISTANT_BLOCK_BODY[-1_200:]
+    assert child.raw_text in context.raw_text
+    assert context.token_count == 1_200
+    assert (context.line_start, context.line_end) == (1_203, 2_002)
+    assert counter.calls <= 80
+    assert counter.input_work <= maximum_work
 
 
 @pytest.mark.parametrize(

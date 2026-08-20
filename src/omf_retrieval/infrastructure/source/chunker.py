@@ -244,7 +244,6 @@ class ParentContextBuilder:
                 body_line_start=body_line_start,
                 expansion_windows=expansion_windows,
                 seed_excerpt=excerpt,
-                seed_token_count=seed_token_count,
                 search_budget=search_budget,
             )
 
@@ -284,13 +283,18 @@ class ParentContextBuilder:
         body_line_start: int,
         expansion_windows: tuple[tuple[int, int], ...],
         seed_excerpt: _Excerpt,
-        seed_token_count: int,
         search_budget: _ContextSearchBudget,
     ) -> _Excerpt:
         limit = self._config.parent_context_max_tokens
+        source_token_counts = _block_window_source_token_counts(
+            source_lines,
+            blocks,
+            expansion_windows,
+            self._token_offsets("".join(source_lines)),
+        )
         candidate_indices = _block_context_probe_indices(
-            len(expansion_windows),
-            expected_expansions=max(0, limit - seed_token_count),
+            source_token_counts,
+            token_limit=limit,
         )
         best = seed_excerpt
         for index in candidate_indices:
@@ -587,7 +591,8 @@ class ParentChildChunker:
                 heading_prefix=heading_prefix,
                 token_limit=self._config.atomic_max_tokens,
                 search_budget=search_budget,
-                allow_reduced_progress=False,
+                overlap_tokens=0,
+                allow_reduced_progress=True,
             )
             if window_end is None:
                 raise ValueError("Tokenizer offsets cannot form a non-empty child")
@@ -713,6 +718,7 @@ class ParentChildChunker:
                 heading_prefix=heading_prefix,
                 token_limit=token_limit,
                 search_budget=search_budget,
+                overlap_tokens=self._config.overlap_tokens,
                 allow_reduced_progress=token_limit == self._config.soft_max_tokens,
             )
             if window_end is None and token_limit < self._config.soft_max_tokens:
@@ -724,6 +730,7 @@ class ParentChildChunker:
                     heading_prefix=heading_prefix,
                     token_limit=self._config.soft_max_tokens,
                     search_budget=search_budget,
+                    overlap_tokens=self._config.overlap_tokens,
                     allow_reduced_progress=True,
                 )
             if window_end is None:
@@ -753,6 +760,7 @@ class ParentChildChunker:
         heading_prefix: str,
         token_limit: int,
         search_budget: _WindowSearchBudget,
+        overlap_tokens: int,
         allow_reduced_progress: bool,
     ) -> int | None:
         candidate = min(start + source_budget, len(offsets))
@@ -783,15 +791,19 @@ class ParentChildChunker:
         )
         remaining_tokens = len(offsets) - start
         configured_progress = _configured_window_progress(
-            source_budget, overlap_tokens=self._config.overlap_tokens
+            source_budget, overlap_tokens=overlap_tokens
         )
         if (
             estimated_capacity < configured_progress
             and remaining_tokens > _TINY_CORRECTIVE_REMAINDER_TOKENS
             and (
                 not allow_reduced_progress
-                or self._config.overlap_tokens == 0
-                or estimated_capacity <= self._config.overlap_tokens
+                or not _bounded_corrective_amplification(
+                    remaining_tokens,
+                    source_budget=source_budget,
+                    piece_tokens=estimated_capacity,
+                    overlap_tokens=overlap_tokens,
+                )
             )
         ):
             return None
@@ -910,6 +922,24 @@ def _configured_window_progress(source_budget: int, *, overlap_tokens: int) -> i
     return min(source_budget, max(1, configured_progress))
 
 
+def _bounded_corrective_amplification(
+    remaining_tokens: int,
+    *,
+    source_budget: int,
+    piece_tokens: int,
+    overlap_tokens: int,
+) -> bool:
+    configured_overlap = min(overlap_tokens, source_budget // 2)
+    configured_advance = max(1, source_budget - configured_overlap)
+    piece_overlap = min(overlap_tokens, piece_tokens // 2)
+    piece_advance = max(1, piece_tokens - piece_overlap)
+    configured_windows = (
+        remaining_tokens + configured_advance - 1
+    ) // configured_advance
+    corrective_windows = (remaining_tokens + piece_advance - 1) // piece_advance
+    return corrective_windows <= _WINDOW_PROBE_LIMIT * configured_windows
+
+
 def _window_search_budget(
     raw_text: str,
     heading_prefix: str,
@@ -991,12 +1021,58 @@ def _block_expansion_windows(
     return tuple(windows)
 
 
-def _block_context_probe_indices(
-    window_count: int, *, expected_expansions: int
+def _block_window_source_token_counts(
+    source_lines: tuple[str, ...],
+    blocks: tuple[ParsedBlock, ...],
+    expansion_windows: tuple[tuple[int, int], ...],
+    source_offsets: tuple[tuple[int, int], ...],
 ) -> tuple[int, ...]:
-    last = window_count - 1
-    expected = min(expected_expansions, last)
-    return tuple(dict.fromkeys((last, max(0, last - 1), expected)))
+    line_ends: list[int] = []
+    cursor = 0
+    for line in source_lines:
+        cursor += len(line)
+        line_ends.append(cursor)
+    token_starts = tuple(start for start, _ in source_offsets)
+    token_ends = tuple(end for _, end in source_offsets)
+    counts: list[int] = []
+    for left, right in expansion_windows:
+        line_start = blocks[left].line_start
+        line_end = blocks[right].line_end
+        char_start = line_ends[line_start - 2] if line_start > 1 else 0
+        char_end = line_ends[line_end - 1]
+        first_token = bisect_right(token_ends, char_start)
+        past_last_token = bisect_left(token_starts, char_end)
+        counts.append(max(0, past_last_token - first_token))
+    return tuple(counts)
+
+
+def _block_context_probe_indices(
+    source_token_counts: tuple[int, ...], *, token_limit: int
+) -> tuple[int, ...]:
+    last = len(source_token_counts) - 1
+    estimated = max(0, bisect_right(source_token_counts, token_limit) - 1)
+    indices: list[int] = []
+    seen: set[int] = set()
+
+    def add(candidate: int) -> None:
+        if (
+            0 <= candidate <= last
+            and candidate not in seen
+            and len(indices) < _CONTEXT_BASE_PROBES
+        ):
+            seen.add(candidate)
+            indices.append(candidate)
+
+    add(estimated)
+    distance = 1
+    while len(indices) < _CONTEXT_BASE_PROBES - 3 and distance <= last:
+        add(estimated - distance)
+        add(estimated + distance)
+        distance *= 2
+    add(last)
+    add(last - 1)
+    add(0)
+    return tuple(indices)
 
 
 def _can_exhaustively_expand_blocks(
