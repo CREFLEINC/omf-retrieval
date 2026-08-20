@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- ① 제목을 바꾸세요. 브라우저 탭과 PDF 메타데이터에 들어갑니다. -->
+<title>Markdown parser와 Parent–Child chunker 실습 보고서</title>
+
+<!-- ② 자산. 이 파일 옆에 crefle-doc/ 폴더가 있어야 합니다.
+        dist/crefle-doc/ 를 통째로 복사하세요. 경로를 CDN 으로 바꾸지 마세요 —
+        업로드 PDF 렌더러는 network_mode:"none" 이라 네트워크 자산이 100% 실패합니다. -->
+<link rel="stylesheet" href="./crefle-doc/crefle-doc.css">
+
+<style>
+  :root {
+    /* ③ 인쇄 시 매 페이지 머리에 찍힐 문자열. **따옴표를 포함**해서 쓰세요.
+          (표준 string-set 은 Chromium 이 지원하지 않아 var() 로 받습니다.)
+          표지(1페이지)에는 자동으로 안 찍힙니다. */
+    --doc-running-title: 'Markdown parser와 Parent–Child chunker 실습';
+  }
+</style>
+</head>
+
+<!-- .doc          문서 스케일 스코프. 이게 없으면 아무 스타일도 안 걸립니다.
+     .doc-numbered 장·절·그림·표에 자동 번호. 번호가 필요 없으면 빼세요. -->
+<body class="doc doc-numbered">
+
+<!-- ══ 표지 ══════════════════════════════════════════════════════════════
+     .doc-cover 는 인쇄 시 한 장을 다 쓰고 다음 페이지에서 본문이 시작합니다. -->
+<header class="doc-cover">
+  <p class="eyebrow">CREFLE · 기술 보고서 · 실습 가이드</p>
+  <h1>Markdown parser와<br>Parent–Child chunker</h1>
+  <p class="lede">실제 OMF Markdown이 검색 가능한 구조와 근거 문맥으로 바뀌는 과정을 코드·실측 출력·재현 실습으로 설명한다.</p>
+
+  <table data-document-info>
+    <caption>문서 정보</caption>
+    <tbody>
+      <tr><th>작성자</th><td>CREFLE inc. CTO 김정규</td></tr>
+      <tr><th>작성일</th><td>2026-08-20</td></tr>
+      <tr><th>작성시간</th><td>15:06</td></tr>
+      <tr><th>문서 버전</th><td>v1.0</td></tr>
+      <tr><th>열람 대상</th><td>프로젝트 관련자</td></tr>
+    </tbody>
+  </table>
+</header>
+
+<!-- ══ 요약 ══════════════════════════════════════════════════════════════
+     읽는 사람은 대개 여기까지만 읽습니다. 결론을 먼저 씁니다. -->
+<h2>요약</h2>
+
+<p>
+  두 단계는 같은 “문서 자르기”가 아니다. <strong>Markdown parser</strong>는 원문을
+  제목 계층과 물리 행 좌표가 붙은 구조로 바꾸고, <strong>Parent–Child chunker</strong>는
+  그 구조를 작은 검색 단위(child)로 결정론적으로 분할한다. 검색에 적중한 child는
+  <strong>ParentContext</strong>를 통해 원문에 연속된 더 넓은 문맥으로 확장된다.
+</p>
+
+<div class="kpi">
+  <div><span class="big">12</span><span class="lbl">실제 OMF 문서<br>parsed section</span></div>
+  <div><span class="big">11</span><span class="lbl">6,758자 표 절의<br>atomic child</span></div>
+  <div><span class="big">3</span><span class="lbl">긴 절 fixture의<br>overlap child</span></div>
+</div>
+
+<div class="callout">
+  <p><strong>핵심 목적.</strong> 검색은 작은 child로 정밀하게 하고, 답변 생성에는 출처 행과 상위 절 문맥을 함께 제공한다. 원문 문자열·줄바꿈·행 범위를 보존하므로 인용 위치를 재현할 수 있다.</p>
+</div>
+
+<h3>용어표</h3>
+
+<table>
+  <caption>이 문서에서 사용하는 핵심 용어</caption>
+  <thead>
+    <tr><th>용어</th><th>뜻</th><th>이 단계에서의 역할</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>DTO</th><td>Data Transfer Object, 계층 사이에서 값을 전달하는 불변 구조</td><td><code>ParsedSection</code>, <code>ChunkDraft</code>처럼 결과 계약을 고정한다.</td></tr>
+    <tr><th>물리 행</th><td>CR, LF, CRLF로 나뉜 실제 원문 행</td><td>1부터 시작하는 포함 범위로 인용 좌표를 보존한다.</td></tr>
+    <tr><th>Parent</th><td>제목으로 구분된 상위 Markdown 절 또는 그 주변 문맥</td><td>답변 생성에 충분한 주변 근거를 제공한다.</td></tr>
+    <tr><th>Child</th><td>검색·임베딩에 쓰는 작은 원문 조각</td><td>정밀 검색 후보가 되며 ordinal과 해시를 가진다.</td></tr>
+    <tr><th>atomic block</th><td>가능하면 한 덩어리로 보존하는 표·목록·인용문</td><td>행이나 항목 의미가 잘리지 않도록 최대 800 token까지 보존한다.</td></tr>
+    <tr><th>deterministic</th><td>같은 입력과 설정이면 순서·경계·해시가 항상 같음</td><td>증분 색인, 재현, content reuse의 전제가 된다.</td></tr>
+  </tbody>
+</table>
+
+<h3>한눈에 보는 처리 흐름</h3>
+
+<table>
+  <caption>원문에서 검색 근거까지의 변환</caption>
+  <thead>
+    <tr><th>순서</th><th>입력</th><th>처리</th><th>출력</th><th>소비 목적</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>1</th><td>commit SHA + Markdown bytes</td><td>UTF-8 원문과 occurrence metadata 추출</td><td><code>DocumentMetadata</code></td><td>현재본·확정본·소유 영역 판정</td></tr>
+    <tr><th>2</th><td>정확한 Markdown 문자열</td><td>heading token, block token, 물리 행 map 구성</td><td><code>ParsedMarkdown</code></td><td>계층·행·원문 구조 보존</td></tr>
+    <tr><th>3</th><td><code>ParsedSection</code> + tokenizer identity + 설정</td><td>normal/atomic 분할, heading prefix, overlap</td><td><code>ChunkDraft[]</code></td><td>검색·임베딩·저장</td></tr>
+    <tr><th>4</th><td>검색 적중 child + ordinal</td><td>원문 재파싱, 위치 재구성, 주변 block 확장</td><td><code>ParentContext</code></td><td>Agent에 최소 충분 근거 전달</td></tr>
+  </tbody>
+</table>
+
+<h2>Part 1 · Markdown 계층·메타데이터 parser</h2>
+
+<h3>역할: 문법 해석과 출처 좌표를 한 계약으로 묶는다</h3>
+
+<p>
+  <code>MarkdownItParser</code>는 CommonMark와 표(table)를 읽어 제목 단위 section과
+  block tree를 만든다. 단순히 렌더링용 HTML을 만드는 parser가 아니다. 각 결과에
+  <strong>부모 section ordinal, 전체 heading path, 원문 body, 1-based 물리 행 범위,
+  block별 정확한 raw slice</strong>를 함께 넣는다. 따라서 후속 chunker는 Markdown을
+  추측해 다시 자르지 않고 구조와 원문 좌표를 그대로 소비할 수 있다.
+</p>
+
+<p>
+  문서 occurrence metadata는 별도 함수 <code>extract_metadata()</code>가 담당한다.
+  “같은 내용”이라도 <code>docs</code>와 <code>uiux</code>, 현재 경로와
+  <code>versions</code> 경로는 소유·버전 범위가 다르므로 metadata는 내용 해시가 아니라
+  <strong>source path occurrence</strong>에 붙는다.
+</p>
+
+<h3>실제 데이터 좌표</h3>
+
+<table>
+  <caption>보고서의 실제 OMF 근거</caption>
+  <tbody>
+    <tr><th>OMF commit</th><td><code>3745ad840d4db5c4a5a0bdb3fff1b4afd2251946</code></td></tr>
+    <tr><th>source path</th><td><code>docs/research/2026-07-04-현장검증-QA-확정기록.md</code></td></tr>
+    <tr><th>접근 방식</th><td><code>git show &lt;SHA&gt;:&lt;path&gt;</code> — 작업 트리를 읽거나 수정하지 않음</td></tr>
+    <tr><th>범위 적합성</th><td><code>docs/research/**/*.md</code> 포함 규칙에 해당, <code>docs/raw/**</code> 아님</td></tr>
+    <tr><th>실측</th><td>119개 물리 행, 12개 parsed section</td></tr>
+  </tbody>
+</table>
+
+<p><strong>실제 원문 발췌 — 물리 행 1~3, 8~12.</strong> 아래는 위 commit의 blob에서 직접 읽은 두 구간이다.</p>
+
+<pre><code> 1  # 현장검증 질문지 Q&amp;A 확정 기록 — CTO 문답 (2026-07-04)
+ 2
+ 3  &gt; 정리일: 2026-07-04 (v1.1 — 2026-07-06 추가 문답 #36 반영) · 작성 주체: CREFLE OMF 팀
+    …
+ 8  ---
+ 9
+10  ## 1. 설계 결정 전환 (질문 목록에서 제외 — CREFLE 내부 설계로 이관)
+11
+12  현장·고객 확인이 아니라 CREFLE 설계 재량으로 결정할 사안으로 합의(2026-07-04):</code></pre>
+
+<div class="callout callout-warning">
+  <p><strong>발췌 원칙.</strong> 보이는 행은 원문 그대로이고, 가운데 생략만 <code>…</code>로 표시했다. 실제 실행과 수치는 위 SHA의 원본 blob 전체에서 생성했다.</p>
+</div>
+
+<h3>parser가 실제로 하는 일</h3>
+
+<ol>
+  <li><code>split_physical_lines()</code>가 CR, LF, CRLF만 경계로 삼고 줄 끝을 보존한다. 다시 이어 붙이면 입력과 정확히 같다.</li>
+  <li><code>markdown-it-py</code>를 <code>commonmark + table</code>로 실행해 token stream을 만든다.</li>
+  <li>최상위 <code>heading_open</code> token만 section 경계로 사용한다. 인용문·목록·코드 안의 <code>#</code>는 제목 section을 만들지 않는다.</li>
+  <li>heading level stack에서 현재보다 높거나 같은 level을 제거한 뒤 남은 마지막 항목을 parent로 삼는다. heading text가 반복돼도 ordinal로 부모를 식별한다.</li>
+  <li>각 section body는 “현재 heading 직후부터 다음 heading 직전”까지의 원문 slice다. 제목 전 비공백 preamble이 있으면 level 0 synthetic root를 만든다.</li>
+  <li>paragraph, blockquote, list, list item, fenced code, table, table row 등의 token map을 중첩 block tree로 바꾼다.</li>
+  <li>token이 덮지 않은 행도 버리지 않고 <code>blank</code> 또는 <code>raw</code> block으로 채운다. 그래서 section의 block raw text를 순서대로 합치면 body와 정확히 같다.</li>
+</ol>
+
+<h3>실제 제목 계층 결과</h3>
+
+<table>
+  <caption>현재 코드가 실제 OMF blob에서 만든 첫 section 6개</caption>
+  <thead>
+    <tr><th>ordinal / parent / level</th><th>heading path</th><th>물리 행</th><th>top-level blocks</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="num">0 / — / 1</td><td>현장검증 질문지 Q&amp;A 확정 기록…</td><td class="num">1~9</td><td>blank, blockquote, blank, thematic_break, blank</td></tr>
+    <tr><td class="num">1 / 0 / 2</td><td>… / 1. 설계 결정 전환…</td><td class="num">10~18</td><td>blank, paragraph, blank, bullet_list, paragraph, blank</td></tr>
+    <tr><td class="num">2 / 0 / 2</td><td>… / 2. 문답 기록…</td><td class="num">19~59</td><td>blank, table, blank</td></tr>
+    <tr><td class="num">3 / 2 / 3</td><td>… / 2. 문답 기록… / 2.1 추가 문답…</td><td class="num">60~66</td><td>blank, table, blank</td></tr>
+    <tr><td class="num">4 / 0 / 2</td><td>… / 3. 종합 — 확정된 설계 지도</td><td class="num">67~68</td><td>blank</td></tr>
+    <tr><td class="num">5 / 4 / 3</td><td>… / 3. 종합… / 3.1 정본(소유) 지도 최종</td><td class="num">69~77</td><td>blank, table, blank</td></tr>
+  </tbody>
+</table>
+
+<h3>메타데이터 구조와 보수적 추출 규칙</h3>
+
+<p><code>DocumentMetadata</code>는 다섯 필드만 가진다.</p>
+
+<table>
+  <caption>occurrence metadata 필드와 추출 우선순위</caption>
+  <thead>
+    <tr><th>필드</th><th>타입</th><th>승인된 신호와 우선순위</th></tr>
+  </thead>
+  <tbody>
+    <tr><th><code>document_date</code></th><td><code>date | None</code></td><td>상위 40행의 top-level <code>작성일: YYYY-MM-DD</code> 또는 2열 표 → 없으면 파일명 시작 날짜</td></tr>
+    <tr><th><code>version</code></th><td><code>str | None</code></td><td>top-level <code>버전: vN(.N)*</code> 또는 2열 표 → 없으면 파일명의 독립된 <code>vN(.N)*</code> token</td></tr>
+    <tr><th><code>version_scope</code></th><td><code>VersionScope</code></td><td>경로 segment에 <code>versions</code>가 있으면 historical, 아니면 current</td></tr>
+    <tr><th><code>decision_state</code></th><td><code>DecisionState</code></td><td>파일명의 <code>확정기록</code>/<code>결정서</code>, 구조화된 상태·신뢰도, 파일명·첫 제목의 초안 marker를 결합</td></tr>
+    <tr><th><code>owner_domain</code></th><td><code>OwnerDomain</code></td><td>첫 경로 segment가 <code>docs</code>면 docs, <code>uiux</code>면 uiux</td></tr>
+  </tbody>
+</table>
+
+<p>
+  metadata는 “그럴듯한 문자열”을 넓게 훑지 않는다. code fence, HTML comment,
+  blockquote, list, inline code 안의 <code>작성일:</code>·<code>버전:</code>·<code>상태:</code>는
+  문서 본문 예시일 수 있으므로 신호에서 제외한다. top-level paragraph와 실제 delimiter가
+  있는 top-level table의 첫 두 cell만 구조화 값으로 읽는다. 유효한 확정 신호와 초안 신호가
+  동시에 있거나 둘 다 없으면 임의 선택하지 않고 <code>unknown</code>이다.
+</p>
+
+<h3>실제 최종 결과물</h3>
+
+<p><strong>관찰값.</strong> 같은 blob을 현재 코드로 두 번 파싱해 동등함을 확인한 뒤 얻은 축약 JSON이다.</p>
+
+<pre><code>{
+  "parser_version": "markdown-it-py-4.2.0-omf-v1",
+  "physical_line_count": 119,
+  "metadata": {
+    "document_date": "2026-07-04",
+    "version": null,
+    "version_scope": "current",
+    "decision_state": "confirmed",
+    "owner_domain": "docs"
+  },
+  "section_count": 12,
+  "section_2": {
+    "ordinal": 2,
+    "parent_ordinal": 0,
+    "level": 2,
+    "heading_path": ["현장검증 질문지 Q&amp;A 확정 기록…", "2. 문답 기록…"],
+    "lines": [19, 59],
+    "body_characters": 6758,
+    "block_kinds": ["blank", "table", "blank"]
+  }
+}</code></pre>
+
+<div class="callout">
+  <p><strong>왜 <code>version</code>이 null인가?</strong> 원문 3행의 <code>v1.1</code>은 blockquote 안에 있어 metadata 신호에서 의도적으로 제외되고, 파일명에도 승인된 독립 version token이 없다. 반면 날짜와 확정 상태는 파일명 <code>2026-07-04-…-확정기록.md</code>에서 명시적으로 얻는다. 이는 누락이 아니라 보수적 설계의 실제 결과다.</p>
+</div>
+
+<h3>DTO의 목적</h3>
+
+<ul>
+  <li><code>ParsedMarkdown</code>: parser behavior를 <code>parser_version</code>으로 식별하고 순서가 고정된 section tuple을 제공한다.</li>
+  <li><code>ParsedSection</code>: 제목 계층과 상위 관계, 정확한 body, 물리 행, block tree를 한 단위로 묶는다.</li>
+  <li><code>ParsedBlock</code>: table row·list item 같은 atomic 경계를 raw source slice와 함께 전달한다.</li>
+  <li><code>DocumentMetadata</code>: 현재본 우선, 확정본 우선, docs/uiux 소유권과 같은 후속 검색 정책의 typed input이 된다.</li>
+  <li>모든 컨테이너는 frozen·tuple 기반이고 범위와 exact type을 검증한다. 파싱 후 값이 바뀌어 색인 좌표가 흔들리는 일을 막는다.</li>
+</ul>
+
+<h2>Part 2 · 결정론적 Parent–Child chunker와 ParentContext</h2>
+
+<h3>입력 계약</h3>
+
+<p>chunker는 raw Markdown 전체가 아니라 parser가 만든 section 하나와 tokenizer의 정확한 정체성을 받는다.</p>
+
+<table>
+  <caption>핵심 입력과 실제 실습값</caption>
+  <thead>
+    <tr><th>입력</th><th>핵심 값</th><th>역할</th></tr>
+  </thead>
+  <tbody>
+    <tr><th><code>ParsedSection</code></th><td>ordinal 2, path 2단, lines 19~59, body 6,758자, blocks blank/table/blank</td><td>원문·계층·block 경계 제공</td></tr>
+    <tr><th><code>ParsedBlock</code></th><td>table lines 21~58, descendant <code>table_row</code></td><td>atomic unit을 row 경계로 분리</td></tr>
+    <tr><th><code>ChunkConfig</code></th><td>400 / 600 / 64 / 800 / 1200</td><td>target / soft max / overlap / atomic max / parent max</td></tr>
+    <tr><th><code>TokenizerDescriptor</code></th><td><code>practice/character-counter</code>, revision <code>report-v1</code>, special token false</td><td>token 경계를 만드는 정확한 동작을 config hash에 포함</td></tr>
+    <tr><th><code>TokenCounter</code></th><td>실습에서는 문자 1개 = token 1개와 같은 offset</td><td><code>encode()</code>와 source-backed <code>offsets()</code> 제공</td></tr>
+    <tr><th><code>parser_version</code></th><td><code>markdown-it-py-4.2.0-omf-v1</code></td><td>chunk hash와 ParentContext 재구성 계약 고정</td></tr>
+  </tbody>
+</table>
+
+<div class="callout callout-warning">
+  <p><strong>중요.</strong> 실습 counter는 알고리즘을 로컬에서 투명하게 관찰하기 위한 fake다. 400자가 Qwen tokenizer의 400 token이라는 뜻은 아니다. 운영 tokenizer adapter는 다음 구현 단계의 대상이다.</p>
+</div>
+
+<h3>normal text 분할</h3>
+
+<ol>
+  <li>heading path를 줄바꿈으로 연결하고 끝에 줄바꿈을 붙여 <code>heading_prefix</code>를 만든다. 이 prefix는 <code>search_text</code>에만 들어가며 <code>raw_text</code>에는 섞이지 않는다.</li>
+  <li>전체 <code>heading_prefix + body</code>가 600 token 이하면 child 하나다.</li>
+  <li>길면 paragraph, fenced code, HTML 등 normal block을 400 target에 맞춰 묶는다. heading이 길어 target budget이 부족한 경우 600 soft window를 사용한다.</li>
+  <li>한 normal block이 너무 길면 tokenizer offset에서 자른다. 다음 child는 이전 child의 최대 64 token suffix를 이어받는다.</li>
+  <li>경계 재토큰화 때문에 예상보다 token이 늘 수 있으므로 실제 <code>heading_prefix + slice</code>를 다시 세고, bounded probe 안에서 안전한 경계를 찾는다.</li>
+</ol>
+
+<p><strong>repository verification fixture 관찰값.</strong> <code>tests/fixtures/markdown/long-section.md</code>의 “색인 검증 / 긴 절” section은 1,008자짜리 paragraph다.</p>
+
+<table>
+  <caption>long-section.md의 실제 normal child 결과</caption>
+  <thead>
+    <tr><th>ordinal</th><th>원문 행</th><th>raw 문자</th><th>search token</th><th>chunk hash</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="num">0</td><td class="num">5~5</td><td class="num">390</td><td class="num">400</td><td><code>93f13e39…b0c5</code></td></tr>
+    <tr><td class="num">1</td><td class="num">5~5</td><td class="num">390</td><td class="num">400</td><td><code>23c2aff7…afac</code></td></tr>
+    <tr><td class="num">2</td><td class="num">5~5</td><td class="num">356</td><td class="num">366</td><td><code>b4ce85e9…5f56</code></td></tr>
+  </tbody>
+</table>
+
+<p>
+  prefix는 10 token이고 각 앞 child의 raw suffix 64자가 다음 child의 시작과 같다.
+  첫 child에 다음 두 child의 중복 64자를 한 번씩 제거해 이어 붙이면 section body
+  1,008자와 정확히 같다. 스크립트는 이 복원을 assertion으로 검증한다.
+</p>
+
+<h3>table·list·quote atomic 분할</h3>
+
+<p>
+  표·목록·인용문은 문장 수보다 구조적 단위가 중요하다. 전체 block이
+  <code>heading_prefix</code>를 포함해 800 token 이하면 그대로 한 child로 보존한다.
+  넘으면 표는 <code>table_row</code>, 목록은 top-level <code>list_item</code>, 인용문은
+  child block 경계를 atomic unit으로 삼아 가능한 만큼 묶는다. atomic block의 바깥쪽
+  whitespace-only 행만 제거하고 내부 공백은 보존한다.
+</p>
+
+<p>
+  단일 row/item이 그 자체로 800 token을 넘을 때만 tokenizer offset으로 강제 분할하고
+  <code>oversized_atomic_unit_token_split</code> warning을 붙인다. warning에는 안전한
+  <code>block_kind</code>와 물리 행 범위만 들어가고 원문은 들어가지 않는다.
+</p>
+
+<p><strong>실제 OMF 관찰값.</strong> 위 문서 section 2의 6,756자 table은 row 경계를 보존해 11개 child로 분할됐다. 모든 row unit이 한계 안에 들어 warning은 0개였다.</p>
+
+<table>
+  <caption>실제 OMF table atomic child 결과</caption>
+  <thead>
+    <tr><th>ordinal</th><th>원문 행</th><th>raw 문자</th><th>search token</th><th>warning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="num">0</td><td class="num">21~25</td><td class="num">663</td><td class="num">731</td><td>없음</td></tr>
+    <tr><td class="num">1</td><td class="num">26~27</td><td class="num">544</td><td class="num">612</td><td>없음</td></tr>
+    <tr><td class="num">2</td><td class="num">28~30</td><td class="num">713</td><td class="num">781</td><td>없음</td></tr>
+    <tr><td class="num">3</td><td class="num">31~34</td><td class="num">660</td><td class="num">728</td><td>없음</td></tr>
+    <tr><td class="num">4</td><td class="num">35~37</td><td class="num">647</td><td class="num">715</td><td>없음</td></tr>
+    <tr><td class="num">5</td><td class="num">38~40</td><td class="num">626</td><td class="num">694</td><td>없음</td></tr>
+    <tr><td class="num">6</td><td class="num">41~45</td><td class="num">621</td><td class="num">689</td><td>없음</td></tr>
+    <tr><td class="num">7</td><td class="num">46~49</td><td class="num">597</td><td class="num">665</td><td>없음</td></tr>
+    <tr><td class="num">8</td><td class="num">50~52</td><td class="num">679</td><td class="num">747</td><td>없음</td></tr>
+    <tr><td class="num">9</td><td class="num">53~56</td><td class="num">707</td><td class="num">775</td><td>없음</td></tr>
+    <tr><td class="num">10</td><td class="num">57~58</td><td class="num">299</td><td class="num">367</td><td>없음</td></tr>
+  </tbody>
+</table>
+
+<h3><code>ChunkDraft</code>: 검색과 재현을 함께 위한 결과</h3>
+
+<table>
+  <caption>child 결과 필드</caption>
+  <thead>
+    <tr><th>필드</th><th>내용</th><th>목적</th></tr>
+  </thead>
+  <tbody>
+    <tr><th><code>ordinal</code></th><td>section 안에서 0부터 빠짐없이 증가</td><td>순서와 반복 occurrence 위치 식별</td></tr>
+    <tr><th><code>raw_text</code></th><td>정확한 연속 원문 slice</td><td>인용과 ParentContext 위치 재구성</td></tr>
+    <tr><th><code>search_text</code></th><td>heading prefix + raw text</td><td>작은 조각도 제목 의미를 잃지 않게 검색·임베딩</td></tr>
+    <tr><th><code>token_count</code></th><td>search text의 실제 token 수</td><td>설정 한계 검증</td></tr>
+    <tr><th><code>line_start/end</code></th><td>1-based inclusive 원문 행</td><td>근거 인용 좌표</td></tr>
+    <tr><th><code>chunk_hash</code></th><td>parser version, config identity, heading path, 행, raw/search text의 SHA-256</td><td>결정론적 식별·변경 감지·재사용</td></tr>
+    <tr><th><code>warnings</code></th><td>강제 atomic 분할의 안전한 metadata tuple</td><td>품질·운영 관찰</td></tr>
+  </tbody>
+</table>
+
+<p>
+  config identity hash에는 chunker version, 다섯 token 설정, tokenizer 모델·revision·library·
+  special-token 정책이 모두 포함된다. 이번 실습값의 실제 hash는
+  <code>9dc570981f9d1fbe0df2f9232655852f5349a5651550b61a0818e76d3ef2fc53</code>다.
+  tokenizer나 경계 설정 하나가 바뀌면 같은 원문이라도 다른 구성으로 취급한다.
+</p>
+
+<h3>ParentContext: 적중 child를 원문 문맥으로 되돌린다</h3>
+
+<ol>
+  <li>저장된 section body를 같은 parser로 다시 파싱하고 <code>parser_version</code>, synthetic root, block coverage가 정확한지 확인한다.</li>
+  <li><code>matched_ordinal</code>이 있으면 같은 config로 child를 다시 만들고 ordinal의 raw text·행·source offset이 저장된 child와 모두 같은지 검증한다.</li>
+  <li>section body 전체가 1,200 token 이하면 그대로 반환한다.</li>
+  <li>더 크면 적중 행과 교차하는 top-level block을 seed로 잡고, 가까운 block을 앞쪽 우선 동률 규칙으로 추가한다. 왼쪽이 안 맞으면 오른쪽도 시도한다.</li>
+  <li>seed block 자체가 1,200 token보다 크면 tokenizer offset을 이용해 정확한 match 주변의 가장 넓은 연속 window를 선택한다.</li>
+  <li>결과는 heading prefix가 없는 원문 연속 slice와 절대 행 범위다.</li>
+</ol>
+
+<p><strong>실제 OMF 관찰값.</strong> table child ordinal 5는 원문 38~40행이다. 같은 ordinal로 만든 context는 원문 36~42행, 정확히 1,200 token이고 child 원문을 포함한다.</p>
+
+<pre><code>{
+  "matched_child": {
+    "ordinal": 5,
+    "lines": [38, 40],
+    "token_count": 694,
+    "raw_characters": 626
+  },
+  "parent_context": {
+    "lines": [36, 42],
+    "token_count": 1200,
+    "contains_exact_child": true
+  }
+}</code></pre>
+
+<div class="callout">
+  <p><strong><code>matched_ordinal</code>이 필요한 이유.</strong> 긴 한 행에 같은 문자열이 여러 번 나오거나 서로 다른 위치의 child가 raw text·행·해시까지 같을 수 있다. ordinal이 실제 분할 순서의 위치를 지정하므로 첫 번째 문자열을 임의로 고르는 오류를 막는다. ordinal이 없고 위치가 모호하면 builder는 안전하게 실패한다.</p>
+</div>
+
+<h2>Part 3 · 직접 실행하는 Python 실습</h2>
+
+<h3>준비 사항</h3>
+
+<ul>
+  <li>현재 <code>omf-retrieval</code> 저장소 root에서 실행한다.</li>
+  <li>프로젝트 가상환경 <code>.venv</code>와 현재 source package가 준비돼 있어야 한다.</li>
+  <li>실제 OMF 실습은 저장소 blob을 <code>git show</code> argv로 읽기만 한다. checkout, 파일 쓰기, 네트워크, DB, GPU가 필요 없다.</li>
+  <li>두 스크립트는 모두 결과 JSON을 출력하며 내부 assertion 실패 시 0이 아닌 exit code로 종료한다.</li>
+</ul>
+
+<h3>실습 코드</h3>
+
+<table>
+  <caption>실행 가능한 companion Python 파일</caption>
+  <thead>
+    <tr><th>파일</th><th>실습 내용</th><th>주요 assertion</th></tr>
+  </thead>
+  <tbody>
+    <tr><th><a href="./examples/parser_practice.py"><code>parser_practice.py</code></a></th><td>안전한 git blob 읽기, metadata 추출, section·block tree JSON 출력</td><td>두 번 parse 결과 동일, ordinal 연속, 모든 body를 block raw slice로 정확히 복원</td></tr>
+    <tr><th><a href="./examples/chunker_context_practice.py"><code>chunker_context_practice.py</code></a></th><td>character counter, 기본 config, normal/atomic child, matched ordinal context</td><td>결정성, source-backed 행, token limit, fixture overlap 복원, context 포함·한계</td></tr>
+  </tbody>
+</table>
+
+<p>HTML이 설명 정본이고, 위 링크는 정본과 같은 commit에 두는 실행 가능한 실습 부속물이다. 전체 코드는 링크된 파일에서 확인한다.</p>
+
+<h3>실습 A · repository fixture로 parser 관찰</h3>
+
+<pre><code>PYTHONPATH=src .venv/bin/python \
+  docs/reports/examples/parser_practice.py \
+  --fixture \
+  --max-sections 6</code></pre>
+
+<p><strong>관찰할 것.</strong> <code>block-structure.md</code> 안의 fenced code·indented code·blockquote·list 속 <code>#</code>는 section heading이 되지 않는다. 결과 section은 “Visible”과 그 자식 “End” 두 개이며, 첫 body의 block kind에는 <code>fenced_code</code>, <code>blockquote</code>, <code>bullet_list</code>, <code>table</code>이 모두 나타난다.</p>
+
+<h3>실습 B · 실제 OMF parser와 metadata</h3>
+
+<pre><code>PYTHONPATH=src .venv/bin/python \
+  docs/reports/examples/parser_practice.py \
+  --repo /Users/rangkim/projects/crefle/ohmyfactory/apps/omf \
+  --commit 3745ad840d4db5c4a5a0bdb3fff1b4afd2251946 \
+  --path 'docs/research/2026-07-04-현장검증-QA-확정기록.md' \
+  --max-sections 6</code></pre>
+
+<p><strong>예상 핵심값.</strong> <code>physical_line_count=119</code>, <code>section_count=12</code>, date <code>2026-07-04</code>, version <code>null</code>, scope <code>current</code>, state <code>confirmed</code>, owner <code>docs</code>.</p>
+
+<h3>실습 C · 긴 normal section의 overlap 복원</h3>
+
+<pre><code>PYTHONPATH=src .venv/bin/python \
+  docs/reports/examples/chunker_context_practice.py \
+  --fixture \
+  --section 1</code></pre>
+
+<p><strong>예상 핵심값.</strong> child 3개, search token <code>400 / 400 / 366</code>, fixture reconstruction <code>true</code>, 가운데 child의 parent context는 1,008 token이다.</p>
+
+<h3>실습 D · 실제 OMF table atomic 분할과 context</h3>
+
+<pre><code>PYTHONPATH=src .venv/bin/python \
+  docs/reports/examples/chunker_context_practice.py \
+  --repo /Users/rangkim/projects/crefle/ohmyfactory/apps/omf \
+  --commit 3745ad840d4db5c4a5a0bdb3fff1b4afd2251946 \
+  --path 'docs/research/2026-07-04-현장검증-QA-확정기록.md' \
+  --section 2</code></pre>
+
+<p><strong>예상 핵심값.</strong> section block kind는 <code>blank / table / blank</code>, child 11개, warning 없음, 선택 child ordinal 5, parent context lines <code>36~42</code>, token count <code>1200</code>.</p>
+
+<h3>스크립트의 안전한 Git 읽기 핵심</h3>
+
+<pre><code>completed = subprocess.run(
+    ["git", "-C", str(repo.resolve()), "show", f"{commit}:{source_path}"],
+    check=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+source = completed.stdout.decode("utf-8")</code></pre>
+
+<p>
+  shell 문자열이 아니라 argv list를 사용한다. commit은 소문자 40자리 SHA만 받고,
+  path는 절대경로·역슬래시·<code>.</code>·<code>..</code>를 거부하며 승인된 OMF Markdown
+  include scope만 허용한다. 따라서 실습은 명시한 commit의 한 blob을 재현 가능하게
+  읽고 OMF 작업 트리를 수정하지 않는다.
+</p>
+
+<h3>추가 실습 과제</h3>
+
+<ol>
+  <li><code>parser_practice.py</code>의 실제 path를 <code>uiux/**/*.md</code> 문서로 바꾸고 <code>owner_domain</code>이 <code>uiux</code>인지 확인한다.</li>
+  <li><code>docs/planning/versions/OMF-프로젝트-기획서-v1.1.md</code>를 입력해 <code>version_scope=historical</code>과 filename version을 관찰한다.</li>
+  <li>fixture 복사본을 만들지 말고 기존 <code>block-structure.md</code>의 JSON에서 table row, list item, nested quote의 line range를 찾아본다.</li>
+  <li>실습 스크립트의 <code>ChunkConfig</code>를 코드에서 임시로 300/500/64/800/1200으로 바꾸고 config identity hash와 child 경계가 함께 달라지는지 확인한 뒤 변경을 되돌린다.</li>
+  <li>동일한 한 행에 반복 문자열이 있는 작은 로컬 입력을 별도 실험해 <code>matched_ordinal</code>이 있을 때와 없을 때의 차이를 확인한다.</li>
+</ol>
+
+<h2>한계와 다음 단계</h2>
+
+<div class="callout callout-warning">
+  <p><strong>이 보고서가 검증하지 않는 것.</strong> Qwen tokenizer의 실제 token 수, GPU embedding 품질, DB 저장, 하이브리드 검색 순위, 운영 성능은 범위 밖이다. character counter의 수치는 알고리즘 학습용이며 모델 성능 수치가 아니다.</p>
+</div>
+
+<ul>
+  <li>실제 OMF 근거는 작성 당시 commit 하나에 고정됐다. 이후 문서가 바뀌어도 이 보고서의 출력은 SHA로 재현된다.</li>
+  <li>현재 OMF 작업 트리에 untracked 파일이 있어도 <code>git show &lt;SHA&gt;:&lt;path&gt;</code> 결과에는 영향을 주지 않는다.</li>
+  <li>metadata는 명시 신호만 인정하므로 blockquote에만 version이 있으면 <code>null</code>이 정상이다. 필요하다면 원문 metadata 표준을 별도 설계 결정으로 다뤄야 한다.</li>
+  <li>다음 개발 단계는 운영 tokenizer와 embedding provider다. 그 단계에서 Qwen token 기준으로 chunk 크기 적합성을 별도 검증한다.</li>
+</ul>
+
+<h2>개정 이력</h2>
+
+<table>
+  <caption>개정 이력</caption>
+  <thead>
+    <tr><th>버전</th><th>날짜</th><th>변경</th><th>작성자</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>v1.0</th><td>2026-08-20</td><td>실제 OMF parser·chunker 출력과 독립 실행 실습 코드로 최초 작성</td><td>CREFLE inc. CTO 김정규</td></tr>
+  </tbody>
+</table>
+
+<!-- ══ 각주 ══════════════════════════════════════════════════════════════
+     Chromium 은 페이지 하단 각주(CSS GCPM float:footnote)를 지원하지 않습니다.
+     문서 끝 미주로 씁니다. 본문에서는 <a class="fn-ref" href="#fn1">1</a> 로 참조. -->
+<section class="footnotes">
+  <h2>근거와 재현 좌표</h2>
+  <ol>
+    <li id="fn1">OMF 원문: repository <code>/Users/rangkim/projects/crefle/ohmyfactory/apps/omf</code>, commit <code>3745ad840d4db5c4a5a0bdb3fff1b4afd2251946</code>, path <code>docs/research/2026-07-04-현장검증-QA-확정기록.md</code>, 실제 발췌 행 1~3·8~12, parser/chunker 실행 대상은 전체 blob.</li>
+    <li id="fn2">구현 기준 commit: <code>omf-retrieval</code> <code>d2683595d087717549f42f52b8af6a740e2f0cf3</code>.</li>
+    <li id="fn3">Markdown parser 핵심: <code>src/omf_retrieval/infrastructure/source/markdown.py</code> 60~234행. DTO: <code>src/omf_retrieval/application/indexing/ports.py</code> 362~530행.</li>
+    <li id="fn4">metadata extractor: <code>src/omf_retrieval/application/indexing/metadata.py</code> 300~542행. DTO: <code>src/omf_retrieval/domain/models.py</code> 38~55행.</li>
+    <li id="fn5">chunker·ParentContext 핵심: <code>src/omf_retrieval/infrastructure/source/chunker.py</code> 80~838행. config·draft·warning·context 계약: <code>src/omf_retrieval/application/indexing/ports.py</code> 48~234행.</li>
+    <li id="fn6">검증 fixture: <code>tests/fixtures/markdown/block-structure.md</code>, <code>tests/fixtures/markdown/long-section.md</code>. 관련 단위 테스트: <code>tests/unit/source/test_markdown_parser.py</code>, <code>test_chunker.py</code>, <code>test_parent_context.py</code>, <code>tests/unit/indexing/test_metadata.py</code>.</li>
+    <li id="fn7">실습 부속물: <code>docs/reports/examples/parser_practice.py</code>, <code>docs/reports/examples/chunker_context_practice.py</code>. 두 파일은 현재 public API만 호출하며 OMF에는 쓰지 않는다.</li>
+    <li id="fn8">사실 표기: “실제 OMF 관찰값”은 실행 JSON, “repository verification fixture”는 저장소 테스트 자료, 알고리즘 설명은 위 구현 source의 동작, 향후 Qwen 검증 필요성은 범위 한계에 근거한 다음 단계다.</li>
+  </ol>
+</section>
+
+<script src="./crefle-doc/crefle-chart.js"></script>
+</body>
+</html>
