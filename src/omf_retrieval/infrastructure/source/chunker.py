@@ -29,6 +29,8 @@ class _Excerpt:
     line_end: int
     warnings: tuple[ChunkWarning, ...] = ()
     line_numbers: tuple[int, ...] = ()
+    source_start: int | None = None
+    source_end: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,11 @@ class ParentContextBuilder:
         self._parse = parser_method
         self._encode, self._offsets = token_counter_methods
         self._config = config
+        self._child_chunker = ParentChildChunker._from_bound_methods(
+            self._encode,
+            self._offsets,
+            config,
+        )
 
     def build(
         self,
@@ -105,6 +112,7 @@ class ParentContextBuilder:
         matched_line_start: int,
         matched_line_end: int,
         parser_version: str,
+        matched_ordinal: int | None = None,
     ) -> ParentContext:
         """Build a source-backed context around one matched child excerpt."""
         if (
@@ -115,6 +123,10 @@ class ParentContextBuilder:
             or type(matched_line_end) is not int
             or matched_line_start < 1
             or matched_line_end < matched_line_start
+            or (
+                matched_ordinal is not None
+                and (type(matched_ordinal) is not int or matched_ordinal < 0)
+            )
             or type(parser_version) is not str
             or not parser_version.strip()
         ):
@@ -147,6 +159,30 @@ class ParentContextBuilder:
         if matched_raw_text not in matched_line_text:
             raise ValueError("Matched source is not present in its line range")
 
+        matched_source_start: int | None = None
+        if matched_ordinal is not None:
+            drafts, excerpts = self._child_chunker._split_drafts_with_excerpts(
+                section,
+                parser_version=parser_version,
+            )
+            if matched_ordinal >= len(drafts):
+                raise ValueError("Matched child ordinal is out of range")
+            draft = drafts[matched_ordinal]
+            located = excerpts[matched_ordinal]
+            if (
+                draft.ordinal != matched_ordinal
+                or draft.raw_text != matched_raw_text
+                or draft.line_start != matched_line_start
+                or draft.line_end != matched_line_end
+                or located.source_start is None
+                or located.source_end is None
+                or located.source_end - located.source_start != len(matched_raw_text)
+                or section.body[located.source_start : located.source_end]
+                != matched_raw_text
+            ):
+                raise ValueError("Matched child does not match reconstructed source")
+            matched_source_start = located.source_start
+
         whole_token_count = self._token_count(section.body)
         if whole_token_count <= self._config.parent_context_max_tokens:
             return ParentContext(
@@ -163,6 +199,7 @@ class ParentContextBuilder:
             matched_line_start=relative_match_start,
             matched_line_end=relative_match_end,
             matched_raw_text=matched_raw_text,
+            matched_source_start=matched_source_start,
         )
         token_count = self._token_count(excerpt.raw_text)
         return ParentContext(
@@ -181,6 +218,7 @@ class ParentContextBuilder:
         matched_line_start: int,
         matched_line_end: int,
         matched_raw_text: str,
+        matched_source_start: int | None,
     ) -> _Excerpt:
         seed_indices = tuple(
             index
@@ -212,13 +250,25 @@ class ParentContextBuilder:
             matched_lines_text = "".join(
                 source_lines[matched_line_start - 1 : matched_line_end]
             )
-            occurrence = _unique_occurrence(matched_lines_text, matched_raw_text)
-            if occurrence is None:
-                raise ValueError("Matched source is ambiguous in its line range")
             block_start = sum(
                 len(line) for line in source_lines[: blocks[left].line_start - 1]
             )
-            matched_start = matched_lines_start + occurrence - block_start
+            if matched_source_start is None:
+                occurrence = _unique_occurrence(matched_lines_text, matched_raw_text)
+                if occurrence is None:
+                    raise ValueError("Matched source is ambiguous in its line range")
+                matched_start = matched_lines_start + occurrence - block_start
+            else:
+                matched_start = matched_source_start - block_start
+                if (
+                    matched_start < 0
+                    or matched_start + len(matched_raw_text) > len(excerpt.raw_text)
+                    or excerpt.raw_text[
+                        matched_start : matched_start + len(matched_raw_text)
+                    ]
+                    != matched_raw_text
+                ):
+                    raise ValueError("Matched child is outside its parser block")
             return self._oversized_block_excerpt(
                 excerpt,
                 matched_start=matched_start,
@@ -297,6 +347,9 @@ class ParentContextBuilder:
             token_limit=limit,
         )
         best = seed_excerpt
+        seed_left, seed_right = expansion_windows[0]
+        best_left = seed_left
+        best_right = seed_right
         for index in candidate_indices:
             left, right = expansion_windows[index]
             candidate = _relative_line_excerpt(
@@ -311,6 +364,34 @@ class ParentContextBuilder:
                 continue
             if len(candidate.raw_text) > len(best.raw_text):
                 best = candidate
+                best_left = left
+                best_right = right
+        while best_left > 0 or best_right + 1 < len(blocks):
+            candidates: list[tuple[int, int, str]] = []
+            if best_left > 0:
+                candidates.append((seed_left - best_left + 1, 0, "left"))
+            if best_right + 1 < len(blocks):
+                candidates.append((best_right - seed_right + 1, 1, "right"))
+            added = False
+            for _, _, side in sorted(candidates):
+                candidate_left = best_left - 1 if side == "left" else best_left
+                candidate_right = best_right + 1 if side == "right" else best_right
+                candidate = _relative_line_excerpt(
+                    source_lines,
+                    body_line_start=body_line_start,
+                    line_start=blocks[candidate_left].line_start,
+                    line_end=blocks[candidate_right].line_end,
+                )
+                if not search_budget.consume(len(candidate.raw_text)):
+                    return best
+                if self._token_count(candidate.raw_text) <= limit:
+                    best = candidate
+                    best_left = candidate_left
+                    best_right = candidate_right
+                    added = True
+                    break
+            if not added:
+                break
         return best
 
     def _oversized_block_excerpt(
@@ -427,10 +508,36 @@ class ParentChildChunker:
         self._config = config
         self._config_hash = chunk_config_identity_hash(config, tokenizer_descriptor)
 
+    @classmethod
+    def _from_bound_methods(
+        cls,
+        encode: Callable[[str], object],
+        offsets: Callable[[str], object],
+        config: ChunkConfig,
+    ) -> "ParentChildChunker":
+        instance = cls.__new__(cls)
+        instance._encode = encode
+        instance._offsets = offsets
+        instance._config = config
+        instance._config_hash = "0" * 64
+        return instance
+
     def split(
         self, section: ParsedSection, *, parser_version: str
     ) -> tuple[ChunkDraft, ...]:
         """Create source-backed children for one parsed Markdown section."""
+        drafts, _ = self._split_drafts_with_excerpts(
+            section,
+            parser_version=parser_version,
+        )
+        return drafts
+
+    def _split_drafts_with_excerpts(
+        self,
+        section: ParsedSection,
+        *,
+        parser_version: str,
+    ) -> tuple[tuple[ChunkDraft, ...], tuple[_Excerpt, ...]]:
         if (
             type(section) is not ParsedSection
             or type(parser_version) is not str
@@ -438,7 +545,7 @@ class ParentChildChunker:
         ):
             raise ValueError("Invalid split input contract")
         if not section.body.strip():
-            return ()
+            return (), ()
 
         heading_prefix = (
             "\n".join(section.heading_path) + "\n" if section.heading_path else ""
@@ -447,6 +554,8 @@ class ParentChildChunker:
             raw_text=section.body,
             line_start=min(block.line_start for block in section.blocks),
             line_end=max(block.line_end for block in section.blocks),
+            source_start=0,
+            source_end=len(section.body),
         )
         if self._token_count(heading_prefix + section.body) <= (
             self._config.soft_max_tokens
@@ -454,7 +563,7 @@ class ParentChildChunker:
             excerpts = (whole_section,)
         else:
             excerpts = self._split_blocks(section.blocks, heading_prefix)
-        return tuple(
+        drafts = tuple(
             self._draft(
                 excerpt,
                 ordinal=ordinal,
@@ -464,22 +573,36 @@ class ParentChildChunker:
             )
             for ordinal, excerpt in enumerate(excerpts)
         )
+        return drafts, excerpts
 
     def _split_blocks(
         self, blocks: tuple[ParsedBlock, ...], heading_prefix: str
     ) -> tuple[_Excerpt, ...]:
         window_limit: int | None = None
         chunks: list[_Excerpt] = []
-        normal_blocks: list[ParsedBlock] = []
-        separator_blocks: list[ParsedBlock] = []
+        normal_blocks: list[_Excerpt] = []
+        separator_blocks: list[_Excerpt] = []
+        source_cursor = 0
         for block in blocks:
+            block_excerpt = _Excerpt(
+                raw_text=block.raw_text,
+                line_start=block.line_start,
+                line_end=block.line_end,
+                source_start=source_cursor,
+                source_end=source_cursor + len(block.raw_text),
+            )
+            source_cursor += len(block.raw_text)
             if not block.raw_text.strip():
                 if normal_blocks:
-                    separator_blocks.append(block)
+                    separator_blocks.append(block_excerpt)
                 continue
             if block.kind not in {"table", "bullet_list", "ordered_list", "blockquote"}:
                 if separator_blocks:
-                    candidate_blocks = (*normal_blocks, *separator_blocks, block)
+                    candidate_blocks = (
+                        *normal_blocks,
+                        *separator_blocks,
+                        block_excerpt,
+                    )
                     candidate_raw = "".join(
                         candidate.raw_text for candidate in candidate_blocks
                     )
@@ -504,7 +627,7 @@ class ParentChildChunker:
                     else:
                         normal_blocks.extend(separator_blocks)
                 separator_blocks.clear()
-                normal_blocks.append(block)
+                normal_blocks.append(block_excerpt)
                 continue
             separator_blocks.clear()
             if normal_blocks:
@@ -512,7 +635,13 @@ class ParentChildChunker:
                     self._split_normal_blocks(tuple(normal_blocks), heading_prefix)
                 )
                 normal_blocks.clear()
-            chunks.extend(self._split_atomic_block(block, heading_prefix))
+            chunks.extend(
+                self._split_atomic_block(
+                    block,
+                    heading_prefix,
+                    source_start=block_excerpt.source_start,
+                )
+            )
         if normal_blocks:
             chunks.extend(
                 self._split_normal_blocks(tuple(normal_blocks), heading_prefix)
@@ -520,10 +649,24 @@ class ParentChildChunker:
         return tuple(chunks)
 
     def _split_atomic_block(
-        self, block: ParsedBlock, heading_prefix: str
+        self,
+        block: ParsedBlock,
+        heading_prefix: str,
+        *,
+        source_start: int | None,
     ) -> tuple[_Excerpt, ...]:
         whole_block = _trim_excerpt_whitespace_lines(
-            _Excerpt(block.raw_text, block.line_start, block.line_end)
+            _Excerpt(
+                block.raw_text,
+                block.line_start,
+                block.line_end,
+                source_start=source_start,
+                source_end=(
+                    source_start + len(block.raw_text)
+                    if source_start is not None
+                    else None
+                ),
+            )
         )
         if not whole_block.raw_text:
             return ()
@@ -534,7 +677,9 @@ class ParentChildChunker:
 
         chunks: list[_Excerpt] = []
         pending: _Excerpt | None = None
-        for unit in _trim_atomic_boundary_units(_atomic_units(block)):
+        for unit in _trim_atomic_boundary_units(
+            _atomic_units(block, source_start=source_start)
+        ):
             if self._token_count(heading_prefix + unit.excerpt.raw_text) > (
                 self._config.atomic_max_tokens
             ):
@@ -607,16 +752,10 @@ class ParentChildChunker:
         return tuple(chunks)
 
     def _split_normal_blocks(
-        self, blocks: tuple[ParsedBlock, ...], heading_prefix: str
+        self, blocks: tuple[_Excerpt, ...], heading_prefix: str
     ) -> tuple[_Excerpt, ...]:
         if len(blocks) == 1:
-            block = blocks[0]
-            excerpt = _Excerpt(
-                raw_text=block.raw_text,
-                line_start=block.line_start,
-                line_end=block.line_end,
-            )
-            chunks, pending = self._split_oversized_normal(excerpt, heading_prefix)
+            chunks, pending = self._split_oversized_normal(blocks[0], heading_prefix)
             return (*chunks, pending)
 
         prefix_tokens = self._token_count(heading_prefix)
@@ -629,12 +768,7 @@ class ParentChildChunker:
         )
         chunks: list[_Excerpt] = []
         pending: _Excerpt | None = None
-        for block in blocks:
-            block_excerpt = _Excerpt(
-                raw_text=block.raw_text,
-                line_start=block.line_start,
-                line_end=block.line_end,
-            )
+        for block_excerpt in blocks:
             if pending is None:
                 pending = block_excerpt
             else:
@@ -1219,6 +1353,8 @@ def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
         line_end=max(first.line_end, second.line_end),
         warnings=first.warnings + second.warnings,
         line_numbers=(*_excerpt_line_numbers(first), *_excerpt_line_numbers(second)),
+        source_start=first.source_start,
+        source_end=second.source_end,
     )
 
 
@@ -1274,7 +1410,9 @@ def _valid_reparsed_root(section: ParsedSection, source: str) -> bool:
     return cursor == len(source_lines) + 1
 
 
-def _atomic_units(block: ParsedBlock) -> tuple[_AtomicUnit, ...]:
+def _atomic_units(
+    block: ParsedBlock, *, source_start: int | None
+) -> tuple[_AtomicUnit, ...]:
     if block.kind == "table":
         boundaries = _descendants(block, "table_row")
     elif block.kind in {"bullet_list", "ordered_list"}:
@@ -1286,7 +1424,17 @@ def _atomic_units(block: ParsedBlock) -> tuple[_AtomicUnit, ...]:
     if not boundaries:
         return (
             _AtomicUnit(
-                excerpt=_Excerpt(block.raw_text, block.line_start, block.line_end),
+                excerpt=_Excerpt(
+                    block.raw_text,
+                    block.line_start,
+                    block.line_end,
+                    source_start=source_start,
+                    source_end=(
+                        source_start + len(block.raw_text)
+                        if source_start is not None
+                        else None
+                    ),
+                ),
                 block_kind=block.kind,
                 warning_line_start=block.line_start,
                 warning_line_end=block.line_end,
@@ -1303,7 +1451,12 @@ def _atomic_units(block: ParsedBlock) -> tuple[_AtomicUnit, ...]:
         )
         units.append(
             _AtomicUnit(
-                excerpt=_slice_excerpt_lines(block, line_start, line_end),
+                excerpt=_slice_excerpt_lines(
+                    block,
+                    line_start,
+                    line_end,
+                    source_start=source_start,
+                ),
                 block_kind=boundary.kind,
                 warning_line_start=boundary.line_start,
                 warning_line_end=boundary.line_end,
@@ -1364,7 +1517,11 @@ def _descendants(block: ParsedBlock, kind: str) -> tuple[ParsedBlock, ...]:
 
 
 def _slice_excerpt_lines(
-    block: ParsedBlock, line_start: int, line_end: int
+    block: ParsedBlock,
+    line_start: int,
+    line_end: int,
+    *,
+    source_start: int | None,
 ) -> _Excerpt:
     physical_lines = split_physical_lines(block.raw_text)
     relative_start = line_start - block.line_start
@@ -1375,6 +1532,8 @@ def _slice_excerpt_lines(
         raw_text=block.raw_text[start:end],
         line_start=line_start,
         line_end=line_end,
+        source_start=(source_start + start if source_start is not None else None),
+        source_end=(source_start + end if source_start is not None else None),
     )
 
 
@@ -1385,6 +1544,8 @@ def _with_warning(excerpt: _Excerpt, warning: ChunkWarning) -> _Excerpt:
         line_end=excerpt.line_end,
         warnings=(warning,),
         line_numbers=excerpt.line_numbers,
+        source_start=excerpt.source_start,
+        source_end=excerpt.source_end,
     )
 
 
@@ -1422,7 +1583,11 @@ def _slice_excerpt_with_line_ends(
     raw_text = excerpt.raw_text[start:end]
     if not raw_text:
         return _Excerpt(
-            raw_text="", line_start=excerpt.line_end, line_end=excerpt.line_end
+            raw_text="",
+            line_start=excerpt.line_end,
+            line_end=excerpt.line_end,
+            source_start=excerpt.source_end,
+            source_end=excerpt.source_end,
         )
 
     line_start_offset = bisect_right(cumulative_ends, start)
@@ -1436,6 +1601,12 @@ def _slice_excerpt_with_line_ends(
         line_end=line_numbers[-1],
         warnings=excerpt.warnings,
         line_numbers=line_numbers,
+        source_start=(
+            excerpt.source_start + start if excerpt.source_start is not None else None
+        ),
+        source_end=(
+            excerpt.source_start + end if excerpt.source_start is not None else None
+        ),
     )
 
 

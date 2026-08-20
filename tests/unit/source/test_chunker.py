@@ -754,6 +754,7 @@ def _assert_child_parent_context_contract(
             matched_line_start=chunk.line_start,
             matched_line_end=chunk.line_end,
             parser_version=parsed.parser_version,
+            matched_ordinal=chunk.ordinal,
         )
         assert chunk.raw_text in context.raw_text
         assert context.token_count <= 1_200
@@ -765,6 +766,7 @@ def _assert_child_parent_context_contract(
             matched_line_start=chunk.line_start,
             matched_line_end=chunk.line_end,
             parser_version=parsed.parser_version,
+            matched_ordinal=chunk.ordinal,
         )
         for chunk in chunks
     )

@@ -4,11 +4,13 @@ import traceback
 from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError, replace
 from importlib import import_module
+from inspect import Parameter, signature
 
 import pytest
 
 from omf_retrieval.application.indexing.ports import (
     ChunkConfig,
+    ChunkDraft,
     ParentContext,
     ParsedMarkdown,
     ParsedSection,
@@ -423,6 +425,32 @@ def _builder(
     )
 
 
+def _descriptor() -> TokenizerDescriptor:
+    return TokenizerDescriptor(
+        model_name="model",
+        revision="revision",
+        library_name="library",
+        library_version="1.0",
+        add_special_tokens=False,
+    )
+
+
+def _build_child_context(
+    builder: ParentContextBuilder,
+    section: ParsedSection,
+    child: ChunkDraft,
+    parser_version: str,
+) -> ParentContext:
+    return builder.build(
+        section,
+        matched_raw_text=child.raw_text,
+        matched_line_start=child.line_start,
+        matched_line_end=child.line_end,
+        parser_version=parser_version,
+        matched_ordinal=child.ordinal,
+    )
+
+
 def test_parent_context_public_api_is_available() -> None:
     """Catch accidental omission of the approved parent-context API."""
     ports = import_module("omf_retrieval.application.indexing.ports")
@@ -444,6 +472,15 @@ def test_parent_context_public_api_is_available() -> None:
     assert context.__slots__ == ("raw_text", "token_count", "line_start", "line_end")
     with pytest.raises(FrozenInstanceError):
         context.token_count = 8
+
+
+def test_parent_context_build_accepts_optional_keyword_only_matched_ordinal() -> None:
+    """Catch omission or positional exposure of the approved child coordinate."""
+    parameter = signature(ParentContextBuilder.build).parameters.get("matched_ordinal")
+
+    assert parameter is not None
+    assert parameter.kind is Parameter.KEYWORD_ONLY
+    assert parameter.default is None
 
 
 @pytest.mark.parametrize(
@@ -560,6 +597,30 @@ def test_context_tries_following_block_when_preceding_block_does_not_fit() -> No
         token_count=14,
         line_start=3,
         line_end=6,
+    )
+
+
+def test_bounded_context_tries_right_when_left_tie_does_not_fit() -> None:
+    """Catch bounded expansion trapping itself behind an oversized left tie."""
+    small_left = "l\n\n" * 20
+    oversized_left = "L" * 1_191 + "\n"
+    body = f"{small_left}{oversized_left}\nmatch\n\nafter\n\n" + "r\n\n" * 20
+    section = _section(f"# H\n{body}")
+
+    context = _builder(limit=14).build(
+        section,
+        matched_raw_text="match\n",
+        matched_line_start=44,
+        matched_line_end=44,
+        parser_version="markdown-it-py-4.2.0-omf-v1",
+    )
+
+    assert len(section.blocks) > 16
+    assert context == ParentContext(
+        raw_text="\nmatch\n\nafter\n",
+        token_count=14,
+        line_start=43,
+        line_end=46,
     )
 
 
@@ -909,6 +970,190 @@ def test_last_multiblock_child_expands_to_nearest_character_parent_boundary() ->
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        "# H\n" + "x" * 4_000 + "\n",
+        "# H\n- " + "x" * 4_000 + "\n",
+    ],
+    ids=["normal", "atomic"],
+)
+def test_repeated_single_block_children_build_context_by_exact_ordinal(
+    source: str,
+) -> None:
+    """Repeated raw/line/hash children must not be rejected as ambiguous."""
+    parser = MarkdownItParser()
+    parsed = parser.parse(source)
+    section = parsed.sections[-1]
+    chunks = ParentChildChunker(_CharacterTokenCounter(), _descriptor()).split(
+        section, parser_version=parsed.parser_version
+    )
+    builder = _builder()
+
+    contexts = tuple(
+        _build_child_context(builder, section, chunk, parsed.parser_version)
+        for chunk in chunks
+    )
+    repeated = tuple(
+        _build_child_context(builder, section, chunk, parsed.parser_version)
+        for chunk in chunks
+    )
+
+    assert contexts == repeated
+    assert len(chunks) > 2
+    assert any(
+        chunks[index].raw_text == chunks[index + 1].raw_text
+        and chunks[index].line_start == chunks[index + 1].line_start
+        and chunks[index].line_end == chunks[index + 1].line_end
+        and chunks[index].chunk_hash == chunks[index + 1].chunk_hash
+        for index in range(len(chunks) - 1)
+    )
+    assert all(
+        chunk.raw_text in context.raw_text
+        for chunk, context in zip(chunks, contexts, strict=True)
+    )
+    assert all(context.token_count <= 1_200 for context in contexts)
+    assert all((context.line_start, context.line_end) == (2, 2) for context in contexts)
+
+    ambiguous = chunks[1]
+    with pytest.raises(ValueError, match="ambiguous"):
+        builder.build(
+            section,
+            matched_raw_text=ambiguous.raw_text,
+            matched_line_start=ambiguous.line_start,
+            matched_line_end=ambiguous.line_end,
+            parser_version=parsed.parser_version,
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "prefix",
+        "first_ordinal",
+        "second_ordinal",
+        "first_start",
+        "second_start",
+        "duplicate_length",
+        "context_radius",
+    ),
+    [
+        ("", 2, 7, 668, 2_338, 398, 401),
+        ("- ", 1, 3, 798, 2_394, 798, 201),
+    ],
+    ids=["normal", "atomic"],
+)
+def test_duplicate_child_ordinals_select_distinct_source_surroundings(
+    prefix: str,
+    first_ordinal: int,
+    second_ordinal: int,
+    first_start: int,
+    second_start: int,
+    duplicate_length: int,
+    context_radius: int,
+) -> None:
+    """An ordinal must anchor identical children at their real source positions."""
+    body_chars = list("a" * 4_000 + "\n")
+    body_chars[: len(prefix)] = prefix
+    duplicate = "p" * duplicate_length
+    for start, left, right in (
+        (first_start, "b", "c"),
+        (second_start, "d", "e"),
+    ):
+        body_chars[start - context_radius : start] = left * context_radius
+        body_chars[start : start + duplicate_length] = duplicate
+        body_chars[
+            start + duplicate_length : start + duplicate_length + context_radius
+        ] = right * context_radius
+    body = "".join(body_chars)
+    parser = MarkdownItParser()
+    parsed = parser.parse(f"# H\n{body}")
+    section = parsed.sections[-1]
+    chunks = ParentChildChunker(_CharacterTokenCounter(), _descriptor()).split(
+        section, parser_version=parsed.parser_version
+    )
+    first = chunks[first_ordinal]
+    second = chunks[second_ordinal]
+    builder = _builder()
+
+    first_context = _build_child_context(builder, section, first, parsed.parser_version)
+    second_context = _build_child_context(
+        builder, section, second, parsed.parser_version
+    )
+
+    assert (first.raw_text, first.line_start, first.line_end, first.chunk_hash) == (
+        second.raw_text,
+        second.line_start,
+        second.line_end,
+        second.chunk_hash,
+    )
+    assert (
+        first_context.raw_text
+        == body[
+            first_start - context_radius : first_start
+            + duplicate_length
+            + context_radius
+        ]
+    )
+    assert (
+        second_context.raw_text
+        == body[
+            second_start - context_radius : second_start
+            + duplicate_length
+            + context_radius
+        ]
+    )
+    assert first_context != second_context
+    assert first_context.token_count == second_context.token_count == 1_200
+    assert (first_context.line_start, first_context.line_end) == (2, 2)
+    assert (second_context.line_start, second_context.line_end) == (2, 2)
+
+
+def test_matched_ordinal_rejects_draft_mismatch_and_range_errors() -> None:
+    """Ordinal reconstruction must fail closed on stale or forged child coordinates."""
+    body = "".join(chr(0xAC00 + index) for index in range(2_000)) + "\n"
+    parser = MarkdownItParser()
+    parsed = parser.parse(f"# H\n{body}")
+    section = parsed.sections[-1]
+    chunks = ParentChildChunker(_CharacterTokenCounter(), _descriptor()).split(
+        section, parser_version=parsed.parser_version
+    )
+    child = chunks[0]
+    wrong_config = ChunkConfig(
+        target_tokens=300,
+        soft_max_tokens=500,
+        overlap_tokens=64,
+        atomic_max_tokens=800,
+        parent_context_max_tokens=1_200,
+    )
+    valid_inputs: dict[str, object] = {
+        "matched_raw_text": child.raw_text,
+        "matched_line_start": child.line_start,
+        "matched_line_end": child.line_end,
+        "parser_version": parsed.parser_version,
+        "matched_ordinal": 0,
+    }
+    cases = (
+        (_builder(), {"matched_raw_text": child.raw_text + "forged"}),
+        (
+            _builder(),
+            {
+                "matched_line_start": child.line_start + 1,
+                "matched_line_end": child.line_end + 1,
+            },
+        ),
+        (_builder(), {"matched_ordinal": 1}),
+        (_builder(), {"matched_ordinal": len(chunks)}),
+        (_builder(config=wrong_config), {}),
+        (_builder(), {"parser_version": "different-parser-v2"}),
+    )
+
+    for builder, changes in cases:
+        inputs = valid_inputs | changes
+        with pytest.raises(ValueError) as caught:
+            builder.build(section, **inputs)  # type: ignore[arg-type]
+        _assert_sanitized(caught.value)
+
+
+@pytest.mark.parametrize(
     ("body", "matched_raw_text", "limit"),
     [
         ("dup xx dup trailing\n", "dup", 5),
@@ -1057,6 +1302,10 @@ def test_setext_section_uses_derived_absolute_body_start() -> None:
         ("matched_line_end", 1),
         ("matched_line_end", True),
         ("matched_line_end", _IntSubclass(2)),
+        ("matched_ordinal", -1),
+        ("matched_ordinal", True),
+        ("matched_ordinal", _IntSubclass(0)),
+        ("matched_ordinal", "0"),
         ("parser_version", ""),
         ("parser_version", " "),
         ("parser_version", _StrSubclass("markdown-it-py-4.2.0-omf-v1")),
@@ -1071,6 +1320,7 @@ def test_build_rejects_non_exact_or_invalid_scalar_inputs(
         "matched_raw_text": "body\n",
         "matched_line_start": 2,
         "matched_line_end": 2,
+        "matched_ordinal": None,
         "parser_version": "markdown-it-py-4.2.0-omf-v1",
     }
     inputs[field] = value
