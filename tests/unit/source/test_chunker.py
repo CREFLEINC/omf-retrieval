@@ -5,6 +5,7 @@ import traceback
 from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError, replace
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +22,9 @@ from omf_retrieval.infrastructure.source.chunker import (
     chunk_config_identity_hash,
 )
 from omf_retrieval.infrastructure.source.markdown import MarkdownItParser
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+LONG_SECTION_FIXTURE = PROJECT_ROOT / "tests/fixtures/markdown/long-section.md"
 
 
 class _IntSubclass(int):
@@ -570,6 +574,46 @@ def test_parent_child_chunker_exposes_the_approved_public_split_api() -> None:
     chunks = _chunker().split(_section("# A\nbody\n"), parser_version="parser-v1")
 
     assert len(chunks) == 1
+
+
+def test_named_long_section_fixture_exercises_source_backed_child_splitting() -> None:
+    """Removing the approved fixture must fail before any file read is attempted."""
+    assert LONG_SECTION_FIXTURE.is_file(), "long-section.md fixture must exist"
+    source = LONG_SECTION_FIXTURE.read_text(encoding="utf-8")
+    parser = MarkdownItParser()
+    parsed = parser.parse(source)
+    section = next(
+        candidate
+        for candidate in parsed.sections
+        if candidate.heading_path == ("색인 검증", "긴 절")
+    )
+    counter = _FakeTokenCounter()
+
+    chunks = _chunker(counter).split(
+        section,
+        parser_version=parsed.parser_version,
+    )
+    repeated = _chunker(counter).split(
+        section,
+        parser_version=parsed.parser_version,
+    )
+    heading_prefix = "색인 검증\n긴 절\n"
+
+    assert len(counter.encode(heading_prefix + section.body)) > 600
+    assert len(chunks) > 1
+    assert chunks == repeated
+    assert all(chunk.search_text.startswith(heading_prefix) for chunk in chunks)
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
+        for chunk in chunks
+    )
+    assert _reconstruct_character_chunks(chunks) == section.body
+    assert all(
+        section.line_start < chunk.line_start <= chunk.line_end <= section.line_end
+        for chunk in chunks
+    )
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+    assert all(re.fullmatch(r"[0-9a-f]{64}", chunk.chunk_hash) for chunk in chunks)
 
 
 @pytest.mark.parametrize("source", ["# Empty\n", "# Blank\n \t\r\n\n"])
