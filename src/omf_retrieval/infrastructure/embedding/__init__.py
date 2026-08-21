@@ -5,5 +5,15 @@ from omf_retrieval.infrastructure.embedding.provider import (
     EmbeddingProvider,
     EmbeddingVector,
 )
+from omf_retrieval.infrastructure.embedding.sentence_transformer import (
+    SentenceTransformerEmbeddingProvider,
+    SentenceTransformerTokenCounter,
+)
 
-__all__ = ["EmbeddingBatch", "EmbeddingProvider", "EmbeddingVector"]
+__all__ = [
+    "EmbeddingBatch",
+    "EmbeddingProvider",
+    "EmbeddingVector",
+    "SentenceTransformerEmbeddingProvider",
+    "SentenceTransformerTokenCounter",
+]
