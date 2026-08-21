@@ -12,24 +12,28 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from omf_retrieval.application.indexing.hashing import canonical_json
-
-MODEL_MANIFEST_SCHEMA = "omf-retrieval.embedding-model-manifest"
-MODEL_MANIFEST_VERSION = 1
-MAX_MODEL_FILE_COUNT = 256
-MAX_MODEL_DIRECTORY_COUNT = MAX_MODEL_FILE_COUNT
-MAX_MODEL_FILE_BYTES = 4 * 1024**3
-MAX_MODEL_TOTAL_BYTES = 8 * 1024**3
-MAX_MODEL_MANIFEST_BYTES = MAX_MODEL_FILE_COUNT * (4096 + 512)
-APPROVED_MODEL_FILE_SUFFIXES = (".json", ".model", ".safetensors", ".txt")
-MODEL_MANIFEST_RELATIVE_PATH = PurePosixPath(
-    ".omf-retrieval/embedding-model-manifest.json"
+from omf_retrieval.infrastructure.embedding.manifest_contract import (
+    MAX_MODEL_FILE_BYTES,
+    MAX_MODEL_FILE_COUNT,
+    MAX_MODEL_MANIFEST_BYTES,
+    MAX_MODEL_TOTAL_BYTES,
+    MODEL_MANIFEST_RELATIVE_PATH,
+    MODEL_MANIFEST_SCHEMA,
+    MODEL_MANIFEST_VERSION,
+    ModelManifestError,
+    is_approved_model_path,
+    is_sha256,
+    require_exact_identity,
+    validated_relative_path,
+    validated_snapshot_coordinate,
 )
+from omf_retrieval.infrastructure.embedding.snapshot_integrity import (
+    PinnedModelSnapshot,
+    pin_model_snapshot,
+    snapshot_files,
+)
+
 _READ_CHUNK_BYTES = 1024 * 1024
-_HEX_DIGITS = frozenset("0123456789abcdef")
-
-
-class ModelManifestError(ValueError):
-    """Report a source-free model-manifest validation failure."""
 
 
 def resolve_embedding_cache_dir(cache_dir: Path | None) -> Path:
@@ -64,14 +68,37 @@ def create_model_manifest(
 ) -> dict[str, Any]:
     """Hash a private regular-file snapshot into a canonical manifest value."""
     try:
-        _require_exact_identity(model_name, revision)
-        cache_root = cache_dir.expanduser().resolve(strict=False)
-        try:
-            snapshot_dir.resolve(strict=True).relative_to(cache_root)
-        except (OSError, ValueError):
-            raise ModelManifestError("Embedding model manifest is invalid") from None
-        coordinate = _validated_snapshot_coordinate(snapshot_coordinate)
-        files = _snapshot_files(snapshot_dir)
+        with pin_model_snapshot(snapshot_dir, cache_dir=cache_dir) as pinned:
+            return create_pinned_model_manifest(
+                pinned,
+                snapshot_coordinate=snapshot_coordinate,
+                model_name=model_name,
+                revision=revision,
+            )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except ModelManifestError:
+        raise
+    except Exception:
+        raise ModelManifestError("Embedding model manifest is invalid") from None
+
+
+def create_pinned_model_manifest(
+    snapshot: PinnedModelSnapshot,
+    *,
+    snapshot_coordinate: str,
+    model_name: str,
+    revision: str,
+) -> dict[str, Any]:
+    """Hash an already-pinned snapshot and reject identity changes around it."""
+    try:
+        require_exact_identity(model_name, revision)
+        coordinate = validated_snapshot_coordinate(snapshot_coordinate)
+        if not snapshot.matches_path():
+            raise ModelManifestError("Embedding model manifest is invalid")
+        files = snapshot_files(snapshot)
+        if not snapshot.matches_path():
+            raise ModelManifestError("Embedding model manifest is invalid")
         payload: dict[str, Any] = {
             "schema": MODEL_MANIFEST_SCHEMA,
             "version": MODEL_MANIFEST_VERSION,
@@ -140,101 +167,6 @@ def verified_model_snapshot(
         return None
 
 
-def _snapshot_files(snapshot_dir: Path) -> list[dict[str, Any]]:
-    root_stat = snapshot_dir.lstat()
-    if not stat.S_ISDIR(root_stat.st_mode) or snapshot_dir.is_symlink():
-        raise ModelManifestError("Embedding model manifest is invalid")
-    files: list[dict[str, Any]] = []
-    canonical_keys: set[str] = set()
-    total_bytes = 0
-    directory_count = 0
-    for directory, directory_names, file_names, directory_fd in os.fwalk(
-        snapshot_dir, topdown=True, follow_symlinks=False
-    ):
-        relative_directory = Path(directory).relative_to(snapshot_dir)
-        directory_names.sort()
-        file_names.sort()
-        for name in directory_names:
-            directory_count += 1
-            if directory_count > MAX_MODEL_DIRECTORY_COUNT:
-                raise ModelManifestError("Embedding model manifest is invalid")
-            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            relative = (relative_directory / name).as_posix()
-            canonical = _validated_relative_path(relative)
-            duplicate_key = unicodedata.normalize("NFC", canonical).casefold()
-            if duplicate_key in canonical_keys:
-                raise ModelManifestError("Embedding model manifest is invalid")
-            canonical_keys.add(duplicate_key)
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ModelManifestError("Embedding model manifest is invalid")
-        for name in file_names:
-            relative = (relative_directory / name).as_posix()
-            canonical = _validated_relative_path(relative)
-            duplicate_key = unicodedata.normalize("NFC", canonical).casefold()
-            if duplicate_key in canonical_keys or not _is_approved_model_path(
-                canonical
-            ):
-                raise ModelManifestError("Embedding model manifest is invalid")
-            canonical_keys.add(duplicate_key)
-            size, digest = _hash_regular_file_at(directory_fd, name)
-            total_bytes += size
-            if total_bytes > MAX_MODEL_TOTAL_BYTES:
-                raise ModelManifestError("Embedding model manifest is invalid")
-            files.append({"path": canonical, "size": size, "sha256": digest})
-            if len(files) > MAX_MODEL_FILE_COUNT:
-                raise ModelManifestError("Embedding model manifest is invalid")
-    if not files:
-        raise ModelManifestError("Embedding model manifest is invalid")
-    return sorted(files, key=lambda item: item["path"])
-
-
-def _hash_regular_file_at(directory_fd: int, name: str) -> tuple[int, str]:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=directory_fd)
-    try:
-        return _hash_open_regular_file(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _hash_open_regular_file(descriptor: int) -> tuple[int, str]:
-    before = os.fstat(descriptor)
-    allocated_bytes = getattr(before, "st_blocks", 0) * 512
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_size > MAX_MODEL_FILE_BYTES
-        or (before.st_size > 0 and allocated_bytes < before.st_size)
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    digest = hashlib.sha256()
-    bytes_read = 0
-    while bytes_read <= before.st_size:
-        chunk = os.read(
-            descriptor,
-            min(_READ_CHUNK_BYTES, before.st_size - bytes_read + 1),
-        )
-        if not chunk:
-            break
-        bytes_read += len(chunk)
-        if bytes_read > before.st_size or bytes_read > MAX_MODEL_FILE_BYTES:
-            raise ModelManifestError("Embedding model manifest is invalid")
-        digest.update(chunk)
-    after = os.fstat(descriptor)
-    stable_fields = (
-        "st_dev",
-        "st_ino",
-        "st_mode",
-        "st_size",
-        "st_mtime_ns",
-        "st_ctime_ns",
-    )
-    if bytes_read != before.st_size or any(
-        getattr(before, field) != getattr(after, field) for field in stable_fields
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    return bytes_read, digest.hexdigest()
-
-
 def _read_manifest_file(path: Path) -> bytes:
     descriptor = os.open(
         path,
@@ -287,14 +219,14 @@ def _validated_manifest_value(value: object) -> dict[str, Any]:
         raise ModelManifestError("Embedding model manifest is invalid")
     if type(model) is not dict or set(model) != {"name", "revision"}:
         raise ModelManifestError("Embedding model manifest is invalid")
-    _require_exact_identity(model["name"], model["revision"])
+    require_exact_identity(model["name"], model["revision"])
     if (
         type(cache) is not dict
         or cache.get("root") != "."
         or set(cache) != {"root", "snapshot"}
     ):
         raise ModelManifestError("Embedding model manifest is invalid")
-    snapshot = _validated_snapshot_coordinate(cache["snapshot"])
+    snapshot = validated_snapshot_coordinate(cache["snapshot"])
     if type(files) is not list or not 1 <= len(files) <= MAX_MODEL_FILE_COUNT:
         raise ModelManifestError("Embedding model manifest is invalid")
     validated_files: list[dict[str, Any]] = []
@@ -303,18 +235,18 @@ def _validated_manifest_value(value: object) -> dict[str, Any]:
     for item in files:
         if type(item) is not dict or set(item) != {"path", "size", "sha256"}:
             raise ModelManifestError("Embedding model manifest is invalid")
-        path = _validated_relative_path(item["path"])
+        path = validated_relative_path(item["path"])
         key = unicodedata.normalize("NFC", path).casefold()
         size = item["size"]
         digest = item["sha256"]
         if (
             key in seen
-            or not _is_approved_model_path(path)
+            or not is_approved_model_path(path)
             or type(size) is not int
             or not 0 <= size <= MAX_MODEL_FILE_BYTES
         ):
             raise ModelManifestError("Embedding model manifest is invalid")
-        if not _is_sha256(digest):
+        if not is_sha256(digest):
             raise ModelManifestError("Embedding model manifest is invalid")
         seen.add(key)
         total += size
@@ -323,7 +255,7 @@ def _validated_manifest_value(value: object) -> dict[str, Any]:
         validated_files.append({"path": path, "size": size, "sha256": digest})
     if validated_files != sorted(validated_files, key=lambda item: item["path"]):
         raise ModelManifestError("Embedding model manifest is invalid")
-    if not _is_sha256(manifest_hash):
+    if not is_sha256(manifest_hash):
         raise ModelManifestError("Embedding model manifest is invalid")
     payload = {
         "schema": schema,
@@ -335,55 +267,6 @@ def _validated_manifest_value(value: object) -> dict[str, Any]:
     if _sha256(canonical_json(payload)) != manifest_hash:
         raise ModelManifestError("Embedding model manifest is invalid")
     return {**payload, "manifest_sha256": manifest_hash}
-
-
-def _validated_relative_path(value: object) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or unicodedata.normalize("NFC", value) != value
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    if "\\" in value or any(ord(character) < 32 for character in value):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    return value
-
-
-def _require_exact_identity(model_name: object, revision: object) -> None:
-    if (
-        type(model_name) is not str
-        or not model_name.strip()
-        or type(revision) is not str
-        or not revision.strip()
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-
-
-def _validated_snapshot_coordinate(value: object) -> str:
-    coordinate = _validated_relative_path(value)
-    parts = PurePosixPath(coordinate).parts
-    if (
-        len(parts) != 3
-        or parts[:2] != (".omf-retrieval", "snapshots")
-        or not _is_sha256(parts[2])
-    ):
-        raise ModelManifestError("Embedding model manifest is invalid")
-    return coordinate
-
-
-def _is_sha256(value: object) -> bool:
-    return type(value) is str and len(value) == 64 and set(value) <= _HEX_DIGITS
-
-
-def _is_approved_model_path(path: str) -> bool:
-    return path.endswith(APPROVED_MODEL_FILE_SUFFIXES)
 
 
 def _sha256(value: bytes) -> str:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import omf_retrieval.infrastructure.embedding.prepare as prepare_module
+import omf_retrieval.infrastructure.embedding.snapshot_integrity as snapshot_module
 from omf_retrieval.infrastructure.embedding.manifest import (
     model_manifest_path,
     verify_model_manifest,
@@ -24,6 +28,10 @@ from omf_retrieval.infrastructure.embedding.sentence_transformer import (
     SentenceTransformerEmbeddingProvider,
 )
 from omf_retrieval.settings import Settings
+
+
+class _PrepareAbort(BaseException):
+    pass
 
 
 def _settings(cache: Path) -> Settings:
@@ -76,6 +84,73 @@ def test_same_snapshot_bytes_produce_same_json_and_hash(tmp_path: Path) -> None:
     first = prepare_embedding_model(settings, downloader=_downloader([]))
     second = prepare_embedding_model(settings, downloader=_downloader([]))
     assert first == second
+
+
+def test_directory_swap_during_final_rehash_never_publishes_invalid_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    snapshots = tmp_path / ".omf-retrieval" / "snapshots"
+    original_hash = snapshot_module._hash_open_regular_file
+    swapped = False
+
+    def swap_after_hash(
+        descriptor: int, *, expected: os.stat_result | None = None
+    ) -> tuple[int, str]:
+        nonlocal swapped
+        result = original_hash(descriptor, expected=expected)
+        children = list(snapshots.iterdir()) if snapshots.exists() else []
+        if children and not swapped:
+            swapped = True
+            final = children[0]
+            final.rename(snapshots / "renamed-original")
+            final.mkdir()
+            (final / "config.json").write_bytes(b'{"replacement":true}')
+            (final / "model.safetensors").write_bytes(b"replacement")
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_hash_open_regular_file", swap_after_hash)
+    with pytest.raises(ModelPrepareError, match="preparation failed"):
+        prepare_embedding_model(settings, downloader=_downloader([]))
+    assert swapped is True
+    assert not model_manifest_path(tmp_path).exists()
+
+
+def test_snapshot_and_manifest_directory_entries_are_fsynced_in_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    original_rename = prepare_module.os.rename
+    original_replace = prepare_module.os.replace
+    original_fsync = prepare_module.os.fsync
+
+    def rename(source: object, destination: object) -> None:
+        events.append("rename")
+        original_rename(source, destination)
+
+    def replace(source: object, destination: object) -> None:
+        events.append("replace")
+        original_replace(source, destination)
+
+    def fsync(descriptor: int) -> None:
+        mode = prepare_module.os.fstat(descriptor).st_mode
+        events.append("fsync-directory" if stat.S_ISDIR(mode) else "fsync-file")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(prepare_module.os, "rename", rename)
+    monkeypatch.setattr(prepare_module.os, "replace", replace)
+    monkeypatch.setattr(prepare_module.os, "fsync", fsync)
+    prepare_embedding_model(_settings(tmp_path), downloader=_downloader([]))
+
+    assert events == [
+        "rename",
+        "fsync-directory",
+        "fsync-directory",
+        "fsync-file",
+        "fsync-directory",
+        "replace",
+        "fsync-directory",
+    ]
 
 
 def test_prepared_manifest_drives_readiness_and_tampering_makes_it_false(
@@ -146,6 +221,106 @@ def test_atomic_publish_failure_preserves_existing_manifest_and_cleans_temp(
     assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
 
 
+@pytest.mark.parametrize(
+    ("failure_kind", "directory_ordinal"),
+    [
+        ("snapshot-source-directory", 1),
+        ("snapshot-destination-directory", 2),
+        ("manifest-file", 0),
+        ("manifest-directory-before-replace", 3),
+        ("manifest-directory-after-replace", 5),
+    ],
+)
+def test_fsync_failure_preserves_existing_valid_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_kind: str,
+    directory_ordinal: int,
+) -> None:
+    settings = _settings(tmp_path)
+    original = prepare_embedding_model(
+        settings, downloader=_downloader([], b"original")
+    )
+    original_fsync = prepare_module.os.fsync
+    directory_calls = 0
+
+    def fail_selected_fsync(descriptor: int) -> None:
+        nonlocal directory_calls
+        is_directory = stat.S_ISDIR(prepare_module.os.fstat(descriptor).st_mode)
+        if is_directory:
+            directory_calls += 1
+        should_fail = (failure_kind == "manifest-file" and not is_directory) or (
+            is_directory and directory_calls == directory_ordinal
+        )
+        if should_fail:
+            raise OSError("secret-fsync")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(prepare_module.os, "fsync", fail_selected_fsync)
+    next_content = b"changed" if failure_kind != "manifest-file" else b"original"
+    with pytest.raises(ModelPrepareError) as captured:
+        prepare_embedding_model(settings, downloader=_downloader([], next_content))
+
+    assert "secret" not in str(captured.value)
+    assert model_manifest_path(tmp_path).read_bytes() == original
+    assert verify_model_manifest(
+        tmp_path,
+        model_name=EMBEDDING_MODEL_NAME,
+        revision=EMBEDDING_MODEL_REVISION,
+    )
+    assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
+    assert not list((tmp_path / ".omf-retrieval").glob(".manifest-backup-*"))
+
+
+def test_rename_failure_preserves_manifest_and_does_not_publish_partial_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    original = prepare_embedding_model(
+        settings, downloader=_downloader([], b"original")
+    )
+    original_snapshots = {
+        path.name for path in (tmp_path / ".omf-retrieval" / "snapshots").iterdir()
+    }
+
+    def fail_rename(source: object, destination: object) -> None:
+        raise OSError("secret-rename")
+
+    monkeypatch.setattr(prepare_module.os, "rename", fail_rename)
+    with pytest.raises(ModelPrepareError) as captured:
+        prepare_embedding_model(settings, downloader=_downloader([], b"changed"))
+
+    assert "secret" not in str(captured.value)
+    assert model_manifest_path(tmp_path).read_bytes() == original
+    assert {
+        path.name for path in (tmp_path / ".omf-retrieval" / "snapshots").iterdir()
+    } == original_snapshots
+
+
+def test_preexisting_content_coordinate_is_never_deleted_on_conflict(
+    tmp_path: Path,
+) -> None:
+    probe_cache = tmp_path / "probe"
+    probe = prepare_embedding_model(
+        _settings(probe_cache), downloader=_downloader([], b"desired")
+    )
+    coordinate = json.loads(probe)["cache"]["snapshot"]
+
+    cache = tmp_path / "cache"
+    conflict = cache.joinpath(*coordinate.split("/"))
+    conflict.mkdir(parents=True)
+    (conflict / "config.json").write_bytes(b'{"preexisting":true}')
+    (conflict / "model.safetensors").write_bytes(b"do-not-delete")
+
+    with pytest.raises(ModelPrepareError, match="preparation failed"):
+        prepare_embedding_model(
+            _settings(cache), downloader=_downloader([], b"desired")
+        )
+
+    assert (conflict / "model.safetensors").read_bytes() == b"do-not-delete"
+    assert not model_manifest_path(cache).exists()
+
+
 def test_prepare_rejects_concurrent_lock_without_damaging_manifest(
     tmp_path: Path,
 ) -> None:
@@ -180,7 +355,9 @@ def test_prepare_rejects_wrong_downloader_coordinate(tmp_path: Path) -> None:
         prepare_embedding_model(_settings(tmp_path), downloader=wrong)
 
 
-@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(7)])
+@pytest.mark.parametrize(
+    "failure", [KeyboardInterrupt(), SystemExit(7), _PrepareAbort()]
+)
 def test_prepare_propagates_process_control_exceptions(
     tmp_path: Path, failure: BaseException
 ) -> None:

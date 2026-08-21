@@ -10,10 +10,9 @@ from pathlib import Path
 import pytest
 
 import omf_retrieval.infrastructure.embedding.manifest as manifest_module
+import omf_retrieval.infrastructure.embedding.snapshot_integrity as snapshot_module
 from omf_retrieval.application.indexing.hashing import canonical_json
 from omf_retrieval.infrastructure.embedding.manifest import (
-    MAX_MODEL_FILE_BYTES,
-    MAX_MODEL_FILE_COUNT,
     MODEL_MANIFEST_SCHEMA,
     MODEL_MANIFEST_VERSION,
     ModelManifestError,
@@ -27,6 +26,10 @@ from omf_retrieval.infrastructure.embedding.manifest import (
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 COORDINATE = ".omf-retrieval/snapshots/" + "0" * 64
+
+
+class _ManifestAbort(BaseException):
+    pass
 
 
 def _manifest(files: list[dict[str, object]]) -> dict[str, object]:
@@ -90,15 +93,21 @@ def test_manifest_is_deterministic_sorted_and_self_hashed(tmp_path: Path) -> Non
     assert canonical_model_manifest(first) == canonical_json(first)
 
 
+def test_approved_bounds_are_fixed_by_literal_oracles() -> None:
+    assert manifest_module.MAX_MODEL_FILE_COUNT == 256
+    assert manifest_module.MAX_MODEL_FILE_BYTES == 4 * 1024**3
+    assert manifest_module.MAX_MODEL_TOTAL_BYTES == 8 * 1024**3
+
+
 @pytest.mark.parametrize(
     "files",
     [
-        [_entry("large.safetensors", size=MAX_MODEL_FILE_BYTES)],
+        [_entry("large.safetensors", size=4 * 1024**3)],
         [
-            _entry("a.safetensors", size=MAX_MODEL_FILE_BYTES),
-            _entry("b.safetensors", size=MAX_MODEL_FILE_BYTES),
+            _entry("a.safetensors", size=4 * 1024**3),
+            _entry("b.safetensors", size=4 * 1024**3),
         ],
-        [_entry(f"{index:03}.json") for index in range(MAX_MODEL_FILE_COUNT)],
+        [_entry(f"{index:03}.json") for index in range(256)],
     ],
     ids=["file-exact-max", "total-exact-max", "count-exact-max"],
 )
@@ -111,13 +120,13 @@ def test_manifest_bounds_include_each_exact_maximum(
 @pytest.mark.parametrize(
     "files",
     [
-        [_entry("large.safetensors", size=MAX_MODEL_FILE_BYTES + 1)],
+        [_entry("large.safetensors", size=4 * 1024**3 + 1)],
         [
-            _entry("a.safetensors", size=MAX_MODEL_FILE_BYTES),
-            _entry("b.safetensors", size=MAX_MODEL_FILE_BYTES),
+            _entry("a.safetensors", size=4 * 1024**3),
+            _entry("b.safetensors", size=4 * 1024**3),
             _entry("c.safetensors", size=1),
         ],
-        [_entry(f"{index:03}.json") for index in range(MAX_MODEL_FILE_COUNT + 1)],
+        [_entry(f"{index:03}.json") for index in range(257)],
     ],
     ids=["file-max-plus-one", "total-max-plus-one", "count-max-plus-one"],
 )
@@ -140,6 +149,30 @@ def test_manifest_rejects_unsafe_or_ambiguous_paths(path: str) -> None:
 def test_manifest_rejects_casefold_duplicate_paths() -> None:
     with pytest.raises(ModelManifestError, match="manifest is invalid"):
         canonical_model_manifest(_manifest([_entry("A.json"), _entry("a.json")]))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "del\u007f.json",
+        "c1-start\u0080.json",
+        "next-line\u0085.json",
+        "c1-end\u009f.json",
+        "lre\u202a.json",
+        "rlo\u202e.json",
+        "lri\u2066.json",
+        "pdi\u2069.json",
+        "word-joiner\u2060.json",
+    ],
+)
+def test_manifest_rejects_unicode_control_and_format_paths(path: str) -> None:
+    with pytest.raises(ModelManifestError, match="manifest is invalid"):
+        canonical_model_manifest(_manifest([_entry(path)]))
+
+
+def test_manifest_accepts_normal_nfc_korean_emoji_path() -> None:
+    value = _manifest([_entry("한글🙂é.json")])
+    assert canonical_model_manifest(value) == canonical_json(value)
 
 
 def test_snapshot_rejects_symlink_and_fifo_without_source_leak(tmp_path: Path) -> None:
@@ -188,7 +221,7 @@ def test_snapshot_rejects_unapproved_file_and_sparse_oversize(tmp_path: Path) ->
     (snapshot / "remote_code.py").unlink()
     sparse = snapshot / "model.safetensors"
     with sparse.open("wb") as stream:
-        stream.truncate(MAX_MODEL_FILE_BYTES + 1)
+        stream.truncate(4 * 1024**3 + 1)
     with pytest.raises(ModelManifestError, match="manifest is invalid"):
         create_model_manifest(
             snapshot,
@@ -226,6 +259,72 @@ def test_snapshot_detects_file_mutation_during_bounded_read(
             model_name=MODEL,
             revision=REVISION,
         )
+
+
+def test_file_count_overflow_is_rejected_before_any_file_hash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path / "stage"
+    snapshot.mkdir()
+    for index in range(257):
+        (snapshot / f"{index:03}.json").write_bytes(b"{}")
+    hash_calls = 0
+    original_hash = snapshot_module._hash_open_regular_file
+
+    def recording_hash(
+        descriptor: int, *, expected: os.stat_result | None = None
+    ) -> tuple[int, str]:
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_hash(descriptor, expected=expected)
+
+    monkeypatch.setattr(snapshot_module, "_hash_open_regular_file", recording_hash)
+    with pytest.raises(ModelManifestError, match="manifest is invalid"):
+        create_model_manifest(
+            snapshot,
+            cache_dir=tmp_path,
+            snapshot_coordinate=COORDINATE,
+            model_name=MODEL,
+            revision=REVISION,
+        )
+    assert hash_calls == 0
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        (5 * 1024**3,),
+        (4 * 1024**3, 4 * 1024**3, 2 * 1024**3),
+    ],
+    ids=["file-five-gib", "total-ten-gib"],
+)
+def test_size_overflow_is_rejected_before_any_file_hash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sizes: tuple[int, ...]
+) -> None:
+    snapshot = tmp_path / "stage"
+    snapshot.mkdir()
+    for index, size in enumerate(sizes):
+        with (snapshot / f"{index}.safetensors").open("wb") as stream:
+            stream.truncate(size)
+    hash_calls = 0
+
+    def recording_hash(
+        descriptor: int, *, expected: os.stat_result | None = None
+    ) -> tuple[int, str]:
+        nonlocal hash_calls
+        hash_calls += 1
+        return (0, "0" * 64)
+
+    monkeypatch.setattr(snapshot_module, "_hash_open_regular_file", recording_hash)
+    with pytest.raises(ModelManifestError, match="manifest is invalid"):
+        create_model_manifest(
+            snapshot,
+            cache_dir=tmp_path,
+            snapshot_coordinate=COORDINATE,
+            model_name=MODEL,
+            revision=REVISION,
+        )
+    assert hash_calls == 0
 
 
 def test_verify_rejects_tampering_noncanonical_json_and_extra_file(
@@ -266,7 +365,9 @@ def test_verify_returns_false_for_ordinary_io_and_json_failures(tmp_path: Path) 
     assert not verify_model_manifest(tmp_path, model_name=MODEL, revision=REVISION)
 
 
-@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(9)])
+@pytest.mark.parametrize(
+    "failure", [KeyboardInterrupt(), SystemExit(9), _ManifestAbort()]
+)
 def test_verify_propagates_process_control_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: BaseException
 ) -> None:

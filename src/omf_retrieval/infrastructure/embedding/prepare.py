@@ -8,13 +8,16 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from omf_retrieval.application.indexing.hashing import canonical_json
 from omf_retrieval.infrastructure.embedding.manifest import (
     canonical_model_manifest,
     create_model_manifest,
+    create_pinned_model_manifest,
     model_manifest_path,
+    pin_model_snapshot,
     resolve_embedding_cache_dir,
 )
 from omf_retrieval.settings import Settings
@@ -113,18 +116,25 @@ def prepare_embedding_model(
             if existing != manifest:
                 raise ModelPrepareError("Embedding model preparation failed")
         else:
+            staging_parent = stage.parent
             os.rename(stage, final_snapshot)
             stage = None
-        published_snapshot = create_model_manifest(
-            final_snapshot,
-            cache_dir=cache_root,
-            snapshot_coordinate=coordinate,
-            model_name=EMBEDDING_MODEL_NAME,
-            revision=EMBEDDING_MODEL_REVISION,
-        )
-        if published_snapshot != manifest:
-            raise ModelPrepareError("Embedding model preparation failed")
-        _atomic_publish(model_manifest_path(cache_root), manifest_bytes)
+            _fsync_directory(staging_parent)
+            _fsync_directory(final_snapshot.parent)
+        with pin_model_snapshot(final_snapshot, cache_dir=cache_root) as pinned:
+            published_snapshot = create_pinned_model_manifest(
+                pinned,
+                snapshot_coordinate=coordinate,
+                model_name=EMBEDDING_MODEL_NAME,
+                revision=EMBEDDING_MODEL_REVISION,
+            )
+            if published_snapshot != manifest or not pinned.matches_path():
+                raise ModelPrepareError("Embedding model preparation failed")
+            _atomic_publish(
+                model_manifest_path(cache_root),
+                manifest_bytes,
+                validity_check=pinned.matches_path,
+            )
         return manifest_bytes
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -178,9 +188,46 @@ def _ensure_private_directory(path: Path) -> None:
         raise ModelPrepareError("Embedding model preparation failed")
 
 
-def _atomic_publish(path: Path, content: bytes) -> None:
+@dataclass(slots=True)
+class _ManifestPublication:
+    path: Path
+    backup: Path | None
+    previous_identity: tuple[int, int] | None
+    published_identity: tuple[int, int]
+
+    def rollback(self) -> None:
+        """Restore the prior coordinate without deleting an unknown replacement."""
+        current = _path_identity(self.path)
+        if current != self.published_identity:
+            return
+        if self.backup is None:
+            self.path.unlink()
+        else:
+            if _path_identity(self.backup) != self.previous_identity:
+                return
+            os.replace(self.backup, self.path)
+        _fsync_directory(self.path.parent)
+
+    def commit(self) -> None:
+        """Remove only the transaction-owned backup after durable publication."""
+        if self.backup is None:
+            return
+        if _path_identity(self.backup) == self.previous_identity:
+            self.backup.unlink()
+            try:
+                _fsync_directory(self.path.parent)
+            except OSError:
+                pass
+
+
+def _atomic_publish(
+    path: Path, content: bytes, *, validity_check: Callable[[], bool]
+) -> None:
+    publication: _ManifestPublication | None = None
     descriptor, temporary_name = tempfile.mkstemp(prefix=".manifest-", dir=path.parent)
     temporary = Path(temporary_name)
+    backup: Path | None = None
+    previous_identity: tuple[int, int] | None = None
     try:
         offset = 0
         while offset < len(content):
@@ -191,14 +238,76 @@ def _atomic_publish(path: Path, content: bytes) -> None:
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
+        _fsync_directory(path.parent)
+        previous_identity = _path_identity(path)
+        if previous_identity is not None:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ModelPrepareError("Embedding model preparation failed")
+            backup_descriptor, backup_name = tempfile.mkstemp(
+                prefix=".manifest-backup-", dir=path.parent
+            )
+            os.close(backup_descriptor)
+            backup = Path(backup_name)
+            backup.unlink()
+            os.link(path, backup, follow_symlinks=False)
+            if _path_identity(backup) != previous_identity:
+                raise ModelPrepareError("Embedding model preparation failed")
+            _fsync_directory(path.parent)
+        if not validity_check():
+            raise ModelPrepareError("Embedding model preparation failed")
         os.replace(temporary, path)
+        published_identity = _path_identity(path)
+        if published_identity is None:
+            raise ModelPrepareError("Embedding model preparation failed")
+        publication = _ManifestPublication(
+            path=path,
+            backup=backup,
+            previous_identity=previous_identity,
+            published_identity=published_identity,
+        )
+        temporary = Path(temporary_name)
+        _fsync_directory(path.parent)
+        if not validity_check():
+            raise ModelPrepareError("Embedding model preparation failed")
+        publication.commit()
+        publication = None
     finally:
+        if publication is not None:
+            try:
+                publication.rollback()
+            except Exception:
+                pass
         if descriptor >= 0:
             os.close(descriptor)
         try:
             temporary.unlink()
         except OSError:
             pass
+        if backup is not None:
+            try:
+                if _path_identity(backup) == previous_identity:
+                    backup.unlink()
+            except OSError:
+                pass
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        metadata = path.lstat()
+        return metadata.st_dev, metadata.st_ino
+    except FileNotFoundError:
+        return None
 
 
 def _remove_private_stage(stage: Path) -> None:
