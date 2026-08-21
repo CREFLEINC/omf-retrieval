@@ -139,7 +139,58 @@ def test_provider_and_counter_share_one_lazy_runtime(monkeypatch: Any) -> None:
     assert vector == _unit_vector()
     assert tokens == (44032, 66)
     assert len(loader_calls) == 1
+    assert provider.is_ready() is False
+
+
+def test_readiness_uses_frozen_manifest_identity_without_loading(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Readiness is cache integrity, not whether a fake backend was loaded."""
+    module = import_module(
+        "omf_retrieval.infrastructure.embedding.sentence_transformer"
+    )
+    loader_calls, _, _ = _install_backend(monkeypatch, module)
+    checks: list[tuple[Path | None, str, str]] = []
+
+    def verify(cache: Path | None, *, model_name: str, revision: str) -> bool:
+        checks.append((cache, model_name, revision))
+        return True
+
+    monkeypatch.setattr(module, "verify_model_manifest", verify)
+    settings = _provider_settings(embedding_cache_dir=tmp_path)
+    provider = module.SentenceTransformerEmbeddingProvider(settings)
+    settings.embedding_cache_dir = Path("changed")
+    settings.embedding_model_name = "changed"
+    settings.embedding_model_revision = "changed"
+
     assert provider.is_ready() is True
+    assert loader_calls == []
+    assert checks == [
+        (
+            tmp_path,
+            "Qwen/Qwen3-Embedding-0.6B",
+            "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        )
+    ]
+
+
+def test_readiness_propagates_custom_base_exception_identity(monkeypatch: Any) -> None:
+    class StopReadiness(BaseException):
+        pass
+
+    module = import_module(
+        "omf_retrieval.infrastructure.embedding.sentence_transformer"
+    )
+    failure = StopReadiness("same-object")
+
+    def fail(*args: object, **kwargs: object) -> bool:
+        raise failure
+
+    monkeypatch.setattr(module, "verify_model_manifest", fail)
+    provider = module.SentenceTransformerEmbeddingProvider(_provider_settings())
+    with pytest.raises(StopReadiness) as captured:
+        provider.is_ready()
+    assert captured.value is failure
 
 
 def test_adapter_descriptors_snapshot_settings_at_construction(
@@ -575,6 +626,11 @@ def test_default_loader_uses_pinned_offline_non_remote_kwargs(monkeypatch: Any) 
         "transformers",
         SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
     )
+    monkeypatch.setattr(
+        module,
+        "verified_model_snapshot",
+        lambda *args, **kwargs: Path("/model-cache/prepared"),
+    )
     identity = module._RuntimeIdentity(
         model_name="Qwen/Qwen3-Embedding-0.6B",
         revision="fixed-revision",
@@ -586,7 +642,7 @@ def test_default_loader_uses_pinned_offline_non_remote_kwargs(monkeypatch: Any) 
 
     assert model_calls == [
         (
-            ("Qwen/Qwen3-Embedding-0.6B",),
+            ("/model-cache/prepared",),
             {
                 "device": "cuda:0",
                 "cache_folder": "/model-cache",

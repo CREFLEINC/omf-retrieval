@@ -2,4 +2,7 @@
 
 import typer
 
-app = typer.Typer()
+from omf_retrieval.interfaces.cli.model import model_app
+
+app = typer.Typer(help="OMF retrieval service operations.")
+app.add_typer(model_app, name="model")

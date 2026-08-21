@@ -14,6 +14,10 @@ from typing import Any
 from omf_retrieval.application.indexing.ports import TokenizerDescriptor
 from omf_retrieval.domain.errors import DomainError
 from omf_retrieval.domain.models import EmbeddingDescriptor
+from omf_retrieval.infrastructure.embedding.manifest import (
+    verified_model_snapshot,
+    verify_model_manifest,
+)
 from omf_retrieval.infrastructure.embedding.provider import (
     EmbeddingBatch,
     EmbeddingVector,
@@ -202,8 +206,15 @@ def _load_runtime_backend(identity: _RuntimeIdentity) -> _LoadedBackend:
     """Load pinned local-only model resources after the first real operation."""
     from sentence_transformers import SentenceTransformer
 
+    snapshot = verified_model_snapshot(
+        Path(identity.cache_dir) if identity.cache_dir is not None else None,
+        model_name=identity.model_name,
+        revision=identity.revision,
+    )
+    if snapshot is None:
+        raise RuntimeError("Embedding backend unavailable")
     model = SentenceTransformer(
-        identity.model_name,
+        str(snapshot),
         device=identity.device,
         cache_folder=identity.cache_dir,
         trust_remote_code=False,
@@ -432,11 +443,14 @@ class SentenceTransformerEmbeddingProvider:
         return self._embed(materialized)
 
     def is_ready(self) -> bool:
-        """Report loaded state without cache I/O or network access.
-
-        Task 7C adds snapshot-manifest integrity to the API readiness policy.
-        """
-        return self._runtime.is_ready()
+        """Report verified cache integrity without loading model resources."""
+        return verify_model_manifest(
+            Path(self._snapshot.identity.cache_dir)
+            if self._snapshot.identity.cache_dir is not None
+            else None,
+            model_name=self._snapshot.identity.model_name,
+            revision=self._snapshot.identity.revision,
+        )
 
     def _embed(self, inputs: tuple[str, ...]) -> EmbeddingBatch:
         vectors: list[EmbeddingVector] = []
