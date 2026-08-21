@@ -220,6 +220,7 @@ class _ManifestPublication:
                     self.previous_content,
                     owned_identity=self.published_identity,
                 )
+                return
         else:
             if _path_identity(self.backup) == self.previous_identity:
                 os.replace(self.backup, self.path)
@@ -240,10 +241,7 @@ class _ManifestPublication:
             return
         if _path_identity(self.backup) == self.previous_identity:
             self.backup.unlink()
-            try:
-                _fsync_directory(self.path.parent)
-            except OSError:
-                pass
+            _fsync_directory(self.path.parent)
 
 
 def _atomic_publish(
@@ -405,18 +403,13 @@ def _read_regular_file(
 def _restore_owned_manifest(
     path: Path, content: bytes, *, owned_identity: tuple[int, int]
 ) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    if _path_identity(path) != owned_identity:
+        return
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".manifest-restore-", dir=path.parent
     )
+    temporary: Path | None = Path(temporary_name)
     try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or (metadata.st_dev, metadata.st_ino) != owned_identity
-        ):
-            return
-        os.ftruncate(descriptor, 0)
         offset = 0
         while offset < len(content):
             written = os.write(descriptor, content[offset:])
@@ -424,10 +417,28 @@ def _restore_owned_manifest(
                 raise ModelPrepareError("Embedding model preparation failed")
             offset += written
         os.fsync(descriptor)
-    finally:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != len(content):
+            raise ModelPrepareError("Embedding model preparation failed")
+        restored_identity = (metadata.st_dev, metadata.st_ino)
         os.close(descriptor)
-    if _path_identity(path) == owned_identity:
+        descriptor = -1
         _fsync_directory(path.parent)
+        if _path_identity(path) != owned_identity:
+            return
+        os.replace(temporary, path)
+        temporary = None
+        if _path_identity(path) != restored_identity:
+            raise ModelPrepareError("Embedding model preparation failed")
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _fsync_directory(path: Path) -> None:

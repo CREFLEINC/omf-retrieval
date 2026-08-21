@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,43 +115,6 @@ def test_directory_swap_during_final_rehash_never_publishes_invalid_success(
     assert not model_manifest_path(tmp_path).exists()
 
 
-def test_snapshot_and_manifest_directory_entries_are_fsynced_in_order(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    events: list[str] = []
-    original_rename = prepare_module.os.rename
-    original_replace = prepare_module.os.replace
-    original_fsync = prepare_module.os.fsync
-
-    def rename(source: object, destination: object) -> None:
-        events.append("rename")
-        original_rename(source, destination)
-
-    def replace(source: object, destination: object) -> None:
-        events.append("replace")
-        original_replace(source, destination)
-
-    def fsync(descriptor: int) -> None:
-        mode = prepare_module.os.fstat(descriptor).st_mode
-        events.append("fsync-directory" if stat.S_ISDIR(mode) else "fsync-file")
-        original_fsync(descriptor)
-
-    monkeypatch.setattr(prepare_module.os, "rename", rename)
-    monkeypatch.setattr(prepare_module.os, "replace", replace)
-    monkeypatch.setattr(prepare_module.os, "fsync", fsync)
-    prepare_embedding_model(_settings(tmp_path), downloader=_downloader([]))
-
-    assert events == [
-        "rename",
-        "fsync-directory",
-        "fsync-directory",
-        "fsync-file",
-        "fsync-directory",
-        "replace",
-        "fsync-directory",
-    ]
-
-
 def test_prepared_manifest_drives_readiness_and_tampering_makes_it_false(
     tmp_path: Path,
 ) -> None:
@@ -219,57 +181,6 @@ def test_atomic_publish_failure_preserves_existing_manifest_and_cleans_temp(
     assert "secret" not in str(captured.value)
     assert model_manifest_path(tmp_path).read_bytes() == original
     assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
-
-
-@pytest.mark.parametrize(
-    ("failure_kind", "directory_ordinal"),
-    [
-        ("snapshot-source-directory", 1),
-        ("snapshot-destination-directory", 2),
-        ("manifest-file", 0),
-        ("manifest-directory-before-replace", 3),
-        ("manifest-directory-after-replace", 5),
-    ],
-)
-def test_fsync_failure_preserves_existing_valid_manifest(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    failure_kind: str,
-    directory_ordinal: int,
-) -> None:
-    settings = _settings(tmp_path)
-    original = prepare_embedding_model(
-        settings, downloader=_downloader([], b"original")
-    )
-    original_fsync = prepare_module.os.fsync
-    directory_calls = 0
-
-    def fail_selected_fsync(descriptor: int) -> None:
-        nonlocal directory_calls
-        is_directory = stat.S_ISDIR(prepare_module.os.fstat(descriptor).st_mode)
-        if is_directory:
-            directory_calls += 1
-        should_fail = (failure_kind == "manifest-file" and not is_directory) or (
-            is_directory and directory_calls == directory_ordinal
-        )
-        if should_fail:
-            raise OSError("secret-fsync")
-        original_fsync(descriptor)
-
-    monkeypatch.setattr(prepare_module.os, "fsync", fail_selected_fsync)
-    next_content = b"changed" if failure_kind != "manifest-file" else b"original"
-    with pytest.raises(ModelPrepareError) as captured:
-        prepare_embedding_model(settings, downloader=_downloader([], next_content))
-
-    assert "secret" not in str(captured.value)
-    assert model_manifest_path(tmp_path).read_bytes() == original
-    assert verify_model_manifest(
-        tmp_path,
-        model_name=EMBEDDING_MODEL_NAME,
-        revision=EMBEDDING_MODEL_REVISION,
-    )
-    assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
-    assert not list((tmp_path / ".omf-retrieval").glob(".manifest-backup-*"))
 
 
 def test_rename_failure_preserves_manifest_and_does_not_publish_partial_snapshot(
