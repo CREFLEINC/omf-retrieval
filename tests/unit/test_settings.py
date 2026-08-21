@@ -52,10 +52,13 @@ def test_settings_read_prefixed_environment_values(
     assert settings.embedding_cache_dir == Path("/srv/model-cache")
 
 
-@pytest.mark.parametrize("batch_size", [1, 256])
+@pytest.mark.parametrize("batch_size", [1, 32, 256])
 def test_embedding_batch_size_accepts_approved_boundaries(batch_size: int) -> None:
     """The inclusive batch-size boundaries remain configurable."""
-    assert Settings(embedding_batch_size=batch_size).embedding_batch_size == batch_size
+    configured = Settings(embedding_batch_size=batch_size).embedding_batch_size
+
+    assert type(configured) is int
+    assert configured == batch_size
 
 
 @pytest.mark.parametrize("batch_size", [0, 257, True, 32.0, "32"])
@@ -65,6 +68,64 @@ def test_embedding_batch_size_rejects_out_of_range_or_non_exact_ints(
     """Unsafe bounds and coercible non-integers cannot alter inference batching."""
     with pytest.raises(ValidationError):
         Settings(embedding_batch_size=batch_size)  # type: ignore[arg-type]
+
+
+def test_embedding_batch_size_rejects_an_int_subclass() -> None:
+    """An int subclass cannot cross the exact built-in integer boundary."""
+
+    class IntSubclass(int):
+        pass
+
+    with pytest.raises(ValidationError):
+        Settings(embedding_batch_size=IntSubclass(32))
+
+
+def test_embedding_batch_size_error_hides_an_int_subclass_repr() -> None:
+    """Rejected custom integer representations cannot leak through errors."""
+    secret = "raw-batch-secret"
+
+    class SensitiveIntSubclass(int):
+        def __repr__(self) -> str:
+            return secret
+
+    with pytest.raises(ValidationError) as error_info:
+        Settings(embedding_batch_size=SensitiveIntSubclass(32))
+
+    assert secret not in str(error_info.value)
+    assert secret not in repr(error_info.value.errors())
+
+
+@pytest.mark.parametrize(
+    ("raw_batch_size", "expected_batch_size"),
+    [("1", 1), ("32", 32), ("064", 64), ("256", 256)],
+)
+def test_embedding_batch_size_accepts_decimal_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_batch_size: str,
+    expected_batch_size: int,
+) -> None:
+    """ASCII decimal environment values become exact built-in integers."""
+    monkeypatch.setenv("OMF_RETRIEVAL_EMBEDDING_BATCH_SIZE", raw_batch_size)
+
+    configured = Settings().embedding_batch_size
+
+    assert type(configured) is int
+    assert configured == expected_batch_size
+
+
+@pytest.mark.parametrize(
+    "raw_batch_size",
+    [" 32", "+32", "-1", "32.0", "３２", "true", "", "0", "257"],
+)
+def test_embedding_batch_size_rejects_invalid_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_batch_size: str,
+) -> None:
+    """Non-decimal and out-of-range environment values fail closed."""
+    monkeypatch.setenv("OMF_RETRIEVAL_EMBEDDING_BATCH_SIZE", raw_batch_size)
+
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_development_embedding_cache_accepts_none_or_an_explicit_path(

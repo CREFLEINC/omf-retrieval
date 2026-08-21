@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import Field, SecretStr, StrictInt, model_validator
+from pydantic import Field, SecretStr, StrictInt, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -25,7 +25,11 @@ class Settings(BaseSettings):
         ValueError: If retrieval limits or production safeguards are invalid.
     """
 
-    model_config = SettingsConfigDict(env_prefix="OMF_RETRIEVAL_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="OMF_RETRIEVAL_",
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     environment: Literal["development", "test", "production"] = "development"
     embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
@@ -60,7 +64,7 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[_SettingsSource, ...]:
-        """Parse strict batch integers only at the string-based env boundary.
+        """Normalize safe batch values before Pydantic builds validation errors.
 
         Args:
             settings_cls: Settings model type supplied by Pydantic Settings.
@@ -70,8 +74,17 @@ class Settings(BaseSettings):
             file_secret_settings: Optional secret-directory source.
 
         Returns:
-            Default-priority sources with strict batch parsing at the env boundary.
+            Default-priority sources with safe direct input and env batch parsing.
         """
+
+        def embedding_init_settings() -> dict[str, Any]:
+            values = init_settings()
+            if (
+                "embedding_batch_size" in values
+                and type(values["embedding_batch_size"]) is not int
+            ):
+                values["embedding_batch_size"] = None
+            return values
 
         def embedding_environment_settings() -> dict[str, Any]:
             values = env_settings()
@@ -85,11 +98,29 @@ class Settings(BaseSettings):
             return values
 
         return (
-            init_settings,
+            embedding_init_settings,
             embedding_environment_settings,
             dotenv_settings,
             file_secret_settings,
         )
+
+    @field_validator("embedding_batch_size", mode="before")
+    @classmethod
+    def require_exact_embedding_batch_size(cls, value: object) -> int:
+        """Reject values that are not exact built-in integers.
+
+        Args:
+            value: Materialized setting value from the selected settings source.
+
+        Returns:
+            The exact built-in integer supplied at the settings boundary.
+
+        Raises:
+            ValueError: If the value is a coercible type or an int subclass.
+        """
+        if type(value) is not int:
+            raise ValueError("embedding_batch_size must be an exact integer")
+        return value
 
     @model_validator(mode="after")
     def validate_runtime_contract(self) -> Self:
