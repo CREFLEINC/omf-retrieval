@@ -138,6 +138,43 @@ def verify_model_manifest(
     )
 
 
+def verify_pinned_model_manifest(
+    cache_dir: Path,
+    snapshot: PinnedModelSnapshot,
+    *,
+    model_name: str,
+    revision: str,
+) -> bool:
+    """Fully verify the published manifest against one already-pinned snapshot."""
+    try:
+        root = resolve_embedding_cache_dir(cache_dir)
+        if not snapshot.matches_path():
+            return False
+        raw = _read_manifest_file(model_manifest_path(root))
+        parsed = json.loads(raw)
+        validated = _validated_manifest_value(parsed)
+        if canonical_json(validated) != raw or validated["model"] != {
+            "name": model_name,
+            "revision": revision,
+        }:
+            return False
+        coordinate = validated["cache"]["snapshot"]
+        expected_snapshot = root.joinpath(*PurePosixPath(coordinate).parts).absolute()
+        if expected_snapshot != snapshot.path:
+            return False
+        rebuilt = create_pinned_model_manifest(
+            snapshot,
+            snapshot_coordinate=coordinate,
+            model_name=model_name,
+            revision=revision,
+        )
+        return rebuilt == validated and snapshot.matches_path()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return False
+
+
 def verified_model_snapshot(
     cache_dir: Path | None, *, model_name: str, revision: str
 ) -> Path | None:
