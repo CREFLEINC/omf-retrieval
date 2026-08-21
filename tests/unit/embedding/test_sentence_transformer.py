@@ -142,6 +142,65 @@ def test_provider_and_counter_share_one_lazy_runtime(monkeypatch: Any) -> None:
     assert provider.is_ready() is True
 
 
+def test_adapter_descriptors_snapshot_settings_at_construction(
+    monkeypatch: Any,
+) -> None:
+    """Mutable Settings must not split public descriptors from runtime identity."""
+    module = import_module(
+        "omf_retrieval.infrastructure.embedding.sentence_transformer"
+    )
+    _install_backend(monkeypatch, module)
+    settings = _provider_settings()
+    provider = module.SentenceTransformerEmbeddingProvider(settings)
+    counter = module.SentenceTransformerTokenCounter(settings)
+    provider_descriptor = provider.descriptor
+    counter_descriptor = counter.descriptor
+
+    settings.embedding_model_name = "changed/model"
+    settings.embedding_model_revision = "changed-revision"
+    settings.embedding_dimension = 2
+    settings.embedding_cache_dir = Path("changed-cache")
+
+    assert provider.descriptor == provider_descriptor
+    assert counter.descriptor == counter_descriptor
+
+
+def test_provider_behavior_snapshots_instruction_and_batch_size(
+    monkeypatch: Any,
+) -> None:
+    """A caller mutating Settings later must not alter an existing adapter."""
+    module = import_module(
+        "omf_retrieval.infrastructure.embedding.sentence_transformer"
+    )
+    loader_calls, model, _ = _install_backend(monkeypatch, module)
+    settings = _provider_settings(
+        embedding_batch_size=2,
+        query_instruction="ORIGINAL<{query}>",
+    )
+    provider = module.SentenceTransformerEmbeddingProvider(settings)
+
+    settings.embedding_batch_size = 1
+    settings.query_instruction = "CHANGED<{query}>"
+    settings.embedding_model_name = "changed/model"
+    settings.embedding_model_revision = "changed-revision"
+    settings.embedding_cache_dir = Path("changed-cache")
+
+    provider.embed_query("query")
+    provider.embed_documents(("0", "1", "2"))
+
+    assert [inputs for inputs, _ in model.calls] == [
+        ("ORIGINAL<query>",),
+        ("0", "1"),
+        ("2",),
+    ]
+    assert all(kwargs["batch_size"] == 2 for _, kwargs in model.calls)
+    assert len(loader_calls) == 1
+    identity = loader_calls[0]
+    assert identity.model_name == "Qwen/Qwen3-Embedding-0.6B"
+    assert identity.revision == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+    assert identity.cache_dir is None
+
+
 @pytest.mark.parametrize("template", ["no placeholder", "{query} then {query}"])
 def test_provider_rejects_query_instruction_without_exactly_one_placeholder(
     template: str,

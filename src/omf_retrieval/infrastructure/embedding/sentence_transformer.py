@@ -12,6 +12,7 @@ from threading import BoundedSemaphore, Condition, Lock, get_ident
 from typing import Any
 
 from omf_retrieval.application.indexing.ports import TokenizerDescriptor
+from omf_retrieval.domain.errors import DomainError
 from omf_retrieval.domain.models import EmbeddingDescriptor
 from omf_retrieval.infrastructure.embedding.provider import (
     EmbeddingBatch,
@@ -39,6 +40,21 @@ class _LoadedBackend:
     tokenizer_version: str
 
 
+@dataclass(frozen=True, slots=True)
+class _EmbeddingSnapshot:
+    identity: _RuntimeIdentity
+    descriptor: EmbeddingDescriptor
+    query_instruction: str
+    dimension: int
+    batch_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenizerSnapshot:
+    identity: _RuntimeIdentity
+    descriptor: TokenizerDescriptor
+
+
 class _LazyRuntime:
     """Own one backend load and one serialized inference lane per identity."""
 
@@ -48,6 +64,9 @@ class _LazyRuntime:
         self._state = "unloaded"
         self._loader_thread_id: int | None = None
         self._backend: _LoadedBackend | Any | None = None
+        self._load_generation = 0
+        self._failure_generation: int | None = None
+        self._cohort_members = 0
         self._inference_semaphore = BoundedSemaphore(1)
         self._inference_owner_lock = Lock()
         self._inference_owner_thread_id: int | None = None
@@ -58,44 +77,86 @@ class _LazyRuntime:
             return self._state == "ready"
 
     def backend(self) -> _LoadedBackend | Any:
-        """Load exactly once while allowing other identities to progress."""
+        """Load once per cohort and permit a later bounded retry after failure."""
         current_thread_id = get_ident()
         with self._condition:
-            while self._state == "loading":
+            while True:
+                if self._state == "ready":
+                    return self._backend
+                if self._state == "failed":
+                    raise RuntimeError("Embedding backend unavailable")
+                if self._state == "unloaded":
+                    self._state = "loading"
+                    self._loader_thread_id = current_thread_id
+                    self._load_generation += 1
+                    load_generation = self._load_generation
+                    self._cohort_members = 1
+                    break
+
                 if self._loader_thread_id == current_thread_id:
                     raise RuntimeError("Embedding backend unavailable")
-                self._condition.wait()
-            if self._state == "ready":
-                return self._backend
-            if self._state == "failed":
-                raise RuntimeError("Embedding backend unavailable")
-            self._state = "loading"
-            self._loader_thread_id = current_thread_id
+                wait_generation = self._load_generation
+                self._cohort_members += 1
+                try:
+                    while (
+                        self._state == "loading"
+                        and self._load_generation == wait_generation
+                    ):
+                        self._condition.wait()
+                except BaseException:
+                    self._leave_cohort_locked(wait_generation)
+                    raise
+                if (
+                    self._state == "failed"
+                    and self._failure_generation == wait_generation
+                ):
+                    self._leave_cohort_locked(wait_generation)
+                    raise RuntimeError("Embedding backend unavailable")
 
         loaded_backend: object | None = None
         failed = False
         try:
             loaded_backend = _load_runtime_backend(self.identity)
-        except (KeyboardInterrupt, SystemExit):
+        except Exception:
+            failed = True
+        except BaseException:
             with self._condition:
                 self._state = "unloaded"
                 self._loader_thread_id = None
+                self._failure_generation = None
+                self._cohort_members = 0
                 self._condition.notify_all()
             raise
-        except Exception:
-            failed = True
 
         with self._condition:
             self._loader_thread_id = None
             if failed or loaded_backend is None:
                 self._state = "failed"
+                self._failure_generation = load_generation
                 self._condition.notify_all()
+                self._leave_cohort_locked(load_generation)
             else:
                 self._backend = loaded_backend
                 self._state = "ready"
+                self._failure_generation = None
+                self._cohort_members = 0
                 self._condition.notify_all()
                 return loaded_backend
         raise RuntimeError("Embedding backend unavailable")
+
+    def _leave_cohort_locked(self, generation: int) -> None:
+        """Release one member and reopen loading after the failed cohort exits."""
+        if generation != self._load_generation or self._cohort_members <= 0:
+            return
+        self._cohort_members -= 1
+        if (
+            self._cohort_members == 0
+            and self._state == "failed"
+            and self._failure_generation == generation
+        ):
+            self._state = "unloaded"
+            self._failure_generation = None
+            self._condition.notify_all()
 
     def inference(self, operation: Any) -> object:
         """Run one model operation through the bounded inference lane."""
@@ -171,22 +232,49 @@ def _identity(settings: Settings) -> _RuntimeIdentity:
     )
 
 
+def _embedding_snapshot(settings: Settings) -> _EmbeddingSnapshot:
+    return _EmbeddingSnapshot(
+        identity=_identity(settings),
+        descriptor=EmbeddingDescriptor(
+            model_name=settings.embedding_model_name,
+            revision=settings.embedding_model_revision,
+            dimension=settings.embedding_dimension,
+        ),
+        query_instruction=settings.query_instruction,
+        dimension=settings.embedding_dimension,
+        batch_size=settings.embedding_batch_size,
+    )
+
+
+def _tokenizer_snapshot(settings: Settings) -> _TokenizerSnapshot:
+    return _TokenizerSnapshot(
+        identity=_identity(settings),
+        descriptor=TokenizerDescriptor(
+            model_name=settings.embedding_model_name,
+            revision=settings.embedding_model_revision,
+            library_name=_TOKENIZER_LIBRARY_NAME,
+            library_version=version(_TOKENIZER_LIBRARY_NAME),
+            add_special_tokens=False,
+        ),
+    )
+
+
 def _validated_vectors(
     result: object, *, expected_count: int, dimension: int
 ) -> EmbeddingBatch:
     materialized = _materialize_bounded_sequence(result, maximum_items=expected_count)
     if materialized is None or len(materialized) != expected_count:
-        raise ValueError("Embedding backend returned malformed vectors")
+        raise DomainError("Embedding backend returned malformed vectors")
 
     vectors: list[EmbeddingVector] = []
     for raw_vector in materialized:
         values = _materialize_bounded_sequence(raw_vector, maximum_items=dimension)
         if values is None or len(values) != dimension:
-            raise ValueError("Embedding backend returned malformed vectors")
+            raise DomainError("Embedding backend returned malformed vectors")
         if any(
             isinstance(value, bool) or not isinstance(value, Real) for value in values
         ):
-            raise ValueError("Embedding backend returned malformed vectors")
+            raise DomainError("Embedding backend returned malformed vectors")
         converted: list[float] = []
         conversion_failed = False
         try:
@@ -196,10 +284,10 @@ def _validated_vectors(
         except Exception:
             conversion_failed = True
         if conversion_failed:
-            raise ValueError("Embedding backend returned malformed vectors")
+            raise DomainError("Embedding backend returned malformed vectors")
         vector = tuple(converted)
         if not all(isfinite(value) for value in vector):
-            raise ValueError("Embedding backend returned malformed vectors")
+            raise DomainError("Embedding backend returned malformed vectors")
         norm = sqrt(sum(value * value for value in vector))
         if not isclose(
             norm,
@@ -207,7 +295,7 @@ def _validated_vectors(
             rel_tol=_NORMALIZATION_TOLERANCE,
             abs_tol=_NORMALIZATION_TOLERANCE,
         ):
-            raise ValueError("Embedding backend returned malformed vectors")
+            raise DomainError("Embedding backend returned malformed vectors")
         vectors.append(vector)
     return tuple(vectors)
 
@@ -321,23 +409,19 @@ class SentenceTransformerEmbeddingProvider:
         _validate_adapter_settings(settings)
         if settings.query_instruction.count("{query}") != 1:
             raise ValueError("Invalid query instruction")
-        self._settings = settings
-        self._runtime = _runtime_for(_identity(settings))
+        self._snapshot = _embedding_snapshot(settings)
+        self._runtime = _runtime_for(self._snapshot.identity)
 
     @property
     def descriptor(self) -> EmbeddingDescriptor:
         """Return the configured immutable embedding identity."""
-        return EmbeddingDescriptor(
-            model_name=self._settings.embedding_model_name,
-            revision=self._settings.embedding_model_revision,
-            dimension=self._settings.embedding_dimension,
-        )
+        return self._snapshot.descriptor
 
     def embed_query(self, query: str) -> EmbeddingVector:
         """Embed a query after applying the configured instruction."""
         if type(query) is not str or not query.strip():
             raise ValueError("Invalid embedding input")
-        instructed_query = self._settings.query_instruction.replace("{query}", query, 1)
+        instructed_query = self._snapshot.query_instruction.replace("{query}", query, 1)
         return self._embed((instructed_query,))[0]
 
     def embed_documents(self, documents: Sequence[str]) -> EmbeddingBatch:
@@ -356,7 +440,7 @@ class SentenceTransformerEmbeddingProvider:
 
     def _embed(self, inputs: tuple[str, ...]) -> EmbeddingBatch:
         vectors: list[EmbeddingVector] = []
-        batch_size = self._settings.embedding_batch_size
+        batch_size = self._snapshot.batch_size
         for batch_start in range(0, len(inputs), batch_size):
             batch = inputs[batch_start : batch_start + batch_size]
 
@@ -375,7 +459,7 @@ class SentenceTransformerEmbeddingProvider:
                 _validated_vectors(
                     result,
                     expected_count=len(batch),
-                    dimension=self._settings.embedding_dimension,
+                    dimension=self._snapshot.dimension,
                 )
             )
         return tuple(vectors)
@@ -387,19 +471,13 @@ class SentenceTransformerTokenCounter:
     def __init__(self, settings: Settings) -> None:
         """Bind tokenizer identity without eager tokenizer loading."""
         _validate_adapter_settings(settings)
-        self._settings = settings
-        self._runtime = _runtime_for(_identity(settings))
+        self._snapshot = _tokenizer_snapshot(settings)
+        self._runtime = _runtime_for(self._snapshot.identity)
 
     @property
     def descriptor(self) -> TokenizerDescriptor:
         """Return the exact tokenizer behavior identity used by chunking."""
-        return TokenizerDescriptor(
-            model_name=self._settings.embedding_model_name,
-            revision=self._settings.embedding_model_revision,
-            library_name=_TOKENIZER_LIBRARY_NAME,
-            library_version=version(_TOKENIZER_LIBRARY_NAME),
-            add_special_tokens=False,
-        )
+        return self._snapshot.descriptor
 
     def encode(self, text: str) -> tuple[int, ...]:
         """Return source token IDs without special tokens."""
