@@ -24,6 +24,10 @@ from omf_retrieval.infrastructure.embedding.manifest import (
 from omf_retrieval.infrastructure.embedding.manifest_contract import (
     MAX_MODEL_MANIFEST_BYTES,
 )
+from omf_retrieval.infrastructure.embedding.prepare_lock import (
+    acquire_prepare_lock,
+    release_prepare_lock,
+)
 from omf_retrieval.settings import Settings
 
 EMBEDDING_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
@@ -52,7 +56,6 @@ def prepare_embedding_model(
     cache_root: Path | None = None
     stage: Path | None = None
     lock_descriptor: int | None = None
-    lock_path: Path | None = None
     try:
         if (
             settings.embedding_model_name != EMBEDDING_MODEL_NAME
@@ -65,12 +68,7 @@ def prepare_embedding_model(
         _ensure_private_directory(cache_root)
         _ensure_private_directory(private_root)
         _ensure_private_directory(snapshots_root)
-        lock_path = private_root / _PREPARE_LOCK
-        lock_descriptor = os.open(
-            lock_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
+        lock_descriptor = acquire_prepare_lock(private_root / _PREPARE_LOCK)
         stage = Path(tempfile.mkdtemp(prefix=".prepare-", dir=private_root))
         selected_downloader = downloader or download_model_snapshot
         downloaded = selected_downloader(
@@ -153,7 +151,7 @@ def prepare_embedding_model(
     except Exception:
         raise ModelPrepareError("Embedding model preparation failed") from None
     finally:
-        _cleanup_prepare(stage, lock_descriptor, lock_path)
+        _cleanup_prepare(stage, lock_descriptor)
 
 
 def download_model_snapshot(
@@ -467,30 +465,9 @@ def _remove_private_stage(stage: Path) -> None:
         pass
 
 
-def _cleanup_prepare(
-    stage: Path | None, lock_descriptor: int | None, lock_path: Path | None
-) -> None:
+def _cleanup_prepare(stage: Path | None, lock_descriptor: int | None) -> None:
     if stage is not None:
         _remove_private_stage(stage)
     if lock_descriptor is None:
         return
-    lock_metadata: os.stat_result | None = None
-    try:
-        lock_metadata = os.fstat(lock_descriptor)
-    except OSError:
-        pass
-    try:
-        os.close(lock_descriptor)
-    except OSError:
-        pass
-    if lock_path is None or lock_metadata is None:
-        return
-    try:
-        path_metadata = lock_path.lstat()
-        if (path_metadata.st_dev, path_metadata.st_ino) == (
-            lock_metadata.st_dev,
-            lock_metadata.st_ino,
-        ):
-            lock_path.unlink()
-    except OSError:
-        pass
+    release_prepare_lock(lock_descriptor)

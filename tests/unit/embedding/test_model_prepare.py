@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +26,10 @@ from omf_retrieval.infrastructure.embedding.prepare import (
     ModelPrepareError,
     download_model_snapshot,
     prepare_embedding_model,
+)
+from omf_retrieval.infrastructure.embedding.prepare_lock import (
+    acquire_prepare_lock,
+    release_prepare_lock,
 )
 from omf_retrieval.infrastructure.embedding.sentence_transformer import (
     SentenceTransformerEmbeddingProvider,
@@ -75,7 +83,9 @@ def test_prepare_uses_fixed_safe_download_contract_and_publishes_canonical_manif
         revision=EMBEDDING_MODEL_REVISION,
     )
     assert not list((tmp_path / ".omf-retrieval").glob(".prepare-*"))
-    assert not (tmp_path / ".omf-retrieval" / "prepare.lock").exists()
+    lock = tmp_path / ".omf-retrieval" / "prepare.lock"
+    assert lock.is_file()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
 
 
 def test_same_snapshot_bytes_produce_same_json_and_hash(tmp_path: Path) -> None:
@@ -141,6 +151,9 @@ def test_failed_download_does_not_publish_partial_manifest(tmp_path: Path) -> No
     assert "secret" not in str(captured.value)
     assert not model_manifest_path(tmp_path).exists()
     assert not list((tmp_path / ".omf-retrieval").glob(".prepare-*"))
+    lock = tmp_path / ".omf-retrieval" / "prepare.lock"
+    descriptor = acquire_prepare_lock(lock)
+    release_prepare_lock(descriptor)
 
 
 def test_failure_preserves_an_existing_valid_manifest(tmp_path: Path) -> None:
@@ -238,13 +251,127 @@ def test_prepare_rejects_concurrent_lock_without_damaging_manifest(
     settings = _settings(tmp_path)
     original = prepare_embedding_model(settings, downloader=_downloader([]))
     lock = tmp_path / ".omf-retrieval" / "prepare.lock"
-    lock.write_bytes(b"busy")
-
-    with pytest.raises(ModelPrepareError, match="preparation failed"):
-        prepare_embedding_model(settings, downloader=_downloader([]))
+    lock_descriptor = acquire_prepare_lock(lock)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            attempt = executor.submit(
+                prepare_embedding_model,
+                settings,
+                downloader=_downloader([]),
+            )
+            with pytest.raises(ModelPrepareError, match="preparation failed"):
+                attempt.result(timeout=5)
+    finally:
+        release_prepare_lock(lock_descriptor)
 
     assert model_manifest_path(tmp_path).read_bytes() == original
-    assert lock.read_bytes() == b"busy"
+    assert prepare_embedding_model(settings, downloader=_downloader([])) == original
+
+
+def test_unlocked_stale_marker_does_not_block_prepare(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    private_root = cache / ".omf-retrieval"
+    private_root.mkdir(parents=True)
+    lock = private_root / "prepare.lock"
+    lock.write_bytes(b"stale-marker-from-prior-process")
+
+    output = prepare_embedding_model(_settings(cache), downloader=_downloader([]))
+
+    assert model_manifest_path(cache).read_bytes() == output
+    assert lock.read_bytes() == b"stale-marker-from-prior-process"
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_prepare_recovers_the_kernel_lock_after_a_process_is_killed(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    acquired = tmp_path / "lock-acquired"
+    child_script = """
+import sys
+from pathlib import Path
+from time import sleep
+
+from omf_retrieval.infrastructure.embedding.prepare import prepare_embedding_model
+from omf_retrieval.settings import Settings
+
+cache = Path(sys.argv[1])
+acquired = Path(sys.argv[2])
+
+def hold_lock(**kwargs: object) -> Path:
+    acquired.write_text("acquired", encoding="utf-8")
+    while True:
+        sleep(1)
+
+prepare_embedding_model(
+    Settings(environment="test", embedding_cache_dir=cache),
+    downloader=hold_lock,
+)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_script, str(cache), str(acquired)]
+    )
+    deadline = monotonic() + 5
+    try:
+        while not acquired.exists() and child.poll() is None and monotonic() < deadline:
+            sleep(0.01)
+        assert acquired.exists(), child.poll()
+        with pytest.raises(ModelPrepareError, match="preparation failed"):
+            prepare_embedding_model(_settings(cache), downloader=_downloader([]))
+        child.kill()
+        assert child.wait(timeout=5) < 0
+
+        output = prepare_embedding_model(_settings(cache), downloader=_downloader([]))
+
+        assert model_manifest_path(cache).read_bytes() == output
+        assert verify_model_manifest(
+            cache,
+            model_name=EMBEDDING_MODEL_NAME,
+            revision=EMBEDDING_MODEL_REVISION,
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("lock_kind", ["symlink", "hardlink", "directory", "fifo"])
+def test_prepare_rejects_linked_or_nonregular_stable_lock_paths(
+    tmp_path: Path, lock_kind: str
+) -> None:
+    cache = tmp_path / "cache"
+    private_root = cache / ".omf-retrieval"
+    private_root.mkdir(parents=True)
+    lock = private_root / "prepare.lock"
+    target = tmp_path / "outside-lock-target"
+    target.write_bytes(b"unchanged")
+    if lock_kind == "symlink":
+        lock.symlink_to(target)
+    elif lock_kind == "hardlink":
+        os.link(target, lock)
+    elif lock_kind == "directory":
+        lock.mkdir()
+    else:
+        os.mkfifo(lock)
+
+    with pytest.raises(ModelPrepareError, match="preparation failed") as captured:
+        prepare_embedding_model(_settings(cache), downloader=_downloader([]))
+
+    assert "outside" not in str(captured.value)
+    assert target.read_bytes() == b"unchanged"
+
+
+def test_prepare_lock_descriptor_is_closed_without_unlinking_stable_file(
+    tmp_path: Path,
+) -> None:
+    lock = tmp_path / "prepare.lock"
+    descriptor = acquire_prepare_lock(lock)
+
+    release_prepare_lock(descriptor)
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert lock.is_file()
 
 
 @pytest.mark.parametrize("field", ["embedding_model_name", "embedding_model_revision"])
@@ -279,6 +406,9 @@ def test_prepare_propagates_process_control_exceptions(
         prepare_embedding_model(_settings(tmp_path), downloader=fail)
     assert captured.value is failure
     assert not model_manifest_path(tmp_path).exists()
+    lock = tmp_path / ".omf-retrieval" / "prepare.lock"
+    descriptor = acquire_prepare_lock(lock)
+    release_prepare_lock(descriptor)
 
 
 def test_prepare_with_injected_downloader_does_not_import_heavy_libraries(

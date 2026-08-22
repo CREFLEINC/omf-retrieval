@@ -191,7 +191,7 @@ def test_every_fsync_failure_restores_prior_valid_manifest(
         revision=EMBEDDING_MODEL_REVISION,
     )
     assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
-    assert not (tmp_path / ".omf-retrieval" / "prepare.lock").exists()
+    assert (tmp_path / ".omf-retrieval" / "prepare.lock").is_file()
 
 
 def test_cleanup_failure_runs_every_restore_durability_event(

@@ -115,7 +115,7 @@ def test_commit_fsync_snapshot_swap_is_caught_by_last_full_validation(
         revision=EMBEDDING_MODEL_REVISION,
     )
     assert not list((tmp_path / ".omf-retrieval").glob(".manifest-*"))
-    assert not (tmp_path / ".omf-retrieval" / "prepare.lock").exists()
+    assert (tmp_path / ".omf-retrieval" / "prepare.lock").is_file()
 
 
 def test_success_has_no_model_cache_mutation_after_final_full_validation(
