@@ -436,11 +436,13 @@ def _canonical_path_parts(source_path: str) -> tuple[str, ...]:
 
 
 def _owner_domain(path_parts: tuple[str, ...]) -> OwnerDomain:
-    if path_parts[0] == "docs":
+    if path_parts[0] == "docs" or path_parts[:2] == ("design", "wiki"):
         return OwnerDomain.DOCS
     if path_parts[0] == "uiux":
         return OwnerDomain.UIUX
-    raise MetadataExtractionError("Source path owner must be docs or uiux")
+    raise MetadataExtractionError(
+        "Source path owner must be docs, design/wiki, or uiux"
+    )
 
 
 def _decision_state(

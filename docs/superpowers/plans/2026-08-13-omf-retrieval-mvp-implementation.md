@@ -1,1656 +1,315 @@
-# OMF Retrieval MVP 상세 구현 계획
+# OMF Retrieval 초고속 MVP 상세 구현 계획
 
-> **문서 정본:** 이 Markdown 파일이 실행 계획의 정본이다. 같은 경로의 HTML은 프로젝트 관련자를 위한 파생 열람본이며, 내용이 충돌하면 이 파일을 우선한다.
->
-> **실행자 필수:** 구현을 시작할 때 <code>superpowers:executing-plans</code>, 각 기능을 작성할 때 <code>superpowers:test-driven-development</code>, 완료를 주장하기 전에 <code>superpowers:verification-before-completion</code>을 사용한다. Python 코드는 <code>crefle-agent-skills:coding-rules</code>를 따른다.
+> **문서 정본:** 이 Markdown 파일이 실행 계획의 정본이다. 시스템 설계 HTML은 설계 결정의 독립 정본이며 이 파일의 파생물이 아니다. 실행 절차가 충돌하면 이 Markdown을 우선한다.
 
 | 문서 항목 | 값 |
 |---|---|
-| 작성자 | CREFLE / Codex |
-| 작성일시 | 2026-08-19 KST |
-| 문서 버전 | v1.2 |
-| 열람 대상 | CREFLE 개발자·검토자 |
-| 기준 설계 | <code>docs/design/2026-08-13-omf-retrieval-mvp-system-design.html</code> v1.0 |
-| 상태 | 최종 승인 · 개발 착수 가능 |
+| 작성자 | Codex — 사용자 승인 반영 |
+| 작성일시 | 2026-08-27 15:53 KST |
+| 문서 버전 | v2.0 |
+| 열람 대상 | 프로젝트 관련자 |
+| 기준 설계 | `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.0 |
+| 상태 | MVP 완료 · 단위 1~4 독립 검증 PASS |
+
+## 용어
+
+| 용어 | 뜻 |
+|---|---|
+| RAG | Retrieval-Augmented Generation. 이 MVP에서는 생성 없이 검색과 근거 반환까지만 담당 |
+| 근거 패키지 | 인용문과 원문 좌표, 검색 순위, 색인 재현 정보를 묶은 API 결과 |
+| 현재본 | 고정 OMF commit에서 `design/wiki/**/*.md`로 선택되는 문서 집합 |
+| WIP | Work In Progress. 작업 8~10에서 시작해 이번 MVP에 안정화한 기존 구현 |
+| RRF | Reciprocal Rank Fusion. 키워드·벡터 결과의 순위를 역수로 합치는 방식 |
+| 검색 lane | 키워드 또는 벡터 검색이 독립적으로 후보와 순위를 만드는 경로 |
+| 원시 점수 | RRF 결합 전의 lane별 관련도. 키워드는 `pg_trgm` similarity, 벡터는 정규화한 임베딩의 cosine similarity |
+| 근거 하한선 | 후보가 해당 lane의 RRF 입력이 되기 위해 충족해야 하는 원시 점수 최솟값 |
+| 분리 margin | 고정 smoke에서 정상 질의의 acceptable evidence가 문서에 없는 질의의 lane별 최고점보다 앞선 최소 여유 |
+| 수직 절편 | 검색 core부터 API·CLI까지 하나의 사용자 동작으로 연결하는 구현 단위 |
 
 ## 개정 이력
 
 | 버전 | 작성일시 | 변경 | 작성자 |
 |---|---|---|---|
-| v1.2 | 2026-08-19 KST | OMF commit 선행조건, 버전 검색 정책, 성능 workload, 토큰 회전 절차, 작업 단위별 확인 지점을 확정 설계·협업 정책과 정합화 | CREFLE / Codex |
-| 1.1 | 2026-08-14 17:08 KST | 작업 1의 RED를 import 오류가 아닌 구현 부재에 따른 assertion 실패로 재구성 | CREFLE Inc. CTO 김정규 |
-| 1.0 | 2026-08-13 15:50 KST | 최초 승인본 | CREFLE Inc. CTO 김정규 |
-
-## 1. 목표
-
-OMF 문서의 고정 Git commit에서 승인된 Markdown만 색인하고, 자연어 질의에 대해 관련 원문을 다음 재현 정보와 함께 반환하는 공유 검색 서비스를 구현한다.
-
-- 직접 인용과 1-based inclusive 원문 행 범위
-- 저장소 기준 source path와 제목 계층
-- 색인 대상 commit SHA와 UTF-8 원문 SHA-256
-- 문서 날짜·버전·결정 상태·소유 영역
-- 키워드·벡터 개별 순위와 RRF 점수
-- 같은 내용의 모든 원본 경로와 명시적으로 등록된 잠재 충돌
-
-MVP는 근거 검색까지만 담당한다. LLM 요약·분석, MCP, Codex function tool, 리랭커, ANN, 자동 백업은 구현하지 않는다.
-
-## 2. 구현 원칙과 정지 조건
-
-1. 모든 동작 변경은 실패하는 테스트로 시작한다.
-2. 한 번에 하나의 논리적 기능만 구현하고 테스트가 통과한 상태에서 Conventional Commit을 만든다.
-3. OMF 저장소는 읽기 전용이다. 테스트는 임시 Git 저장소나 fixture를 사용한다.
-4. unit test는 모델 다운로드·GPU·외부 네트워크를 요구하지 않는다.
-5. PostgreSQL 동작은 실제 <code>pgvector/pgvector</code> Compose 컨테이너에서 검증한다.
-6. 서버 GPU E2E와 운영 배포는 로컬·통합 테스트가 모두 통과하고 사용자가 해당 단계를 승인한 뒤 실행한다.
-7. 골드 질문과 정답 근거는 사람이 검토해야 한다. 30개 골드셋 승인 전에는 품질 게이트를 통과했다고 주장하지 않는다.
-8. 서비스 FQDN, Gateway 사설 IP, 검색 서버 bind IP·port, OMF Git remote·인증 방식, 초기 API client가 없으면 운영 배포 직전에 정지한다.
-9. 새로운 런타임 의존성, API endpoint, DB table, 검색 가중치, 권한 범위를 이 계획 밖에서 추가해야 하면 구현을 멈추고 사용자 승인을 받는다.
-10. 아래 번호가 붙은 실행 항목을 체크 단위로 사용한다. 한 항목의 red/green 확인이 5분을 넘길 것으로 보이면 구현 전에 더 작은 test case와 함수 단위로 나눈다.
-
-## 3. 확정 구현 기준
-
-### 3.1 Python과 의존성
-
-- Python 3.12
-- <code>pyproject.toml</code> + <code>uv.lock</code>, uv 0.12.3
-- PyTorch 2.11.0을 직접 의존성으로 선언하고, Linux x86_64만 공식 <code>cu128</code> index를 명시적으로 사용한다. macOS는 PyPI의 CPU/MPS build를 사용한다.
-- 운영 직접 의존성 기준:
-  - FastAPI 0.141.1
-  - Uvicorn 0.52.2 최소 패키지
-  - Typer 0.27.1
-  - Pydantic Settings 2.15.0
-  - SQLAlchemy 2.0.52 동기 API
-  - Alembic 1.19.1
-  - Psycopg 3.3.4 binary extra
-  - pgvector Python adapter 0.5.0
-  - Sentence Transformers 5.7.0
-  - Transformers 5.15.0
-  - markdown-it-py 4.2.0
-  - HTTPX 0.28.1
-- 개발 직접 의존성 기준:
-  - pytest 9.1.1
-  - pytest-cov 7.1.0
-  - Ruff 0.16.2
-- <code>pyproject.toml</code>에는 호환 가능한 minor 상한을 기록하고, 실제 설치 버전과 transitive dependency는 <code>uv.lock</code>으로 고정한다. PyTorch index는 <code>explicit=true</code>로 두어 다른 package가 CUDA index에서 해결되지 않게 한다.
-- JSON 평가셋, 표준 <code>logging</code>, <code>hashlib</code>, <code>hmac</code>, <code>secrets</code>를 사용한다. PyYAML, structlog, 비동기 DB driver, Testcontainers, Flash Attention은 추가하지 않는다.
-
-### 3.2 불변 외부 artifact
-
-| Artifact | 고정값 |
-|---|---|
-| Application base | <code>pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime@sha256:eee11b3b3872a8c838e35ef48f08b2d5def2080902c7f666831310ca1a0ef2be</code> |
-| PostgreSQL | <code>pgvector/pgvector:0.8.6-pg18-trixie@sha256:1963bc48febf543433baa1ce3edcc6cc08154de722e22495f86681cc9a849026</code> |
-| Embedding model | <code>Qwen/Qwen3-Embedding-0.6B</code> |
-| Model revision | <code>97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3</code> |
-| Embedding dimension | 1024 |
-| Query instruction | <code>Instruct: Retrieve passages from Korean internal software design documents that provide the requirements, policies, API definitions, data models, or decisions needed to answer the query.\nQuery: {query}</code> |
-
-### 3.3 보수적 문서 메타데이터 판정과 버전 검색 정책
-
-문서 전체의 의미를 추론하지 않는다. 메타데이터는 다음 명시적 신호만 사용하고,
-버전 범위는 확정된 색인·검색 정책을 따른다.
-
-- 날짜: 상단 40행의 <code>작성일:</code>, 없으면 파일명 선두 <code>YYYY-MM-DD</code>, 없으면 <code>null</code>
-- 버전: 상단 40행의 <code>vN[.N...]</code>, 없으면 파일명 버전, 없으면 <code>null</code>
-- 버전 범위: 전체 문서와 명시적 버전 스냅샷을 색인하되 일반 검색은 현재본을 우선한다. 사용자가 이전 버전·변경 전·최초 결정을 요구하면 과거본을 검색한다.
-- source path의 <code>/versions/</code>는 명시적 버전 스냅샷의 한 형태이며, 이를 과거본의 유일한 조건으로 제한하거나 이 계획에서 새로운 판정 휴리스틱을 추가하지 않는다.
-- 결정 상태:
-- <code>confirmed</code>: 파일명 <code>확정기록</code>·<code>결정서</code>, 상단 메타데이터의 <code>[확정]</code>·<code>확정</code>, 또는 식별 표의 <code>신뢰도=확정</code>
-  - <code>draft</code>: 파일명·상단 제목의 <code>초안</code>·<code>제안안</code>·<code>가설</code>·<code>진행메모</code>
-  - 그 외 <code>unknown</code>
-- 소유 영역: <code>uiux/</code>는 <code>uiux</code>, <code>docs/</code>는 <code>docs</code>
-- <code>supersedes</code>와 <code>potential_conflict</code>는 사람이 관리하는 <code>config/source_profiles/omf-relations.json</code>에 원문 path·행 근거가 있을 때만 저장한다.
-- 같은 문서 일부에 등장하는 “철회”, “폐기”, “가설”이라는 단어만으로 문서 전체 상태를 변경하지 않는다.
-- 상태 marker는 구조화된 metadata line·표 cell·파일명에서만 읽고, <code>미확정</code>·<code>불확정</code>·<code>확정 전</code>처럼 부정된 표현은 <code>confirmed</code>로 판정하지 않는다.
-
-## 4. 목표 저장소 구조
-
-~~~text
-.
-├── pyproject.toml
-├── uv.lock
-├── .python-version
-├── README.md
-├── alembic.ini
-├── compose.yaml
-├── compose.test.yaml
-├── Dockerfile
-├── config/
-│   └── source_profiles/
-│       ├── omf.json
-│       └── omf-relations.json
-├── migrations/
-│   ├── env.py
-│   └── versions/0001_initial_schema.py
-├── src/omf_retrieval/
-│   ├── settings.py
-│   ├── domain/
-│   │   ├── enums.py
-│   │   ├── errors.py
-│   │   ├── models.py
-│   │   └── policies.py
-│   ├── application/
-│   │   ├── search/{ports.py,rrf.py,evidence.py,service.py}
-│   │   ├── indexing/{ports.py,hashing.py,metadata.py,service.py,activation.py}
-│   │   ├── evaluation/{dataset.py,metrics.py,runner.py}
-│   │   └── admin/{tokens.py,service.py}
-│   ├── interfaces/
-│   │   ├── api/{app.py,dependencies.py,errors.py,schemas.py,routes/}
-│   │   └── cli/{main.py,search.py,indexing.py,evaluation.py,admin.py,model.py}
-│   └── infrastructure/
-│       ├── database/{base.py,models.py,session.py,repositories.py,search.py}
-│       ├── embedding/{provider.py,sentence_transformer.py}
-│       ├── source/{profiles.py,git_archive.py,markdown.py,chunker.py}
-│       └── observability/{logging.py,timing.py}
-├── evaluations/
-│   ├── gold/{schema.json,omf-retrieval-v1.json}
-│   └── results/.gitkeep
-├── ops/
-│   ├── build-and-push.sh
-│   ├── deploy.sh
-│   ├── prepare-host.sh
-│   └── smoke-test.sh
-└── tests/
-    ├── fixtures/
-    ├── unit/
-    ├── integration/
-    ├── contract/
-    ├── performance/
-    └── server/
-~~~
-
-## 5. 단계와 사용자 확인 지점
-
-아래 단계는 진행 현황을 묶어 보고하기 위한 구분이며 여러 작업 단위를 연속 실행하는
-승인이 아니다. 각 작업 단위의 결과와 검증 증거를 사용자에게 공유하고 확인받은 뒤
-다음 작업 단위를 시작한다.
-
-| 단계 | 범위 | 완료 조건 | 사용자 확인 |
-|---|---|---|---|
-| A · 기반 | 작업 1~6 | 프로젝트·도메인·DB·source·parser·chunk unit/integration 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
-| B · 검색 수직 절편 | 작업 7~12 | fake embedding 색인부터 인증된 API·CLI 검색까지 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
-| C · 평가·컨테이너 | 작업 13~15 | 평가기·로그·Docker/Compose와 로컬 계약 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작 |
-| D · 운영 검증 | 작업 16~17 | 30개 골드 승인, server GPU E2E, 품질·성능 기준 통과 | 각 작업 결과 공유·확인 후 다음 작업 시작; 외부 변경 전 별도 확인 |
-| E · 인수 | 작업 18 | 전체 검증 증거와 운영 인계 완료 | 최종 승인 |
-
----
-
-## 작업 1. Python 프로젝트와 품질 게이트 구성
-
-**파일**
-
-- 생성: <code>pyproject.toml</code>
-- 생성: <code>uv.lock</code>
-- 생성: <code>.python-version</code>
-- 생성: <code>README.md</code>
-- 생성: <code>src/omf_retrieval/__init__.py</code>
-- 생성: 설계의 목표 package별 <code>__init__.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/main.py</code>의 최소 Typer <code>app</code> 뼈대; 작업 12에서 확장
-- 테스트: <code>tests/unit/test_package.py</code>
-
-**1.1 프로젝트·package 구조 존재 계약 test 작성**
-
-~~~python
-from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).parents[2]
-REQUIRED_PATHS = (
-    "pyproject.toml",
-    ".python-version",
-    "README.md",
-    "src/omf_retrieval/__init__.py",
-    "src/omf_retrieval/domain/__init__.py",
-    "src/omf_retrieval/application/__init__.py",
-    "src/omf_retrieval/application/search/__init__.py",
-    "src/omf_retrieval/application/indexing/__init__.py",
-    "src/omf_retrieval/application/evaluation/__init__.py",
-    "src/omf_retrieval/application/admin/__init__.py",
-    "src/omf_retrieval/interfaces/__init__.py",
-    "src/omf_retrieval/interfaces/api/__init__.py",
-    "src/omf_retrieval/interfaces/api/routes/__init__.py",
-    "src/omf_retrieval/interfaces/cli/__init__.py",
-    "src/omf_retrieval/infrastructure/__init__.py",
-    "src/omf_retrieval/infrastructure/database/__init__.py",
-    "src/omf_retrieval/infrastructure/embedding/__init__.py",
-    "src/omf_retrieval/infrastructure/source/__init__.py",
-    "src/omf_retrieval/infrastructure/observability/__init__.py",
-)
-
-
-def test_project_structure_exists() -> None:
-    missing = [
-        path for path in REQUIRED_PATHS if not (PROJECT_ROOT / path).is_file()
-    ]
-
-    assert missing == []
-~~~
-
-**1.2 구조 계약 RED 확인**
-
-실행:
-
-~~~bash
-uv run --isolated --with pytest==9.1.1 \
-  pytest tests/unit/test_package.py::test_project_structure_exists -q
-~~~
-
-예상: test collection은 성공하고, 누락된 경로 목록 때문에 assertion이 실패한다. import·문법·fixture 오류는 RED로 인정하지 않는다.
-
-**1.3 최소 프로젝트·package 뼈대 작성과 GREEN 확인**
-
-- <code>pyproject.toml</code>, <code>.python-version</code>, <code>README.md</code>를 만든다.
-- 목표 package 경계마다 빈 <code>__init__.py</code>를 만든다.
-- 이 단계의 <code>pyproject.toml</code>에는 승인된 build backend, Python 범위, 운영·개발 직접 의존성과 Ruff 설정을 기록하되 console script는 아직 등록하지 않는다.
-- 1.2의 test를 다시 실행해 구조 존재 계약이 통과하는지 확인한다.
-
-**1.4 import 가능한 package의 version 동작 계약 test 작성**
-
-~~~python
-def test_package_exposes_version() -> None:
-    import omf_retrieval
-
-    assert getattr(omf_retrieval, "__version__", None) == "0.1.0"
-~~~
-
-**1.5 version 계약 RED와 최소 GREEN 확인**
-
-실행: <code>uv run pytest tests/unit/test_package.py::test_package_exposes_version -q</code>
-
-예상 RED: package import는 성공하고 <code>__version__</code> 값이 없어 assertion이 실패한다.
-
-최소 구현으로 <code>src/omf_retrieval/__init__.py</code>에 <code>__version__ = "0.1.0"</code>을 추가한 뒤 같은 test가 통과하는지 확인한다.
-
-**1.6 console script metadata 계약 test 작성**
-
-기존 test module의 import 구역에 <code>entry_points</code>와 <code>typer</code>를 추가한다.
-
-~~~python
-from importlib.metadata import entry_points
-
-import typer
-
-
-def test_console_script_targets_typer_app() -> None:
-    scripts = [
-        entry_point
-        for entry_point in entry_points(group="console_scripts")
-        if entry_point.name == "omf-retrieval"
-    ]
-
-    assert [entry_point.value for entry_point in scripts] == [
-        "omf_retrieval.interfaces.cli.main:app"
-    ]
-
-    app = scripts[0].load()
-    assert isinstance(app, typer.Typer)
-~~~
-
-**1.7 console script 계약 RED와 최소 GREEN 확인**
-
-실행: <code>uv run pytest tests/unit/test_package.py::test_console_script_targets_typer_app -q</code>
-
-예상 RED: project metadata 조회는 성공하고 등록된 <code>omf-retrieval</code> script가 없어 첫 번째 목록 assertion이 실패한다. <code>scripts[0].load()</code>는 이 assertion 뒤에 있으므로 최초 RED에서 실행되지 않으며 import 오류를 실패 근거로 사용하지 않는다.
-
-- <code>pyproject.toml</code>에 <code>omf-retrieval = omf_retrieval.interfaces.cli.main:app</code> entry point를 하나만 등록한다.
-- <code>src/omf_retrieval/interfaces/cli/main.py</code>에 <code>app = typer.Typer()</code>인 import 가능한 최소 Typer <code>app</code>을 만든다.
-- 같은 test를 다시 실행해 entry point 이름·target이 정확히 일치하고, <code>load()</code>가 성공하며 실제 <code>typer.Typer</code> 객체가 반환되는지 확인한다.
-
-**1.8 Unit test 사례와 예상 결과 확인**
-
-| 계약 | 정상 사례 | 경계·실패 사례와 예상 결과 |
-|---|---|---|
-| 구조 존재 | 모든 필수 경로가 file이면 빈 누락 목록으로 통과 | 하나 이상의 경로가 없으면 해당 경로가 누락 목록에 남아 assertion 실패 |
-| package version | import가 성공하고 값이 정확히 <code>0.1.0</code>이면 통과 | import는 성공하지만 값이 없거나 다르면 assertion 실패 |
-| console script | 같은 이름의 entry point가 하나이고 target이 정확하며 <code>load()</code> 결과가 <code>typer.Typer</code>이면 통과 | entry point가 없거나 중복되거나 target이 다르면 첫 목록 assertion 실패; target은 맞지만 반환 객체의 유형이 다르면 두 번째 assertion 실패; import 자체가 실패하면 유효한 RED가 아닌 test 오류 |
-
-**1.9 project metadata 세부 기준 확인**
-
-- build backend는 표준 wheel을 만들 수 있는 uv build backend를 사용한다.
-- script entry point는 <code>omf-retrieval = omf_retrieval.interfaces.cli.main:app</code> 하나만 둔다.
-- dependency group <code>dev</code>에 pytest, pytest-cov, Ruff를 둔다.
-- Python 범위는 <code>&gt;=3.12,&lt;3.13</code>으로 고정한다.
-- <code>torch==2.11.0</code>을 직접 선언하고 Linux x86_64 marker에는 explicit <code>https://download.pytorch.org/whl/cu128</code> source를 연결한다.
-
-**1.10 잠금 파일 생성 및 재현 확인**
-
-실행:
-
-~~~bash
-uv lock
-uv sync --frozen
-uv run pytest tests/unit/test_package.py -q
-~~~
-
-예상: 세 계약 test가 모두 통과한다.
-
-**1.11 Ruff gate 구성**
-
-- line length 88
-- import sorting, unused import, common bug rules 활성화
-- <code>uv run ruff format --check .</code>와 <code>uv run ruff check .</code> 모두 통과
-
-**1.12 commit**
-
-~~~bash
-git add pyproject.toml uv.lock .python-version README.md src tests/unit/test_package.py
-git commit -m "build(project): Python 애플리케이션 기반 구성"
-~~~
-
----
-
-## 작업 2. 설정, domain model, hash 규약 정의
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/settings.py</code>
-- 생성: <code>src/omf_retrieval/domain/enums.py</code>
-- 생성: <code>src/omf_retrieval/domain/errors.py</code>
-- 생성: <code>src/omf_retrieval/domain/models.py</code>
-- 생성: <code>src/omf_retrieval/domain/policies.py</code>
-- 생성: <code>src/omf_retrieval/application/indexing/hashing.py</code>
-- 테스트: <code>tests/unit/domain/test_policies.py</code>
-- 테스트: <code>tests/unit/indexing/test_hashing.py</code>
-- 테스트: <code>tests/unit/test_settings.py</code>
-
-**2.1 config hash 실패 test 작성**
-
-~~~python
-def test_config_hash_is_stable_across_key_order() -> None:
-    assert config_hash({"b": 2, "a": 1}) == config_hash({"a": 1, "b": 2})
-
-
-def test_content_hash_preserves_exact_utf8_bytes() -> None:
-    assert content_hash("문서\n".encode()) != content_hash("문서".encode())
-~~~
-
-**2.2 실패 확인**
-
-실행: <code>uv run pytest tests/unit/indexing/test_hashing.py -q</code>
-
-**2.3 canonical JSON과 SHA-256 구현**
-
-~~~python
-def canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def config_hash(value: object) -> str:
-    return hashlib.sha256(canonical_json(value)).hexdigest()
-~~~
-
-- content hash는 Git archive에서 읽은 원본 UTF-8 bytes에 직접 적용한다.
-- config hash는 canonical JSON bytes에 적용한다.
-- chunk hash 입력에는 parser version, chunk config hash, heading path, 1-based line range, raw text, search text를 포함한다.
-
-**2.4 domain enum과 value object test 작성**
-
-- <code>VersionScope</code>: current, historical, all
-- <code>DecisionState</code>: confirmed, draft, unknown
-- <code>OwnerDomain</code>: docs, uiux
-- <code>IndexRunStatus</code>: building, ready, active, previous, failed
-- <code>RelationType</code>: supersedes, potential_conflict
-- <code>SearchStatus</code>: ok, no_evidence
-
-공개 model은 frozen dataclass 또는 Pydantic과 무관한 typed dataclass로 두어 domain이 framework에 의존하지 않게 한다.
-
-**2.5 production 설정 test 작성**
-
-~~~python
-def test_production_requires_gpu_zero_and_secret_files(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        Settings(
-            environment="production",
-            embedding_device="cpu",
-            postgres_password_file=tmp_path / "missing",
-        )
-~~~
-
-- 설정은 environment variable과 <code>*_FILE</code> secret path를 검증한다.
-- API token 원문, DB password, audit HMAC key는 settings <code>repr</code>에 나오지 않는다.
-- model name, revision, dimension, query instruction과 검색 기본값은 설정에서 읽는다.
-
-**2.6 전체 unit test 및 commit**
-
-~~~bash
-uv run pytest tests/unit/domain tests/unit/indexing/test_hashing.py tests/unit/test_settings.py -q
-uv run ruff check .
-git add src/omf_retrieval tests
-git commit -m "feat(domain): 검색과 색인 핵심 계약 정의"
-~~~
-
----
-
-## 작업 3. PostgreSQL test 환경과 초기 schema
-
-**파일**
-
-- 생성: <code>compose.test.yaml</code>
-- 생성: <code>alembic.ini</code>
-- 생성: <code>migrations/env.py</code>
-- 생성: <code>migrations/script.py.mako</code>
-- 생성: <code>migrations/versions/0001_initial_schema.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/database/base.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/database/models.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/database/session.py</code>
-- 테스트: <code>tests/integration/database/test_migrations.py</code>
-- 테스트: <code>tests/integration/database/test_constraints.py</code>
-
-**3.1 실제 extension을 요구하는 실패 test 작성**
-
-~~~python
-def test_required_extensions_are_installed(connection: Connection) -> None:
-    versions = dict(
-        connection.execute(
-            text(
-                "select extname, extversion from pg_extension "
-                "where extname in ('vector', 'pg_trgm')"
-            )
-        )
-    )
-    assert set(versions) == {"vector", "pg_trgm"}
-~~~
-
-**3.2 test DB 기동과 실패 확인**
-
-~~~bash
-docker compose -f compose.test.yaml up -d db
-uv run pytest tests/integration/database/test_migrations.py -q
-~~~
-
-예상: migration과 table이 없어 실패.
-
-**3.3 초기 migration 작성**
-
-다음 13개 table을 한 migration에 만든다.
-
-| Table | 필수 column·제약 |
-|---|---|
-| <code>source_profiles</code> | UUID PK, unique source_key, include/exclude JSONB, nullable active_index_run_id |
-| <code>index_configs</code> | UUID PK, unique config_hash, parser/chunk/tokenizer/embedding/RRF JSONB snapshot |
-| <code>index_runs</code> | source/config FK, commit_sha, status check, timestamps, stats JSONB, sanitized failure |
-| <code>document_contents</code> | unique content_hash, UTF-8 content, byte_size |
-| <code>document_occurrences</code> | run/content FK, source_path, version scope, date/version/state/owner, unique run+path |
-| <code>document_parses</code> | content FK, parser version, chunk config hash, unique content+config |
-| <code>sections</code> | parse FK, self parent FK, ordinal/level/heading/path, body, inclusive lines |
-| <code>chunks</code> | section FK, ordinal, raw/search text, token count, inclusive lines, chunk hash |
-| <code>chunk_embeddings</code> | chunk FK, embedding config hash, model/revision/dimension, unbounded vector, status |
-| <code>document_relations</code> | run/from/to occurrence FK, relation type, explicit evidence path+lines |
-| <code>api_clients</code>, <code>client_source_grants</code>, <code>search_audit_events</code> | token 원문과 query 원문을 저장하지 않는 인증·감사 column |
-
-인증 관련 3개 table은 물리적으로 같은 migration에 포함하되 application 기능은 작업 10에서 작성한다.
-
-**3.4 index와 DB invariant 작성**
-
-~~~sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX ix_chunks_search_text_trgm
-    ON chunks USING gin (search_text gin_trgm_ops);
-~~~
-
-- ANN index는 만들지 않는다.
-- <code>vector_dims(embedding) = dimension</code> check를 둔다.
-- <code>(chunk_id, embedding_config_hash)</code>, <code>(run_id, source_path)</code>, grant 조합을 unique로 둔다.
-- circular active run FK는 table 생성 후 추가하고 삭제 정책은 restrict로 둔다.
-
-**3.5 migration·constraint test 통과**
-
-~~~bash
-uv run alembic upgrade head
-uv run pytest tests/integration/database -q
-uv run alembic downgrade base
-uv run alembic upgrade head
-~~~
-
-**3.6 commit**
-
-~~~bash
-git add compose.test.yaml alembic.ini migrations src/omf_retrieval/infrastructure/database tests/integration/database
-git commit -m "feat(database): 검색 데이터 모델과 마이그레이션 추가"
-~~~
-
----
-
-## 작업 4. OMF source profile과 안전한 Git snapshot
-
-**파일**
-
-- 생성: <code>config/source_profiles/omf.json</code>
-- 생성: <code>config/source_profiles/omf-relations.json</code>
-- 생성: <code>src/omf_retrieval/application/indexing/ports.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/source/profiles.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/source/git_archive.py</code>
-- 테스트: <code>tests/unit/source/test_profiles.py</code>
-- 테스트: <code>tests/integration/source/test_git_archive.py</code>
-
-**4.1 include/exclude 실패 test 작성**
-
-~~~python
-@pytest.mark.parametrize(
-    ("path", "included"),
-    [
-        ("docs/research/a.md", True),
-        ("docs/planning/versions/v1.md", True),
-        ("uiux/spec.md", True),
-        ("docs/raw/secret.md", False),
-        ("docs/_workspace/note.md", False),
-        ("uiux/CLAUDE.md", False),
-        ("uiux/image.png", False),
-    ],
-)
-def test_omf_profile_filters_paths(path: str, included: bool) -> None:
-    assert omf_profile().includes(path) is included
-~~~
-
-**4.2 profile 구현**
-
-- include: <code>docs/research/**/*.md</code>, <code>docs/planning/**/*.md</code>, <code>uiux/**/*.md</code>
-- exclude: <code>docs/raw/**</code>, <code>docs/_workspace/**</code>, <code>**/AGENTS.md</code>, <code>**/CLAUDE.md</code>, <code>**/.agents/**</code>, <code>**/.claude/**</code>, <code>**/_workspace/**</code>, 생성물·임시 file pattern
-- path는 POSIX 상대 경로로 정규화하고 <code>..</code>, 절대 경로, symlink 탈출을 거부한다.
-
-**4.3 임시 Git 저장소 기반 실패 test 작성**
-
-- dirty worktree는 거부
-- 존재하지 않는 commit은 거부
-- 지정 commit 내용만 archive
-- source repository에 쓰기 없음
-
-**4.4 GitArchiveSnapshotProvider 구현**
-
-~~~python
-class SourceSnapshotProvider(Protocol):
-    def snapshot(self, repo: Path, commit_sha: str) -> SourceSnapshot: ...
-~~~
-
-- <code>git status --porcelain</code>가 비어 있어야 한다.
-- <code>git rev-parse --verify commit^{commit}</code>으로 full SHA를 얻는다.
-- <code>git archive</code> 출력은 private temporary directory에서만 푼다.
-- archive member의 absolute path, <code>..</code>, symlink/hardlink를 거부한다.
-- temporary directory는 성공·실패 모두 정리한다.
-
-**4.5 test와 commit**
-
-~~~bash
-uv run pytest tests/unit/source tests/integration/source -q
-git add config src/omf_retrieval/application/indexing/ports.py src/omf_retrieval/infrastructure/source tests
-git commit -m "feat(source): OMF Git 스냅샷과 파일 선별 구현"
-~~~
-
----
-
-## 작업 5. Markdown 계층·행 범위·메타데이터 parser
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/application/indexing/metadata.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/source/markdown.py</code>
-- 생성: <code>tests/fixtures/markdown/</code>의 표·목록·인용·중복 제목 fixture
-- 테스트: <code>tests/unit/source/test_markdown_parser.py</code>
-- 테스트: <code>tests/unit/indexing/test_metadata.py</code>
-
-**5.1 1-based inclusive line map 실패 test**
-
-~~~python
-def test_parser_preserves_heading_hierarchy_and_lines() -> None:
-    parsed = parser.parse("# A\nintro\n\n## B\nbody\n")
-
-    assert parsed.sections[1].heading_path == ("A", "B")
-    assert (parsed.sections[1].line_start, parsed.sections[1].line_end) == (4, 5)
-~~~
-
-**5.2 block 구조 실패 test**
-
-- fenced code 안의 <code>#</code>를 heading으로 보지 않음
-- table row, list item, block quote의 source map 보존
-- heading이 없는 preamble을 synthetic root section에 포함
-- 같은 heading text가 반복되어도 ordinal과 line으로 구분
-
-**5.3 markdown-it-py token map 기반 parser 구현**
-
-- block token의 0-based half-open map을 1-based inclusive로 변환한다.
-- section tree와 heading path를 stack으로 만든다.
-- body raw text는 원본 line slice로 얻어 표·공백·인용 표현을 바꾸지 않는다.
-- parser version 상수를 index config에 기록한다.
-
-**5.4 보수적 metadata extractor 실패 test**
-
-실제 OMF 표기를 축약한 fixture로 날짜, 버전, 확정 상태, owner와 확정된 현재본·과거본
-검색 정책 적용 결과를 검증한다. <code>/versions/</code> path만을 과거본의 유일한 판정
-조건으로 두지 않는다.
-
-~~~python
-metadata = extract_metadata(
-    "docs/research/2026-07-14-긴급WO-운영방식-확정기록.md",
-    first_lines,
-)
-assert metadata.date == date(2026, 7, 14)
-assert metadata.version == "1.0"
-assert metadata.decision_state is DecisionState.CONFIRMED
-assert metadata.version_scope is VersionScope.CURRENT
-~~~
-
-**5.5 relation sidecar validation**
-
-- relation 양쪽 path가 같은 snapshot에 있어야 함
-- relation type은 두 enum만 허용
-- evidence line은 실제 문서 범위 안이어야 함
-- 자동 relation 추론은 구현하지 않음
-
-**5.6 test와 commit**
-
-~~~bash
-uv run pytest tests/unit/source/test_markdown_parser.py tests/unit/indexing/test_metadata.py -q
-git add src/omf_retrieval tests
-git commit -m "feat(parser): Markdown 계층과 명시적 메타데이터 파싱"
-~~~
-
----
-
-## 작업 6. 결정론적 Parent–Child chunker
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/infrastructure/source/chunker.py</code>
-- 테스트: <code>tests/unit/source/test_chunker.py</code>
-- 테스트: <code>tests/fixtures/markdown/long-section.md</code>
-
-**6.1 fake token counter로 실패 test 작성**
-
-~~~python
-def test_small_section_remains_one_child(fake_counter: TokenCounter) -> None:
-    chunks = chunker(fake_counter).split(section(tokens=600))
-    assert len(chunks) == 1
-
-
-def test_search_text_always_contains_heading_path() -> None:
-    chunk = chunker().split(section(path=("A", "B"), body="내용"))[0]
-    assert chunk.search_text.startswith("A\nB\n")
-~~~
-
-**6.2 경계 test 추가**
-
-- 일반 text 목표 400, soft max 600
-- 다음 child에 64 token overlap
-- table/list/quote는 하나의 atomic block으로 유지
-- atomic block이 800을 넘으면 row/item 경계에서 분할
-- single row/item 자체가 800을 넘으면 paragraph/token boundary로 분할하고 warning metadata 기록
-- child line range는 excerpt의 실제 최소·최대 line
-- 동일 입력·설정은 동일 chunk hash와 ordinal 생성
-
-**6.3 token abstraction과 chunker 구현**
-
-~~~python
-class TokenCounter(Protocol):
-    def encode(self, text: str) -> Sequence[int]: ...
-
-
-@dataclass(frozen=True)
-class ChunkConfig:
-    target_tokens: int = 400
-    soft_max_tokens: int = 600
-    overlap_tokens: int = 64
-    atomic_max_tokens: int = 800
-    parent_context_max_tokens: int = 1200
-~~~
-
-- unit test는 deterministic fake counter를 사용한다.
-- 운영 token counter는 작업 7의 고정 Qwen tokenizer adapter를 주입한다.
-- parent context 생성은 section body에서 match 주변 block을 1,200 token 이하로 자른다.
-
-**6.4 test와 단계 A 전체 gate 실행**
-
-~~~bash
-uv run pytest tests/unit tests/integration/database tests/integration/source -q
-uv run pytest tests/unit --cov=omf_retrieval.domain --cov=omf_retrieval.application --cov-fail-under=80
-uv run ruff format --check .
-uv run ruff check .
-~~~
-
-**6.5 commit과 사용자 확인**
-
-~~~bash
-git add src/omf_retrieval/infrastructure/source/chunker.py tests
-git commit -m "feat(indexing): 결정론적 parent-child 청킹 구현"
-~~~
-
-단계 A 결과, migration revision, test 수, coverage를 사용자에게 공유하고 단계 B 진행 확인을 받는다.
-
----
-
-## 작업 7. EmbeddingProvider와 Qwen GPU adapter
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/infrastructure/embedding/provider.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/embedding/sentence_transformer.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/model.py</code>
-- 테스트: <code>tests/unit/embedding/test_provider.py</code>
-- 테스트: <code>tests/server/test_gpu_embedding.py</code>
-
-**7.1 query/document 차이를 검증하는 실패 test**
-
-~~~python
-def test_query_instruction_is_applied_only_to_queries() -> None:
-    provider = RecordingEmbeddingProvider()
-    service = EmbeddingService(provider, QUERY_INSTRUCTION)
-
-    service.embed_query("승인 정책")
-    service.embed_documents(["승인 정책"])
-
-    assert provider.inputs == [
-        EXPECTED_INSTRUCTED_QUERY,
-        "승인 정책",
-    ]
-~~~
-
-**7.2 protocol과 fake 구현**
-
-~~~python
-class EmbeddingProvider(Protocol):
-    @property
-    def descriptor(self) -> EmbeddingDescriptor: ...
-    def embed_query(self, query: str) -> list[float]: ...
-    def embed_documents(self, documents: Sequence[str]) -> list[list[float]]: ...
-    def is_ready(self) -> bool: ...
-~~~
-
-- unit/integration test는 1024차원 deterministic fake를 사용한다.
-- dimension mismatch와 non-finite value를 domain error로 변환한다.
-
-**7.3 SentenceTransformer adapter 구현**
-
-- model과 tokenizer는 process당 한 번 lazy load한다.
-- revision을 반드시 전달하고 <code>trust_remote_code=False</code>를 유지한다.
-- output을 normalize하여 cosine distance와 일치시킨다.
-- production은 <code>cuda:0</code> 외 device를 거부한다.
-- dev/test에서만 명시적 CPU 설정을 허용한다.
-- inference는 bounded semaphore 1로 보호하고 batch size를 설정으로 둔다.
-- Flash Attention은 사용하지 않는다.
-
-**7.4 model prepare CLI 구현**
-
-<code>omf-retrieval model prepare</code>는 고정 revision을 model cache에 내려받고 file hash·revision을 출력한다. API container는 <code>HF_HUB_OFFLINE=1</code>로 실행하며 cache가 없으면 readiness 실패한다.
-
-**7.5 local test와 server test 분리**
-
-~~~bash
-uv run pytest tests/unit/embedding -q
-uv run pytest -m "not gpu" -q
-~~~
-
-<code>tests/server/test_gpu_embedding.py</code>는 <code>@pytest.mark.gpu</code>로 분리하며 phoebe server에서만 실행한다.
-
-**7.6 commit**
-
-~~~bash
-git add src/omf_retrieval/infrastructure/embedding src/omf_retrieval/interfaces/cli/model.py tests
-git commit -m "feat(embedding): Qwen 임베딩 공급자 추가"
-~~~
-
----
-
-## 작업 8. 증분 색인 pipeline과 content reuse
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/infrastructure/database/repositories.py</code>
-- 생성: <code>src/omf_retrieval/application/indexing/service.py</code>
-- 테스트: <code>tests/unit/indexing/test_index_service.py</code>
-- 테스트: <code>tests/integration/indexing/test_incremental_index.py</code>
-
-**8.1 fake port 기반 실패 test**
-
-~~~python
-def test_duplicate_content_is_parsed_and_embedded_once() -> None:
-    result = index_service.index(snapshot_with_two_paths_same_bytes())
-
-    assert result.occurrence_count == 2
-    assert result.unique_content_count == 1
-    assert fake_parser.calls == 1
-    assert fake_embeddings.document_calls == 1
-~~~
-
-**8.2 단계별 repository port 구현**
-
-- create building run
-- upsert content by hash
-- create occurrence per path
-- find/reuse parse by content+chunk config
-- find/reuse embedding by chunk+embedding config
-- store explicit relations
-- record counters and sanitized failure
-
-**8.3 indexing orchestrator 구현**
-
-~~~text
-advisory lock → commit snapshot → full path scan → content hash
-→ metadata → parse/chunk reuse or create → embedding reuse or create
-→ invariant validation → ready
-~~~
-
-- 전체 경로를 매 run 기록하되 unchanged content artifact는 재사용한다.
-- UTF-8 decode 실패, excluded file, empty document, parse failure를 구분해 count한다.
-- 한 document 실패가 전체 run을 실패시키며 active run은 건드리지 않는다.
-- failure detail에는 원문, token, host absolute path를 저장하지 않는다.
-
-**8.4 actual PostgreSQL integration test**
-
-- first run에서 모든 artifact 생성
-- second run에서 한 file만 변경했을 때 changed content만 parse/embed
-- exact duplicate가 한 content를 공유하고 두 origins로 보존
-- model revision 또는 dimension 변경 시 embedding만 재생성
-- chunk config 변경 시 parse/chunk 재생성
-- RRF 설정만 변경하면 재색인 불필요
-
-**8.5 test와 commit**
-
-~~~bash
-uv run pytest tests/unit/indexing tests/integration/indexing/test_incremental_index.py -q
-git add src/omf_retrieval/application/indexing src/omf_retrieval/infrastructure/database/repositories.py tests
-git commit -m "feat(indexing): 증분 색인 파이프라인 구현"
-~~~
-
----
-
-## 작업 9. 원자 활성 전환·2세대 보존·rollback
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/application/indexing/activation.py</code>
-- 확장: <code>src/omf_retrieval/infrastructure/database/repositories.py</code>
-- 테스트: <code>tests/integration/indexing/test_activation.py</code>
-- 테스트: <code>tests/integration/indexing/test_rollback.py</code>
-
-**9.1 동시 색인과 실패 격리 test 작성**
-
-- 같은 source의 두 transaction 중 하나만 advisory lock 획득
-- building/failed run은 active pointer 대상이 될 수 없음
-- 새 run 실패 후 기존 active ID 불변
-
-**9.2 단일 transaction activation 구현**
-
-~~~python
-with repository.transaction():
-    repository.assert_status(run_id, IndexRunStatus.READY)
-    old_active = repository.lock_source_profile(source_key)
-    repository.mark_previous(old_active)
-    repository.mark_active(run_id)
-    repository.set_active_pointer(source_key, run_id)
-    repository.prune_search_artifacts_except_active_and_previous(source_key)
-~~~
-
-- transaction 중 오류가 나면 status와 pointer가 모두 rollback된다.
-- 오래된 run의 commit/config/stats/failure metadata는 남기고 occurrence 이하 검색 artifact만 정리한다.
-
-**9.3 rollback 구현**
-
-- previous가 없으면 domain error
-- current active와 previous를 한 transaction에서 교환
-- rollback 대상 config/model/cache readiness를 먼저 검사
-- 실행 actor와 시각을 audit-safe log에 남김
-
-**9.4 integration test와 commit**
-
-~~~bash
-uv run pytest tests/integration/indexing/test_activation.py tests/integration/indexing/test_rollback.py -q
-git add src/omf_retrieval/application/indexing src/omf_retrieval/infrastructure/database tests
-git commit -m "feat(indexing): 원자 활성 전환과 롤백 구현"
-~~~
-
----
-
-## 작업 10. API client token, source grant, 안전한 query hash
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/application/admin/tokens.py</code>
-- 생성: <code>src/omf_retrieval/application/admin/service.py</code>
-- 확장: <code>src/omf_retrieval/infrastructure/database/repositories.py</code>
-- 테스트: <code>tests/unit/admin/test_tokens.py</code>
-- 테스트: <code>tests/integration/auth/test_grants.py</code>
-
-**10.1 token 원문 미저장 실패 test**
-
-~~~python
-def test_issued_token_is_shown_once_and_only_hash_is_persisted() -> None:
-    issued = service.create_client("agent-a", {"omf"})
-
-    assert issued.token.startswith("omfr_")
-    assert repository.saved.token_hash == sha256(issued.secret)
-    assert issued.secret not in repr(repository.saved)
-~~~
-
-**10.2 token 형식과 검증 구현**
-
-- 형식: <code>omfr_&lt;16-char-key-id&gt;.&lt;base64url-32-byte-secret&gt;</code>
-- 32 random bytes는 256-bit entropy
-- key ID로 row를 조회하고 SHA-256 결과를 <code>hmac.compare_digest</code>로 비교
-- disabled, revoked, expired를 모두 401로 처리해 상태 차이를 노출하지 않음
-- token은 create 시 stdout에 한 번만 표시
-
-고entropy API secret은 offline dictionary 대상이 아니므로 password KDF dependency를 추가하지 않는다.
-
-**10.3 source grant 선검증**
-
-- search repository를 부르기 전에 client와 requested source grant를 검사한다.
-- 없는 source와 무권한 source의 내부 차이를 외부 message로 노출하지 않는다.
-- create/revoke/list는 application admin service만 제공하며 HTTP admin route는 만들지 않는다.
-- 여러 token을 동시에 활성(<code>active</code>) 상태로 둘 수 있는 기존 기능과 create/list/revoke를 사용한다. 회전은 새 토큰 생성 → list에서 새 토큰과 기존 토큰이 둘 다 활성인지 확인 → 소비자 전환 → 기존 토큰 폐기 순서로 수행한다.
-- 별도 rotate CLI나 HTTP API는 추가하지 않는다.
-
-**10.4 query HMAC 규약**
-
-- audit query hash는 unkeyed SHA-256이 아니라 <code>HMAC-SHA256(audit_hmac_key, exact_utf8_query)</code>
-- 운영 key file: <code>/opt/omf-retrieval/secrets/audit_hmac_key</code>, mode 600
-- key가 없으면 production readiness 실패
-- query normalization을 하지 않아 audit hash가 사용자 입력을 임의 병합하지 않게 한다.
-
-**10.5 test와 commit**
-
-~~~bash
-uv run pytest tests/unit/admin tests/integration/auth -q
-git add src/omf_retrieval/application/admin src/omf_retrieval/infrastructure/database tests
-git commit -m "feat(auth): 검색 토큰과 source 권한 구현"
-~~~
-
----
-
-## 작업 11. pg_trgm·vector 후보와 RRF evidence package
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/application/search/ports.py</code>
-- 생성: <code>src/omf_retrieval/application/search/rrf.py</code>
-- 생성: <code>src/omf_retrieval/application/search/evidence.py</code>
-- 생성: <code>src/omf_retrieval/application/search/service.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/database/search.py</code>
-- 테스트: <code>tests/unit/search/test_rrf.py</code>
-- 테스트: <code>tests/unit/search/test_evidence.py</code>
-- 테스트: <code>tests/integration/search/test_hybrid_search.py</code>
-- 테스트: <code>tests/integration/search/test_authorization_filter.py</code>
-
-**11.1 RRF 실패 test**
-
-~~~python
-def test_rrf_uses_one_based_rank_and_equal_weights() -> None:
-    fused = reciprocal_rank_fusion(
-        keyword=[candidate("a"), candidate("b")],
-        vector=[candidate("b"), candidate("a")],
-        k=60,
-        keyword_weight=1.0,
-        vector_weight=1.0,
-    )
-    assert fused["a"].score == pytest.approx(1 / 61 + 1 / 62)
-~~~
-
-**11.2 parent grouping 실패 test**
-
-- 같은 parent의 두 child를 한 evidence item으로 묶음
-- evidence rank는 child 최고 RRF, 추가 match score를 더하지 않음
-- 각 match의 keyword/vector rank, RRF, discontiguous lines 보존
-- exact duplicate는 evidence 한 개와 origins 여러 개
-- explicit potential conflict는 양쪽 path와 line 근거 반환
-
-**11.3 authorized candidate CTE 구현**
-
-검색 SQL의 첫 CTE에서 다음을 모두 고정한다.
-
-- authenticated client grant
-- source profile active run
-- version scope
-- path prefixes
-- decision states
-
-그 결과에 포함된 occurrence와 연결된 unique chunk만 keyword/vector 후보가 될 수 있다. 권한·filter 밖 row는 similarity나 distance 계산에 들어가지 않는다.
-
-**11.4 후보 SQL 구현**
-
-~~~sql
--- keyword: authorized unique chunks, top 50
-ORDER BY similarity(search_text, :query) DESC, chunk_id
-LIMIT 50
-
--- vector: authorized unique chunks, exact cosine, top 50
-ORDER BY embedding <=> CAST(:query_vector AS vector), chunk_id
-LIMIT 50
-~~~
-
-- ANN index와 database-side weighted fusion은 사용하지 않는다.
-- stable tie breaker는 chunk UUID다.
-- active config의 model revision과 dimension이 query descriptor와 다르면 503 domain error다.
-
-**11.5 search service 구현**
-
-~~~text
-principal/source 확인 → active run 고정 → query instruction embedding
-→ keyword/vector 각 top 50 → application RRF → parent grouping
-→ 최고 child score 정렬 → limit → provenance 검증 → audit event
-~~~
-
-- default limit 5, max 20
-- no candidate는 <code>no_evidence</code>와 empty list
-- <code>include_context=true</code>일 때만 1,200 token 이하 parent context
-- query raw text는 audit repository나 log에 전달하지 않는다.
-
-**11.6 integration test와 commit**
-
-~~~bash
-uv run pytest tests/unit/search tests/integration/search -q
-git add src/omf_retrieval/application/search src/omf_retrieval/infrastructure/database/search.py tests
-git commit -m "feat(search): 하이브리드 검색과 근거 그룹화 구현"
-~~~
-
----
-
-## 작업 12. FastAPI 검색·health 계약과 Typer CLI
-
-**파일**
-
-- 생성: <code>src/omf_retrieval/interfaces/api/app.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/api/dependencies.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/api/errors.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/api/schemas.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/api/routes/search.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/api/routes/health.py</code>
-- 확장: <code>src/omf_retrieval/interfaces/cli/main.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/search.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/indexing.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/evaluation.py</code>
-- 생성: <code>src/omf_retrieval/interfaces/cli/admin.py</code>
-- 테스트: <code>tests/contract/api/test_search.py</code>
-- 테스트: <code>tests/contract/api/test_health.py</code>
-- 테스트: <code>tests/contract/cli/test_commands.py</code>
-
-**12.1 API schema 실패 test**
-
-정상, <code>no_evidence</code>, 401, 403, 409, 422, 503 fixture를 설계서 JSON 계약과 비교한다.
-
-~~~python
-def test_no_evidence_is_successful_empty_response(client: TestClient) -> None:
-    response = client.post("/v1/search", headers=auth(), json=VALID_REQUEST)
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "no_evidence"
-    assert response.json()["evidence_items"] == []
-~~~
-
-**12.2 endpoint 구현**
-
-- <code>POST /v1/search</code>
-- <code>GET /health/live</code>
-- <code>GET /health/ready</code>
-- 전체 문서·admin endpoint는 만들지 않음
-
-오류 body는 <code>request_id</code>, stable <code>code</code>, safe <code>message</code>만 포함한다. validation error에도 raw body, token, host path, stack trace가 나오지 않게 custom handler를 둔다.
-
-**12.3 health semantics**
-
-- live: process event loop가 응답하면 200, build/version 최소 정보
-- ready: DB query, active run, model cache/revision, provider ready, production CUDA, visible GPU count 1, logical <code>cuda:0</code> 검증
-- ready endpoint는 active Bearer token을 요구한다. Docker 내부 healthcheck는 live만 사용하고, 배포·운영 readiness 확인은 발급된 검색 token으로 호출한다.
-- ready 결과는 최대 120초 startup 내 성공해야 하지만 endpoint result 자체는 짧은 TTL로 cache해 동시 probe가 model을 다시 load하지 않게 함
-
-**12.4 CLI 실패 test와 구현**
-
-~~~text
-omf-retrieval search
-omf-retrieval index
-omf-retrieval evaluate
-omf-retrieval index-status
-omf-retrieval rollback
-omf-retrieval client create|revoke|list
-omf-retrieval model prepare
-~~~
-
-- search CLI만 HTTPX로 REST API를 호출한다.
-- 나머지는 same application service를 직접 호출한다.
-- secret/token은 verbose mode에도 재출력하지 않는다.
-- exit code: success 0, validation 2, auth 3, unavailable 4, quality gate fail 5.
-
-**12.5 전체 단계 B gate**
-
-~~~bash
-uv run pytest tests/unit tests/integration tests/contract -m "not gpu and not server" -q
-uv run pytest tests/unit tests/contract --cov=omf_retrieval.domain --cov=omf_retrieval.application --cov-fail-under=80
-uv run ruff format --check .
-uv run ruff check .
-~~~
-
-**12.6 commit과 사용자 확인**
-
-~~~bash
-git add src/omf_retrieval/interfaces tests/contract
-git commit -m "feat(api): 검색·헬스체크·운영 CLI 계약 구현"
-~~~
-
-단계 B 결과와 sample fake evidence response를 사용자에게 공유하고 단계 C 진행 확인을 받는다.
-
----
-
-## 작업 13. 검색 전용 평가 dataset과 metric
-
-**13.0 선행조건: OMF full commit SHA 승인 checkpoint**
-
-작업 13을 시작하기 전에 평가와 이후 색인에 사용할 OMF의 40자 full commit SHA를
-사용자가 확인해 고정한다. Agent는 특정 SHA를 임의로 선택하지 않으며, 기존의 고정
-commit 조건과 승인 checkpoint를 작업 13의 선행조건으로 앞당긴다.
-
-**파일**
-
-- 생성: <code>evaluations/gold/schema.json</code>
-- 생성: <code>evaluations/gold/omf-retrieval-v1.json</code>
-- 생성: <code>evaluations/results/.gitkeep</code>
-- 생성: <code>src/omf_retrieval/application/evaluation/dataset.py</code>
-- 생성: <code>src/omf_retrieval/application/evaluation/metrics.py</code>
-- 생성: <code>src/omf_retrieval/application/evaluation/runner.py</code>
-- 테스트: <code>tests/unit/evaluation/test_dataset.py</code>
-- 테스트: <code>tests/unit/evaluation/test_metrics.py</code>
-- 테스트: <code>tests/integration/evaluation/test_runner.py</code>
-
-**13.1 dataset validation 실패 test**
-
-각 질문은 다음을 포함해야 한다.
-
-~~~json
+| v2.0 | 2026-08-27 15:53 KST | 확정 근거 하한선·`no_evidence` 정책, 실제 색인·6개 smoke·품질 관찰과 단위 1~4 독립 검증 결과 반영 | Codex — 사용자 승인 반영 |
+| v2.0 | 2026-08-25 18:52 KST | 사용자 기능을 현재본 근거 검색으로 축소하고 남은 개발을 4개 단위로 재편; v1.2 작업 13~18 전체를 후속으로 이동 | Codex — 사용자 승인 반영 |
+| v1.3 | 2026-08-25 16:27 KST | Parse artifact manifest와 activation lifecycle의 migration 분리 계획 | Codex — 사용자 승인 반영 |
+| v1.2 | 2026-08-19 KST | 운영·평가까지 포함한 18개 작업 계획 | CREFLE / Codex |
+
+## 1. 목표와 완료선
+
+고정된 OMF 현재본을 색인하고, 인증된 HTTP 질의에 재현 가능한 근거 패키지를 반환한다. 자연어 답변 생성은 호출 Agent의 책임이며 이 서비스는 원문 근거만 반환한다.
+
+MVP 완료 조건은 다음과 같다.
+
+1. OMF commit `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2`의 `design/wiki/**/*.md`만 색인·활성화한다.
+2. Bearer token과 OMF source grant가 있는 사용자가 `POST /v1/search`로 top 5 근거를 요청할 수 있다.
+3. 근거마다 인용, 경로, 제목 계층, 1-based inclusive 행 범위, 키워드·벡터 순위, RRF 점수, 모든 원본 경로, 내용 해시, run ID와 commit SHA를 반환한다.
+4. 로컬 PostgreSQL과 실제 Qwen 임베딩 모델로 6개 smoke 질의를 검증한다.
+5. 기존 작업 1~7과 작업 8~10 WIP는 삭제하지 않고 재사용한다.
+
+로컬 실제 기능 검증이 MVP 완료선이다. 공유 Ubuntu·Docker Compose 배포는 후속이다.
+
+## 2. 확정 범위와 기술 계약
+
+### 2.1 소스와 버전
+
+- source ID: `omf`
+- 고정 commit: `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2`
+- include: `design/wiki/**/*.md`
+- exclude: `design/raw/**`, `design/schema/**`, `docs/**`, `_workspace/**`, Agent 설정·작업 파일, HTML, PDF, Excel, 이미지, 생성물, 임시 작업물
+- OMF 저장소는 읽기 전용이며 깨끗한 고정 commit에서 색인한다.
+- 현재본만 검색한다. 과거본·임의 commit·path·decision·history·context filter는 노출하지 않는다.
+- 같은 내용은 해시로 재사용하되 모든 원본 경로를 보존한다.
+
+### 2.2 검색
+
+- 임베딩: `Qwen/Qwen3-Embedding-0.6B`, 고정 revision `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`, 1024차원
+- 키워드 후보: 활성 OMF run의 `pg_trgm` top 50
+- 벡터 후보: 같은 범위의 exact cosine top 50
+- 결합: RRF `k=60`, keyword/vector weight 각각 `1.0`
+- 키워드 lane은 raw `pg_trgm` similarity가 `0.03658536400000001` 이상인 후보만,
+  벡터 lane은 정규화한 embedding의 raw cosine similarity가
+  `0.48344050397156374` 이상인 후보만 RRF에 투입한다. 비교 연산은 `>=`다.
+- 두 하한선은 문서에 없는 smoke 질의에서 관찰한 lane별 최고점에
+  `nextafter(+inf)`를 적용한 다음 표현 가능 부동소수점 값이다. 따라서 관찰된
+  unknown 최고점은 배제되고 하한선 자체와 같은 점수는 포함된다.
+- 후보 수 `50/50`, RRF `60/1.0/1.0`, 두 하한선과
+  `evidence_floor_status: calibrated`를 index config에 byte-exact 값으로 저장한다.
+  Search와 ready는 persisted config의 missing·extra key, 타입 또는 값이 runtime과
+  다르면 안전한 503으로 실패한다.
+- 두 lane 모두 하한선을 통과한 후보가 없으면 HTTP 200,
+  `status: no_evidence`, 빈 `evidence_items`를 반환한다.
+- 고정 6개 smoke의 현재 acceptable-evidence 분리 margin은
+  `0.16857380984674064`다. 정식 품질 metric이나 성능 기준이 아닌 재현성 관찰값이다.
+- 작은 child chunk로 검색하고 같은 parent section의 child를 하나의 evidence item으로 묶는다.
+- evidence 순서는 그룹에서 가장 높은 child RRF 점수로 정한다.
+- 리랭커, ANN index, ParadeDB는 MVP에 추가하지 않는다.
+
+### 2.3 인증과 공개 인터페이스
+
+- API 앞단과 검색 SQL 후보 CTE 양쪽에서 active Bearer token과 `omf` source grant를 강제한다.
+- 공개 endpoint는 `POST /v1/search`, `GET /health/live`, 인증된 `GET /health/ready`뿐이다.
+- CLI는 `model prepare`, `index`, `client create`, `serve`, `search`만 MVP 사용 경로로 문서화한다. 기존 추가 명령 구현은 삭제하지 않고 비노출로 둔다.
+- Search CLI는 HTTP API를 호출하고 token을 명령 인자가 아닌 환경변수에서 읽는다.
+
+검색 요청:
+
+```json
+{"query": "긴급 W/O 승인 정책 원문을 찾아줘", "limit": 5}
+```
+
+- `query`: 공백 제거 후 비어 있지 않은 문자열
+- `limit`: 선택, 기본 5, 최소 1, 최대 20
+- source와 version은 각각 `omf`, 활성 현재본으로 고정한다.
+
+정상 응답:
+
+```json
 {
-  "id": "omf-001",
-  "split": "tuning",
-  "category": "single_evidence",
-  "query": "긴급 W/O의 승인 정책 원문을 찾아줘",
-  "version_scope": "current",
-  "required_evidence": [
-    {
-      "source_path": "docs/research/example.md",
-      "heading_path": ["확정 사항", "발행 권한"],
-      "line_start": 10,
-      "line_end": 15,
-      "commit_sha": "40-hex",
-      "content_hash": "64-hex",
-      "relevance": 3
-    }
-  ],
-  "expect_no_evidence": false
+  "request_id": "...",
+  "status": "ok",
+  "index": {"run_id": "...", "commit_sha": "..."},
+  "evidence_items": [{
+    "rank": 1,
+    "heading_path": ["...", "..."],
+    "matches": [{
+      "excerpt": "...", "line_start": 10, "line_end": 18,
+      "keyword_rank": 2, "vector_rank": 1, "rrf_score": 0.0325
+    }],
+    "origins": [{"source_path": "design/wiki/...", "content_hash": "..."}]
+  }]
 }
-~~~
+```
 
-- chunk ID를 gold coordinate로 사용하지 않는다.
-- 20 tuning, 10 hold-out을 강제한다.
-- category 분포 8/6/4/4/4/4를 강제한다.
-- path/line/hash가 고정 commit 원문과 일치하는지 validator가 검사한다.
+- 근거 없음: HTTP 200, `status: no_evidence`, 빈 `evidence_items`
+- 인증 실패: 401
+- source grant 실패: 403
+- 활성 색인 없음: 409
+- 요청 검증 실패: 422
+- DB 또는 모델 불가: 503
+- 오류 본문은 `request_id`, 안정적 `code`, 안전한 `message`만 반환한다.
+- `GET /health/live`는 프로세스 생존만 반환한다. `GET /health/ready`는 인증 후 DB, 활성 색인과 모델 준비 상태를 확인한다.
 
-**13.2 metric 실패 test**
+### 2.4 기존 데이터 모델 채택
 
-손으로 계산 가능한 작은 ranking fixture로 다음 metric을 검증한다.
+현재 WIP의 `0002_index_run_activation_lifecycle.py`를 MVP migration으로 채택한다. 하나의 migration이 parse artifact manifest의 `section_count`, `chunk_count`, `artifact_hash`와 activation lifecycle의 `activated_at`, `ARCHIVED`, 활성 버전 제약을 함께 소유한다. v1.3의 8A-1 `0002` manifest / 별도 `0003` lifecycle 분리 계획은 이 v2.0이 명시적으로 대체한다.
 
-- Evidence Recall@5, @10
-- All-required Evidence@10
-- nDCG@10: relevance 0~3
-- MRR@10: 첫 relevance 3
-- Context Precision: 반환 evidence 중 relevance 2 이상 비율
-- Duplicate Evidence Ratio: 같은 content+line evidence 반복 비율
-- hybrid Recall@10이 keyword/vector best single보다 낮지 않은지
+## 3. 실행 원칙과 후속 범위
 
-**13.3 100% boolean gate 구현**
+- 모든 코드 동작 변경은 assertion 기반 RED → GREEN → REFACTOR 순서로 진행한다.
+- Unit test는 네트워크, GPU, 실제 모델, 외부 Git 저장소를 요구하지 않는다.
+- 실행 Agent는 승인 단위의 쉬운 무외부 의존 검증만 수행한다. 별도 검증 Agent가 계획된 Unit·PostgreSQL·계약·E2E 검증을 처음부터 다시 실행한다.
+- Python 3.12 기존 가상환경과 lock된 의존성을 사용한다. 현재 `uv 0.9.28`은 blocker가 아니며 `uv 0.12.3` 재현을 요구하지 않는다.
+- 새 endpoint, DB table, runtime dependency, 검색 가중치 또는 권한 정책이 필요하면 해당 단위를 멈추고 재승인받는다.
+- 사용자 ZIP, cache와 범위 밖 WIP를 reset·stash·삭제하지 않는다.
 
-- provenance exact match
-- unauthorized leakage 0
-- historical selection correctness
-- registered conflict 양쪽 노출
-- no-evidence hallucination 0
-- duplicate origin paths 모두 보존
+후속으로 미루는 범위:
 
-한 건이라도 실패하면 evaluation CLI exit code 5.
+- LLM 생성 답변과 Codex/Kanana 연동
+- 과거본·임의 commit 검색과 path·decision·history·context filter
+- explicit conflict/relation 전용 API, rollback CLI와 2세대 운영 절차
+- 30개 골드셋, 정식 검색 metric, 성능 benchmark
+- 감사 HMAC, JSON audit logging, 운영 관측성
+- 운영 Docker image·Compose, Buildx push, digest 배포, 서버 E2E와 runbook
+- 자동 배포·복구, MCP와 function tool
 
-**13.4 deterministic report**
+v1.2 작업 13~18 전체의 번호 추적은 다음과 같다.
 
-<code>evaluations/results/&lt;UTC timestamp&gt;-&lt;app sha&gt;-&lt;source sha&gt;.json</code>에 다음을 기록한다.
+| 기존 작업 | 기존 책임 | v2.0 상태 |
+|---|---|---|
+| 작업 13 | 평가 dataset·metric | 후속 |
+| 작업 14 | Logging·audit | 후속 |
+| 작업 15 | Docker·Compose | 후속 |
+| 작업 16 | Buildx·digest deploy | 후속 |
+| 작업 17 | Server E2E·performance | 후속 |
+| 작업 18 | Operations handoff | 후속 |
 
-- application commit SHA
-- source commit SHA
-- active run ID
-- index config hash
-- model/revision/dimension
-- dataset content hash
-- query별 rank와 판정
-- aggregate metric과 threshold pass/fail
-- 단계별 latency summary
+이 표는 v1.2 작업 13~18 전체를 v2.0 MVP 완료선 밖으로 이동한 추적 기록이다.
 
-질의 원문은 gold dataset 자체에 존재하므로 결과 report에는 question ID만 기록한다.
+기존 구현이 있는 후속 기능은 삭제하지 않고 MVP 공개 경로에서만 비노출로 보존한다.
 
-**13.5 30개 candidate 작성 후 사람 검토 checkpoint**
+## 4. 실행 단위 완료 기록
 
-Agent가 고정 OMF commit에서 30개 질문과 line coordinate candidate를 작성한다. 사용자 또는 지정 reviewer가 질문 의도·필수 근거·관련도·no-evidence를 승인하기 전 gold version을 1.0으로 표시하지 않는다.
+아래 네 단위는 실행 Agent와 별도 검증 Agent로 수행했고 모두 독립 검증 PASS했다.
 
-**13.6 test와 commit**
+### 단위 1. 정본 계획 v2.0 전환 — 완료 · 독립 검증 PASS
 
-~~~bash
-uv run pytest tests/unit/evaluation tests/integration/evaluation -q
-git add evaluations src/omf_retrieval/application/evaluation tests
-git commit -m "feat(evaluation): 검색 품질 평가 게이트 구현"
-~~~
+**주제:** 설계·실행 정본을 초고속 MVP 범위로 전환한다.
 
----
+**목적:** 이후 Agent가 v1.3의 migration 분리와 운영 범위를 따르지 않도록 하나의 승인 기준을 만든다.
 
-## 작업 14. 안전한 JSON logging, timing, audit event
+**내용:** 시스템 설계와 이 계획을 v2.0으로 개정하고 `AGENTS.md`의 고정 결정과 정본 포인터를 맞춘다. HTML의 기존 로컬 CREFLE 번들, link와 script를 보존한다.
 
-**파일**
+**기대 결과:** 세 문서에서 목표, source, API, migration, 네 개 실행 단위와 후속 범위가 같다.
 
-- 생성: <code>src/omf_retrieval/infrastructure/observability/logging.py</code>
-- 생성: <code>src/omf_retrieval/infrastructure/observability/timing.py</code>
-- 테스트: <code>tests/unit/observability/test_logging.py</code>
-- 테스트: <code>tests/integration/observability/test_audit.py</code>
+**검증:** 문서 단위라 Unit test와 TDD는 해당하지 않는다. 실행 Agent는 충돌 키워드 검색, HTML 구조·자산 확인과 `git diff --check`를 수행한다. 독립 검증 Agent는 세 문서를 처음부터 대조하고 headless Chrome 로컬 렌더를 시각 확인하며 승인된 세 파일 밖 새 변경이 없는지 baseline과 비교한다.
 
-**14.1 금지 field 실패 test**
-
-~~~python
-def test_log_record_never_contains_query_token_or_excerpt(caplog) -> None:
-    log_search_event(event_with_sensitive_values())
-    rendered = caplog.text
+### 단위 2. 기존 색인·활성화·인증 WIP 안정화 — 완료 · 독립 검증 PASS
 
-    assert RAW_QUERY not in rendered
-    assert BEARER_TOKEN not in rendered
-    assert EVIDENCE_EXCERPT not in rendered
-~~~
+**주제:** 고정 OMF 현재본을 원자적으로 색인·활성화하고 인증 정보를 준비한다.
 
-**14.2 allowlist JSON formatter 구현**
+**목적:** 기존 작업 8~10 WIP를 최소 수정으로 검색 가능한 상태로 만든다.
 
-허용 field만 직렬화한다.
+**내용:** 통합 `0002` migration, parse artifact 재사용, config identity, 색인 pipeline, active pointer, token과 source grant를 정리한다. source profile을 `design/wiki/**/*.md`로 바꾼다. `index`는 고정 commit을 색인하고 READY 성공 시 즉시 활성화한다. rollback은 노출하지 않는다.
 
-- timestamp, level, event
-- request_id, client_id, source_key
-- query_hmac, result_count, commit_sha, status/error_code
-- embedding_ms, keyword_ms, vector_ms, rrf_ms, total_ms
-- index counters와 elapsed
+**기대 결과:** 신규 DB와 기존 `0001` DB 모두 `0002`로 올라가며, 첫 색인이 활성화되고 실패한 재색인은 기존 active run을 바꾸지 않는다. token과 `omf` grant를 만들 수 있다.
 
-모든 unknown extra field를 그대로 출력하지 않는다.
+**Unit test 설계:**
 
-**14.3 audit event 구현**
+| 사례 | RED assertion | 기대 GREEN |
+|---|---|---|
+| 정상 | `design/wiki/a.md`가 profile에 포함되고 색인 성공 후 active pointer가 새 READY run을 가리킴 | 고정 commit의 wiki Markdown만 저장·활성화 |
+| 경계 | 같은 content hash가 여러 경로에 있을 때 artifact는 재사용되고 origins는 모두 남음 | 중복 본문 없이 모든 경로 보존 |
+| 경계 | 기존 `0001` parse 행을 가진 DB를 upgrade | manifest backfill과 lifecycle 제약 모두 유효 |
+| 실패 | raw/schema/Agent/비 Markdown 경로 입력 | 색인 대상에서 제외 |
+| 실패 | parse·embedding·DB 저장 중 예외 | 새 run 실패, 기존 active pointer 불변 |
+| 실패 | token 없음·폐기·만료 또는 source grant 없음 | 인증/권한 거부 |
 
-- response transaction과 분리하되 search 결과 직후 best effort로 기록
-- audit DB failure는 검색 결과를 바꾸지 않지만 error log와 readiness degraded state를 남김
-- returned ID는 chunk/evidence UUID만 저장
-- request/response raw body 저장 금지
+기존 구경로 profile test의 assertion 실패를 실제 RED로 확인한 뒤 최소 변경한다. import, fixture 또는 환경 오류는 RED로 인정하지 않는다.
 
-**14.4 test와 commit**
-
-~~~bash
-uv run pytest tests/unit/observability tests/integration/observability -q
-git add src/omf_retrieval/infrastructure/observability tests
-git commit -m "feat(observability): 안전한 검색 감사 로그 구현"
-~~~
-
----
-
-## 작업 15. GPU Docker image와 Docker Compose
-
-**파일**
-
-- 생성: <code>Dockerfile</code>
-- 생성: <code>.dockerignore</code>
-- 생성: <code>compose.yaml</code>
-- 생성: <code>ops/prepare-host.sh</code>
-- 생성: <code>tests/contract/deployment/test_compose.py</code>
-- 생성: <code>tests/contract/deployment/test_image.py</code>
-
-**15.1 static deployment 실패 test**
-
-- base image tag와 digest exact match
-- PostgreSQL tag와 digest exact match
-- DB host port 없음
-- API worker 1
-- GPU device ID 0만 reservation
-- source mount read-only
-- secret은 <code>_FILE</code>로 전달
-- no local Nginx/TLS service
-- log rotation 설정
-
-**15.2 Dockerfile 구현**
-
-~~~dockerfile
-FROM pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime@sha256:eee11b3b3872a8c838e35ef48f08b2d5def2080902c7f666831310ca1a0ef2be
-
-RUN python -m pip install --no-cache-dir uv==0.12.3
-WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-RUN uv export --frozen --no-dev --no-emit-project \
-      --output-file /tmp/requirements.lock \
-    && uv pip install --system --require-hashes \
-      --requirement /tmp/requirements.lock \
-    && uv build --frozen --wheel --out-dir /tmp/dist \
-    && uv pip install --system --no-deps /tmp/dist/*.whl
-RUN useradd --uid 10001 --create-home omf-retrieval
-USER 10001
-ENTRYPOINT ["omf-retrieval"]
-~~~
-
-실제 구현에서는 dependency layer cache를 살리되 source tree 없이 editable install을 만들지 않는다. image에는 model과 secret을 넣지 않는다.
-
-**15.3 Compose 구현**
-
-- <code>api</code>: application image, <code>serve</code> command, worker 1, private IP bind
-- <code>admin</code>: same image, Compose profile, one-off CLI
-- <code>db</code>: 공개 pgvector image, internal network only
-- volume:
-  - <code>/home/storage_disk3/omf-retrieval-disk/postgres</code>
-  - <code>/home/storage_disk3/omf-retrieval-disk/model-cache</code>
-  - <code>/home/storage_disk3/omf-retrieval-disk/evaluations</code>
-  - host OMF clone read-only
-- secret:
-  - <code>/opt/omf-retrieval/secrets/postgres_password</code>
-  - <code>/opt/omf-retrieval/secrets/audit_hmac_key</code>
-- DB는 <code>backend</code> internal network만, API는 <code>edge</code>와 <code>backend</code>
-- <code>json-file</code> max-size와 max-file 설정
+**실행 Agent 검증:** 관련 Unit test, fake embedding·임시 Git 기반 indexing test, `ruff check`와 `git diff --check`. PostgreSQL, 실제 모델, 네트워크는 실행 Agent 검증에서 제외한다.
 
-**15.4 host prepare script**
+**독립 검증:** Unit 전체 baseline, migration upgrade → downgrade → re-upgrade, 신규·기존 DB backfill, 첫 색인·활성 pointer·중복 경로·실패 격리, 인증 repository integration과 범위 밖 diff를 처음부터 검증한다.
 
-script는 대상 path를 explicit argument와 상수로 검증하고 다음만 생성한다.
-
-- <code>/opt/omf-retrieval/{config,secrets,sources}</code>
-- <code>/home/storage_disk3/omf-retrieval-disk/{postgres,model-cache,evaluations}</code>
-- service UID가 필요한 directory를 쓸 수 있게 ownership 설정
-- secret file mode 600 검증
+### 단위 3. 검색 core + API·CLI 수직 절편 — 완료 · 독립 검증 PASS
 
-기존 data를 삭제하거나 volume을 초기화하지 않는다.
-
-**15.5 linux/amd64 image build test**
+**주제:** 인증된 자연어 질의를 근거 패키지로 반환한다.
 
-~~~bash
-docker buildx build --platform linux/amd64 --load -t omf-retrieval:test .
-docker run --rm --entrypoint python omf-retrieval:test -c \
-  "import torch; assert torch.__version__.startswith('2.11.0')"
-~~~
+**목적:** 실제 사용자가 호출할 수 있는 최소 RAG 정보 조회 기능을 한 단위로 완성한다.
 
-**15.6 단계 C 전체 gate와 commit**
+**내용:** 활성 OMF run에 한정한 pg_trgm·exact pgvector 후보 검색, RRF, parent grouping, evidence 조립, token/source grant, 세 endpoint와 Search CLI를 연결한다. 공개 계약은 2.3을 그대로 사용한다.
 
-~~~bash
-uv run pytest tests/unit tests/integration tests/contract -m "not gpu and not server" -q
-uv run ruff format --check .
-uv run ruff check .
-git add Dockerfile .dockerignore compose.yaml ops/prepare-host.sh tests/contract/deployment
-git commit -m "build(container): GPU 이미지와 Compose 배포 구성"
-~~~
+**기대 결과:** HTTP와 CLI가 동일한 순위와 재현 좌표를 반환하며 인증·권한·활성 색인 경계를 우회할 수 없다.
 
-단계 C 결과, image size, dependency vulnerability 확인 결과, Compose rendered config를 공유하고 단계 D 진행 확인을 받는다.
+**Unit test 설계:**
 
----
+| 사례 | RED assertion | 기대 GREEN |
+|---|---|---|
+| 정상 | keyword/vector rank fixture 입력 | `k=60`, 동일 가중치 RRF 순서와 점수 일치 |
+| 정상 | 같은 parent의 여러 child와 중복 origin 입력 | 한 evidence item으로 묶이고 최고 child 점수로 정렬, origins 모두 보존 |
+| 정상 | 유효 token·grant와 검색 요청 | 200 `ok`, limit 이하의 완전한 근거 패키지 |
+| 경계 | `limit` 생략·1·20 | 각각 5·1·20으로 처리 |
+| 경계 | 후보 없음 | 200 `no_evidence`, 빈 목록 |
+| 경계 | raw score가 lane 하한선과 같음 | `>=` 비교로 해당 lane RRF 후보에 포함 |
+| 실패 | raw score가 두 lane 하한선 모두 미만 | 200 `no_evidence`, 빈 목록 |
+| 실패 | persisted 검색 config 누락·추가·타입·값 불일치 | Search·ready 503 fail-closed |
+| 실패 | 빈 query 또는 limit 0·21 | 422 |
+| 실패 | token 없음·무효·만료 | 401 |
+| 실패 | `omf` grant 없음 | 403이며 source 존재 정보 비노출 |
+| 실패 | active run 없음 | 409 |
+| 실패 | DB 또는 embedding provider 실패 | 503, 비밀·원문·host path 비노출 |
+| 정상/실패 | live와 ready | live는 무인증 생존, ready는 인증 및 의존성 상태 반영 |
 
-## 작업 16. Buildx push와 불변 배포 script
+새 search package의 동작 assertion 실패를 RED로 확인하고 최소 구현한다. API validation fixture만 실패하거나 import가 실패한 상태는 RED로 인정하지 않는다.
 
-**파일**
+**실행 Agent 검증:** RRF·grouping·evidence·service Unit test, fake repository/provider를 쓴 API·CLI contract test, `ruff check`, `git diff --check`.
 
-- 생성: <code>ops/build-and-push.sh</code>
-- 생성: <code>ops/deploy.sh</code>
-- 생성: <code>ops/smoke-test.sh</code>
-- 테스트: <code>tests/contract/deployment/test_scripts.py</code>
+**독립 검증:** 실행 Agent 검증 전체를 재실행하고 실제 PostgreSQL에서 권한이 후보 CTE에 선적용되는지, top 50 exact search, API status/error body와 HTTP·CLI 일치를 검증한다.
 
-**16.1 script 계약 실패 test**
+이 단위는 500줄을 초과할 수 있다. core와 API를 분리하면 어느 쪽도 사용 가능한 사용자 기능이 되지 않으므로 Single Intent와 독립 사용자 가치가 같은 수직 절편으로 유지한다.
 
-- dirty worktree/HEAD mismatch 시 build 거부
-- image tag가 정확히 <code>hub.crefle.com/crefle-ai/omf-retrieval:&lt;git-sha&gt;</code>
-- <code>--platform linux/amd64</code>와 <code>--push</code> 필수
-- deploy는 tag를 pull한 뒤 registry digest를 확인하고 digest reference로 Compose 실행
-- SSH alias는 <code>phoebe-onpremise-test</code>, remote root는 <code>/opt/omf-retrieval</code>
-- migration 실패 시 기존 API container를 교체하지 않음
+### 단위 4. 로컬 실제 모델 E2E와 최소 인계 — 완료 · 독립 검증 PASS
 
-**16.2 build-and-push 구현**
+**주제:** 고정 OMF 현재본의 실제 검색 가능성을 로컬에서 입증한다.
 
-~~~text
-clean tree/HEAD 검증 → buildx --platform linux/amd64 --push
-→ metadata file에서 digest 추출 → tag@digest와 SBOM metadata 출력
-~~~
+**목적:** 운영 배포 없이도 MVP 사용자 기능과 원문 재현성을 확인하고 실행 절차를 인계한다.
 
-Registry login credential을 읽거나 저장하지 않고 기존 Docker credential store를 사용한다.
+**내용:** 로컬 PostgreSQL과 Python 3.12, 실제 Qwen CPU provider를 사용한다. 모델 cache가 없으면 고정 revision을 한 번 준비한다. 전체 wiki를 색인·활성화하고 token을 만든 뒤 API를 실행한다. README에는 DB 시작 → model prepare → migration → index → client create → serve → search 순서만 기록한다.
 
-**16.3 deploy 구현**
+**검증 사례:**
 
-~~~text
-remote prerequisite 점검 → compose pull → model/cache readiness
-→ DB health → one-off alembic upgrade head
-→ api up -d → /health/live → /health/ready
-→ authenticated smoke search → deployed digest 기록
-~~~
+| 분류 | 기대 결과 |
+|---|---|
+| 기능 요구사항 | top 5 안에 직접 근거와 정확한 provenance |
+| 확정 의사결정·정책 | top 5 안에 직접 근거와 정확한 provenance |
+| API 계약 | top 5 안에 직접 근거와 정확한 provenance |
+| 사용자 업무 흐름 | top 5 안에 직접 근거와 정확한 provenance |
+| 프로젝트 용어 | top 5 안에 직접 근거와 정확한 provenance |
+| 문서에 없는 질문 | `no_evidence`와 빈 목록 |
 
-- remote <code>.env</code>에는 image digest와 비secret 운영값만 둔다.
-- DB password와 audit key를 전송하거나 출력하지 않는다.
-- deploy script는 volume 삭제, image prune, DB downgrade를 하지 않는다.
-- failed readiness 시 새 API를 unhealthy로 남기지 않고 이전 image digest로 Compose를 되돌릴 수 있는 명령을 출력한다. 자동 rollback은 하지 않는다.
+모든 경로는 `design/wiki/**`여야 한다. 각 인용의 행 범위·본문·commit SHA·content hash를 `git show` 원문과 대조한다. 인증 실패, active run 없음, 모델 불가, SQL 실패 응답이 원문·token·host path를 노출하지 않는지 확인한다.
 
-**16.4 운영 입력 checkpoint**
+**Unit test 설계:** 새 사용자 동작을 추가하지 않는 검증·문서 단위다. 코드 결함이 발견되면 단위 2 또는 3의 해당 정상·경계·실패 assertion을 RED로 추가한 뒤 승인 범위 안에서 수정한다. README 명령은 help/argument contract test로 잘못된 순서·누락을 검출한다.
 
-다음 값이 사용자에게 확인되기 전 <code>ops/deploy.sh</code>를 실행하지 않는다.
+**실행 Agent 검증:** 외부 의존 없는 Unit·API contract·README 명령 정적 검증만 수행한다.
 
-- FQDN
-- Gateway private IP
-- backend private bind IP와 port
-- OMF Git remote와 host clone 인증
-- initial API client
-- server firewall 변경 주체와 승인
+**독립 검증:** PostgreSQL integration, 실제 model prepare, 고정 commit 전체 색인, 6개 smoke, provenance 대조, 오류 정보 비노출, 전체 Unit test, Ruff와 `git diff --check`를 처음부터 수행한다. 모델 다운로드나 OMF 고정 commit 접근 권한이 없으면 통과로 간주하지 않고 외부 입력 blocker로 보고한다.
 
-**16.5 contract test와 commit**
+**실제 환경과 색인 결과:**
 
-~~~bash
-uv run pytest tests/contract/deployment -q
-git add ops tests/contract/deployment
-git commit -m "build(deploy): 불변 이미지 배포 절차 추가"
-~~~
+- `Qwen/Qwen3-Embedding-0.6B` revision
+  `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`, CPU, 1024차원을 사용했다.
+- 고정 source에서 158개 문서, 4,202개 section, 5,584개 chunk와 같은 수의
+  embedding을 만들었으며 최대 chunk 크기는 800 token이었다.
+- 첫 전체 embedding은 CPU에서 약 11시간 3분, artifact 재사용 재색인은 약
+  20초였다. 11시간 3분은 성능 합격 기준이 아니라 장시간 로컬 작업의 운영 위험과
+  진행 가시성 필요를 기록한 관찰값이다. 정식 성능 benchmark는 후속이다.
 
----
+**6개 smoke 결과:**
 
-## 작업 17. 골드 평가, GPU server E2E, 성능 gate
+| 분류 | Acceptable evidence 실측 | MVP gate |
+|---|---:|---|
+| 기능 요구사항 | 3위 | PASS |
+| 확정 정책·의사결정 | 3위 | PASS |
+| API 계약 | 1위 | PASS |
+| 사용자 업무 흐름 | 1위 | PASS |
+| 프로젝트 용어 | 1위 | PASS |
+| 문서에 없는 질문 | `no_evidence`, 빈 목록 | PASS |
 
-**파일**
+모든 반환 경로가 `design/wiki/**`임을 확인했고, 87개 provenance 좌표의 행
+범위·본문·commit SHA·content hash를 원문과 대조했다. 인증 실패, active run 없음,
+모델 불가와 SQL 실패의 원문·token·host path 비노출 및 전체 회귀 검증도 PASS했다.
 
-- 생성: <code>tests/server/test_index_and_search.py</code>
-- 생성: <code>tests/server/test_reindex_failure.py</code>
-- 생성: <code>tests/server/test_rollback.py</code>
-- 생성: <code>tests/performance/run_search_benchmark.py</code>
-- 생성: <code>docs/operations/acceptance-checklist.md</code>
+품질 한계도 gate 결과와 분리해 기록한다. 사용자 업무 흐름 질의의 이상적
+diagnostic target은 top 20에 없었고 프로젝트 용어 질의의 이상적 target은 8위였다.
+두 질의 모두 별도의 직접 acceptable evidence가 1위여서 MVP top 5 gate는
+PASS했지만, 이상적 문서의 순위 개선은 정식 평가와 리랭커 검토가 포함되는 후속
+범위다.
 
-**17.1 서버 배포 전 read-only 확인**
+## 5. 단계별 정지 조건
 
-~~~bash
-ssh phoebe-onpremise-test \
-  'docker version; docker compose version; nvidia-smi; df -h / /home/storage_disk3'
-~~~
-
-확인값이 설계 전제와 다르면 중지하고 공유한다.
-
-**17.2 image push와 server pull**
-
-사용자 확인 후:
-
-~~~bash
-./ops/build-and-push.sh "$(git rev-parse HEAD)"
-./ops/deploy.sh "<app-image-digest>"
-~~~
-
-push digest, server pull digest, running container digest가 모두 같아야 한다.
-
-**17.3 model과 최초 index**
-
-- model prepare 결과가 고정 revision인지 확인
-- container에서 visible device가 1개이고 <code>cuda:0</code>가 physical GPU 0인지 확인
-- clean OMF host clone의 HEAD가 작업 13 전에 사용자 확인으로 고정한 full commit SHA와 같은지 확인
-- <code>index --source omf --commit &lt;sha&gt;</code>
-- active run pointer, counts, excluded files, duplicate origins, embedding dimension 검증
-- 초기 전체 index 15분 이하
-
-**17.4 기능 E2E**
-
-- 정상 검색과 provenance를 <code>git show &lt;sha&gt;:&lt;path&gt;</code> line과 대조
-- no-evidence 200
-- current/historical/all filter
-- decision/path filter
-- unauthorized client 403와 candidate leakage 없음
-- changed commit 재색인과 artifact reuse
-- 강제 embedding 실패에서 active 유지
-- previous rollback
-- duplicate path 모두 반환
-- registered conflict 양쪽 반환
-
-**17.5 품질 평가**
-
-승인된 20 tuning 질문으로 설정을 조정한다. 순서는 다음으로 제한한다.
-
-1. RRF weight와 k
-2. query instruction
-3. chunk 설정
-4. 그 후에만 별도 사용자 승인으로 reranker·검색 확장 검토
-
-10 hold-out은 최종 한 번 평가하고 tuning에 사용하지 않는다.
-
-출시 기준:
-
-- Recall@5 ≥ 0.85
-- Recall@10 ≥ 0.95
-- All-required@10 ≥ 0.85
-- nDCG@10 ≥ 0.85
-- MRR@10 ≥ 0.90
-- Context Precision ≥ 0.80
-- Duplicate Ratio ≤ 0.10
-- 100% boolean gate 전부 통과
-
-**17.6 성능 평가**
-
-<code>run_search_benchmark.py</code>는 HTTPX와 표준 <code>concurrent.futures</code>만 사용한다.
-
-- 30개 골드 질문을 반복하여 최소 100회 warm 요청
-- concurrency 1 p95 ≤ 2초
-- concurrency 5 p95 ≤ 3초
-- server error rate &lt; 1%
-- model cache가 있을 때 readiness ≤ 120초
-- 단계별 latency 기록
-
-**17.7 결과 문서와 commit**
-
-~~~bash
-git add tests/server tests/performance docs/operations/acceptance-checklist.md evaluations
-git commit -m "test(acceptance): GPU 검색 품질과 성능 검증 추가"
-~~~
-
-실제 평가 결과 JSON은 내부 원문을 포함하지 않는지 확인한 뒤 저장소 포함 여부를 사용자와 확인한다.
-
----
-
-## 작업 18. 최종 검증과 운영 인계
-
-**파일**
-
-- 확장: <code>README.md</code>
-- 생성: <code>docs/operations/runbook.md</code>
-- 생성: <code>docs/operations/deployment.md</code>
-- 생성: <code>docs/operations/troubleshooting.md</code>
-
-**18.1 문서 내용**
-
-- local CPU test와 PostgreSQL integration 실행법
-- model cache 준비, 최초 index, status, evaluate
-- client token 회전: 새 토큰 생성 → list에서 둘 다 활성(<code>active</code>) 확인 → 소비자 전환 → 기존 토큰 폐기
-- active/previous 의미와 rollback
-- health endpoint와 stable error code
-- central Nginx Gateway upstream 요구사항
-- image digest 배포·이전 digest 복귀
-- 로그 위치와 secret redaction
-- 재색인으로 복구 가능한 범위
-- backup/restore 자동화가 2차 범위임을 명시
-
-**18.2 최종 자동 gate**
-
-~~~bash
-uv lock --check
-uv run ruff format --check .
-uv run ruff check .
-uv run pytest tests/unit tests/integration tests/contract -m "not gpu and not server" \
-  --cov=omf_retrieval.domain --cov=omf_retrieval.application --cov-fail-under=80
-docker compose -f compose.test.yaml config --quiet
-docker compose config --quiet
-docker buildx build --platform linux/amd64 --load -t omf-retrieval:acceptance .
-~~~
-
-**18.3 최종 server gate**
-
-- deployed image digest와 Git SHA 일치
-- ready 200
-- approved gold quality pass
-- performance pass
-- active source commit과 config hash 기록
-- token/source grant smoke test
-- central Gateway를 통한 HTTPS search 성공
-- DB port 외부 미노출
-
-**18.4 범위 누출 검토**
-
-다음이 존재하지 않는지 <code>rg</code>와 route/schema 목록으로 확인한다.
-
-- LLM generation/CrefleAI/Codex 호출
-- MCP/function tool
-- full document endpoint
-- admin HTTP endpoint
-- ANN index/reranker
-- raw/query/token logging
-- local Nginx/TLS
-- backup automation
-
-**18.5 documentation commit**
-
-~~~bash
-git add README.md docs/operations
-git commit -m "docs(operations): 검색 서비스 운영 절차 정리"
-~~~
-
-**18.6 인수 보고**
-
-다음 증거를 사용자에게 제공한다.
-
-- commit과 image digest
-- test 수·coverage·명령별 exit code
-- migration revision과 PostgreSQL/pgvector version
-- source commit, index config hash, model revision
-- gold metric과 performance percentile
-- security negative test 결과
-- 남은 운영 입력 또는 2차 개발 항목
-
-사용자 최종 승인 전에는 완료로 표시하지 않는다.
-
-## 6. 예상 commit 순서
-
-1. <code>build(project): Python 애플리케이션 기반 구성</code>
-2. <code>feat(domain): 검색과 색인 핵심 계약 정의</code>
-3. <code>feat(database): 검색 데이터 모델과 마이그레이션 추가</code>
-4. <code>feat(source): OMF Git 스냅샷과 파일 선별 구현</code>
-5. <code>feat(parser): Markdown 계층과 명시적 메타데이터 파싱</code>
-6. <code>feat(indexing): 결정론적 parent-child 청킹 구현</code>
-7. <code>feat(embedding): Qwen 임베딩 공급자 추가</code>
-8. <code>feat(indexing): 증분 색인 파이프라인 구현</code>
-9. <code>feat(indexing): 원자 활성 전환과 롤백 구현</code>
-10. <code>feat(auth): 검색 토큰과 source 권한 구현</code>
-11. <code>feat(search): 하이브리드 검색과 근거 그룹화 구현</code>
-12. <code>feat(api): 검색·헬스체크·운영 CLI 계약 구현</code>
-13. <code>feat(evaluation): 검색 품질 평가 게이트 구현</code>
-14. <code>feat(observability): 안전한 검색 감사 로그 구현</code>
-15. <code>build(container): GPU 이미지와 Compose 배포 구성</code>
-16. <code>build(deploy): 불변 이미지 배포 절차 추가</code>
-17. <code>test(acceptance): GPU 검색 품질과 성능 검증 추가</code>
-18. <code>docs(operations): 검색 서비스 운영 절차 정리</code>
-
-## 7. 구현 완료 정의
-
-다음 조건이 모두 참일 때만 MVP 구현을 완료로 본다.
-
-- 승인된 REST·CLI·DB·검색·권한 계약이 구현됨
-- 전체 자동 test와 80% domain/application coverage 통과
-- 실제 PostgreSQL 18 + pgvector 0.8.6 integration 통과
-- OMF 고정 commit의 최초·증분·실패·rollback E2E 통과
-- 승인된 30개 골드셋의 정량·100% gate 통과
-- RTX 4090 GPU 0에서 성능 기준 통과
-- 중앙 Gateway HTTPS 경로와 private network boundary 확인
-- app/DB/model/source/config의 재현 좌표 기록
-- 원문·token·query가 log/audit/image에 노출되지 않음
-- 사용자에게 검증 증거를 제시하고 최종 승인을 받음
+- 각 단위는 사용자 승인 후 실행 Agent와 별도 검증 Agent가 수행한다.
+- 검증 실패는 같은 실행 Agent가 승인 범위 안에서 수정하고 같은 검증 Agent가 전체를 처음부터 재실행한다.
+- 승인 범위 밖 schema·API·dependency·검색 정책 변경이 필요하면 즉시 중단하고 재승인받는다.
+- 단위 4의 독립 검증과 6개 smoke가 모두 끝나기 전에는 MVP 완료를 주장하지 않는다.
+  이 조건은 2026-08-27에 충족되었다.

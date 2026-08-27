@@ -74,6 +74,19 @@ class GitArchiveSnapshotProvider:
 
     def snapshot(self, repo: Path, commit_sha: str) -> SourceSnapshot:
         """Return original bytes selected from one Git commit archive."""
+        if (
+            type(commit_sha) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None
+        ):
+            raise GitArchiveSnapshotError("Git commit identifier is invalid")
+        if (
+            self._profile.commit_sha is not None
+            and commit_sha != self._profile.commit_sha
+        ):
+            raise GitArchiveSnapshotError(
+                "Git commit differs from profile fixed commit"
+            )
+
         git_environment = _isolated_git_environment()
         try:
             status = subprocess.run(
@@ -96,12 +109,6 @@ class GitArchiveSnapshotProvider:
         if status:
             raise GitArchiveSnapshotError("Git worktree must be clean")
 
-        if (
-            type(commit_sha) is not str
-            or re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None
-        ):
-            raise GitArchiveSnapshotError("Git commit identifier is invalid")
-
         try:
             resolved_commit = subprocess.run(
                 [
@@ -121,6 +128,31 @@ class GitArchiveSnapshotProvider:
             ).stdout.strip()
         except (OSError, subprocess.CalledProcessError) as error:
             raise GitArchiveSnapshotError("Git commit validation failed") from error
+
+        if self._profile.commit_sha is not None:
+            try:
+                resolved_head = subprocess.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        "HEAD^{commit}",
+                    ],
+                    cwd=repo,
+                    env=git_environment,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError) as error:
+                raise GitArchiveSnapshotError("Git HEAD validation failed") from error
+            if resolved_head != resolved_commit:
+                raise GitArchiveSnapshotError(
+                    "Git HEAD differs from profile fixed commit"
+                )
 
         if self._temp_parent is not None:
             try:
@@ -149,7 +181,7 @@ class GitArchiveSnapshotProvider:
                         git_environment=git_environment,
                         max_archive_bytes=self._max_archive_bytes,
                     )
-                archive_files = self._read_archive(
+                archive_files, excluded_file_count = self._read_archive(
                     archive_path=archive_path,
                     extraction_root=extraction_root,
                 )
@@ -181,6 +213,7 @@ class GitArchiveSnapshotProvider:
             archive_files=tuple(
                 sorted(archive_files, key=lambda item: item.source_path)
             ),
+            excluded_file_count=excluded_file_count,
         )
 
     def _read_archive(
@@ -188,7 +221,7 @@ class GitArchiveSnapshotProvider:
         *,
         archive_path: Path,
         extraction_root: Path,
-    ) -> list[ArchiveFile]:
+    ) -> tuple[list[ArchiveFile], int]:
         _validate_tar_structure(
             archive_path,
             max_members=self._max_members,
@@ -201,6 +234,7 @@ class GitArchiveSnapshotProvider:
         seen_paths: set[str] = set()
         regular_paths: set[str] = set()
         included_bytes = 0
+        excluded_file_count = 0
         with tarfile.open(archive_path, mode="r:") as archive:
             for member in archive:
                 source_path = canonical_source_path(member.name)
@@ -238,7 +272,10 @@ class GitArchiveSnapshotProvider:
                 seen_paths.add(source_path)
                 if is_regular:
                     regular_paths.add(source_path)
-                if is_directory or not self._profile.includes(source_path):
+                if is_directory:
+                    continue
+                if not self._profile.includes(source_path):
+                    excluded_file_count += 1
                     continue
                 if member.size > self._max_file_bytes:
                     raise GitArchiveSnapshotError("Included file byte limit exceeded")
@@ -265,7 +302,7 @@ class GitArchiveSnapshotProvider:
                         content=destination.read_bytes(),
                     )
                 )
-        return archive_files
+        return archive_files, excluded_file_count
 
 
 def _source_path_ancestors(source_path: str) -> tuple[str, ...]:

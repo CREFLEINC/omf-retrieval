@@ -1,0 +1,88 @@
+{
+  "source_key": "omf",
+  "commit_sha": "a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2",
+  "cases": [
+    {
+      "id": "functional_requirement",
+      "category": "기능 요구사항",
+      "query": "긴급 생산 대응 기능의 작업지시와 창고 적치 생략 요구사항 원문을 찾아줘",
+      "acceptable_evidence": [
+        {
+          "source_path": "design/wiki/requirements/00-요구사항명세서.md",
+          "heading_contains": "REQ-PR-0014"
+        }
+      ],
+      "expected_status": "ok"
+    },
+    {
+      "id": "confirmed_policy",
+      "category": "확정 정책·의사결정",
+      "query": "취소 이력 컬럼이 없을 때 승인 기록으로 흔적을 남기는 정책은?",
+      "acceptable_evidence": [
+        {
+          "source_path": "design/wiki/decisions-policy/공유계약.md",
+          "heading_contains": "A-11"
+        }
+      ],
+      "expected_status": "ok"
+    },
+    {
+      "id": "api_contract",
+      "category": "API 계약",
+      "query": "OpenAPI 계약의 정본은 JSON인가 생성기인가?",
+      "acceptable_evidence": [
+        {
+          "source_path": "design/wiki/api-contracts/00-계약-작성-규약.md",
+          "heading_contains": "계약 작성 규약"
+        }
+      ],
+      "expected_status": "ok"
+    },
+    {
+      "id": "user_workflow",
+      "category": "사용자 업무 흐름",
+      "query": "긴급 W/O 부족분의 추가 자재 출고 요청 업무 흐름을 찾아줘",
+      "acceptable_evidence": [
+        {
+          "source_path": "design/wiki/screens/02/P-02-12-긴급WO현장투입실적.md",
+          "heading_contains": "§5-4"
+        },
+        {
+          "source_path": "design/wiki/domain-workflow/2026-07-07-도식스펙-01-자재창고관리.md",
+          "heading_contains": "01-S-E"
+        }
+      ],
+      "diagnostic_target": {
+        "source_path": "design/wiki/domain-workflow/2026-07-07-도식스펙-01-자재창고관리.md",
+        "heading_contains": "01-S-E"
+      },
+      "expected_status": "ok"
+    },
+    {
+      "id": "project_term",
+      "category": "프로젝트 용어",
+      "query": "이 프로젝트에서 미착지라는 용어는 무슨 뜻인가?",
+      "acceptable_evidence": [
+        {
+          "source_path": "design/wiki/glossary/00-용어사전.md",
+          "heading_contains": "미결"
+        },
+        {
+          "source_path": "design/wiki/glossary/00-용어사전.md",
+          "heading_contains": "미착지"
+        }
+      ],
+      "diagnostic_target": {
+        "source_path": "design/wiki/glossary/00-용어사전.md",
+        "heading_contains": "미착지"
+      },
+      "expected_status": "ok"
+    },
+    {
+      "id": "unknown",
+      "category": "문서에 없는 질문",
+      "query": "남극 황제펭귄의 해빙 위성 추적 장치 배터리 교체 주기는?",
+      "expected_status": "no_evidence"
+    }
+  ]
+}

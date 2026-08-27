@@ -443,7 +443,9 @@ class ParentContextBuilder:
         result = _call_token_counter(self._offsets, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result, max_items=len(text))
+        materialized = _materialize_sequence(
+            result, max_items=_maximum_source_tokens(text)
+        )
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -452,8 +454,7 @@ class ParentContextBuilder:
         if declared_length != len(tokens):
             raise ValueError("Token counter returned malformed data") from None
 
-        offsets: list[tuple[int, int]] = []
-        previous_end = 0
+        materialized_offsets: list[tuple[int, int]] = []
         for span in spans:
             if (
                 type(span) is not tuple
@@ -463,17 +464,21 @@ class ParentContextBuilder:
             ):
                 raise ValueError("Token counter returned malformed data") from None
             start, end = span
-            if start < previous_end or start < 0 or end <= start or end > len(text):
+            if start < 0 or end <= start or end > len(text):
                 raise ValueError("Token counter returned malformed data") from None
-            offsets.append((start, end))
-            previous_end = end
-        return tuple(offsets)
+            materialized_offsets.append(span)
+        offsets = _validated_source_offset_groups(tuple(materialized_offsets), text)
+        if offsets is None:
+            raise ValueError("Token counter returned malformed data") from None
+        return offsets
 
     def _encoded_tokens(self, text: str) -> tuple[int, ...]:
         result = _call_token_counter(self._encode, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result, max_items=len(text))
+        materialized = _materialize_sequence(
+            result, max_items=_maximum_source_tokens(text)
+        )
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -712,6 +717,7 @@ class ParentChildChunker:
             line_end=unit.warning_line_end,
         )
         offsets = self._token_offsets(unit.excerpt.raw_text)
+        token_group_boundaries = _token_group_boundaries(offsets)
         line_ends = _physical_line_ends(unit.excerpt.raw_text)
         prefix_tokens = self._token_count(heading_prefix)
         source_budget = self._config.atomic_max_tokens - prefix_tokens
@@ -731,6 +737,7 @@ class ParentChildChunker:
             window_end = self._bounded_window_end(
                 unit.excerpt.raw_text,
                 offsets,
+                token_group_boundaries,
                 start=cursor,
                 source_budget=source_budget,
                 heading_prefix=heading_prefix,
@@ -800,6 +807,7 @@ class ParentChildChunker:
         self, excerpt: _Excerpt, heading_prefix: str
     ) -> tuple[tuple[_Excerpt, ...], _Excerpt]:
         offsets = self._token_offsets(excerpt.raw_text)
+        token_group_boundaries = _token_group_boundaries(offsets)
         line_ends = _physical_line_ends(excerpt.raw_text)
         prefix_tokens = self._token_count(heading_prefix)
         soft_budget = self._config.soft_max_tokens - prefix_tokens
@@ -847,6 +855,7 @@ class ParentChildChunker:
             window_end = self._bounded_window_end(
                 excerpt.raw_text,
                 offsets,
+                token_group_boundaries,
                 start=cursor,
                 source_budget=source_budget,
                 heading_prefix=heading_prefix,
@@ -859,6 +868,7 @@ class ParentChildChunker:
                 window_end = self._bounded_window_end(
                     excerpt.raw_text,
                     offsets,
+                    token_group_boundaries,
                     start=cursor,
                     source_budget=soft_budget,
                     heading_prefix=heading_prefix,
@@ -882,12 +892,15 @@ class ParentChildChunker:
             piece_tokens = window_end - cursor
             effective_overlap = min(self._config.overlap_tokens, piece_tokens // 2)
             covered_end = window_end
-            cursor = window_end - effective_overlap
+            cursor = _ceil_token_group_boundary(
+                token_group_boundaries, window_end - effective_overlap
+            )
 
     def _bounded_window_end(
         self,
         raw_text: str,
         offsets: tuple[tuple[int, int], ...],
+        token_group_boundaries: tuple[int, ...],
         *,
         start: int,
         source_budget: int,
@@ -897,7 +910,9 @@ class ParentChildChunker:
         overlap_tokens: int,
         allow_reduced_progress: bool,
     ) -> int | None:
-        candidate = min(start + source_budget, len(offsets))
+        candidate = _floor_token_group_boundary(
+            token_group_boundaries, min(start + source_budget, len(offsets))
+        )
         start_offset = _token_boundary(offsets, start, len(raw_text))
         available_tokens = candidate - start
         if available_tokens <= 0:
@@ -955,17 +970,29 @@ class ParentChildChunker:
         )
 
         best: int | None = None
-        for end in candidates:
+        safe_candidates = tuple(
+            dict.fromkeys(
+                _floor_token_group_boundary(token_group_boundaries, end)
+                for end in candidates
+            )
+        )
+        for end in safe_candidates:
+            if end <= start:
+                continue
             if token_count(end) <= token_limit and (best is None or end > best):
                 best = end
         return best
 
     def _overlap_suffix(self, excerpt: _Excerpt) -> _Excerpt:
         offsets = self._token_offsets(excerpt.raw_text)
+        token_group_boundaries = _token_group_boundaries(offsets)
         overlap_count = min(self._config.overlap_tokens, len(offsets) // 2)
         if overlap_count == 0:
             return _slice_excerpt(excerpt, len(excerpt.raw_text), len(excerpt.raw_text))
-        start = offsets[-overlap_count][0]
+        start_index = _ceil_token_group_boundary(
+            token_group_boundaries, len(offsets) - overlap_count
+        )
+        start = _token_boundary(offsets, start_index, len(excerpt.raw_text))
         return _slice_excerpt(excerpt, start, len(excerpt.raw_text))
 
     def _draft(
@@ -1006,7 +1033,9 @@ class ParentChildChunker:
         result = _call_token_counter(self._offsets, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result, max_items=len(text))
+        materialized = _materialize_sequence(
+            result, max_items=_maximum_source_tokens(text)
+        )
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -1015,8 +1044,7 @@ class ParentChildChunker:
         if declared_length != len(tokens):
             raise ValueError("Token counter returned malformed data") from None
 
-        offsets: list[tuple[int, int]] = []
-        previous_end = 0
+        materialized_offsets: list[tuple[int, int]] = []
         for span in spans:
             if (
                 type(span) is not tuple
@@ -1026,17 +1054,21 @@ class ParentChildChunker:
             ):
                 raise ValueError("Token counter returned malformed data") from None
             start, end = span
-            if start < previous_end or start < 0 or end <= start or end > len(text):
+            if start < 0 or end <= start or end > len(text):
                 raise ValueError("Token counter returned malformed data") from None
-            offsets.append((start, end))
-            previous_end = end
-        return tuple(offsets)
+            materialized_offsets.append(span)
+        offsets = _validated_source_offset_groups(tuple(materialized_offsets), text)
+        if offsets is None:
+            raise ValueError("Token counter returned malformed data") from None
+        return offsets
 
     def _encoded_tokens(self, text: str) -> tuple[int, ...]:
         result = _call_token_counter(self._encode, text)
         if result is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
-        materialized = _materialize_sequence(result, max_items=len(text))
+        materialized = _materialize_sequence(
+            result, max_items=_maximum_source_tokens(text)
+        )
         if materialized is _TOKEN_COUNTER_FAILED:
             raise ValueError("Token counter failed") from None
         if materialized is None:
@@ -1166,17 +1198,26 @@ def _block_window_source_token_counts(
     for line in source_lines:
         cursor += len(line)
         line_ends.append(cursor)
-    token_starts = tuple(start for start, _ in source_offsets)
-    token_ends = tuple(end for _, end in source_offsets)
+    token_groups = _token_offset_groups(source_offsets)
+    group_starts = tuple(start for start, _, _ in token_groups)
+    group_ends = tuple(end for _, end, _ in token_groups)
+    cumulative_weights = [0]
+    for _, _, weight in token_groups:
+        cumulative_weights.append(cumulative_weights[-1] + weight)
     counts: list[int] = []
     for left, right in expansion_windows:
         line_start = blocks[left].line_start
         line_end = blocks[right].line_end
         char_start = line_ends[line_start - 2] if line_start > 1 else 0
         char_end = line_ends[line_end - 1]
-        first_token = bisect_right(token_ends, char_start)
-        past_last_token = bisect_left(token_starts, char_end)
-        counts.append(max(0, past_last_token - first_token))
+        first_group = bisect_right(group_ends, char_start)
+        past_last_group = bisect_left(group_starts, char_end)
+        counts.append(
+            max(
+                0,
+                cumulative_weights[past_last_group] - cumulative_weights[first_group],
+            )
+        )
     return tuple(counts)
 
 
@@ -1228,10 +1269,11 @@ def _context_expansion_windows(
     matched_start: int,
     matched_end: int,
 ) -> tuple[tuple[int, int], ...]:
+    token_groups = _token_offset_groups(offsets)
     left_candidates = sorted(
-        {start for start, _ in offsets if start < matched_start}, reverse=True
+        {start for start, _, _ in token_groups if start < matched_start}, reverse=True
     )
-    right_candidates = sorted({end for _, end in offsets if end > matched_end})
+    right_candidates = sorted({end for _, end, _ in token_groups if end > matched_end})
     start = matched_start
     end = matched_end
     left_index = 0
@@ -1340,6 +1382,46 @@ def _materialize_sequence(result: object, *, max_items: int) -> object:
     except Exception:
         return _TOKEN_COUNTER_FAILED
     return None
+
+
+def _utf8_width(character: str) -> int:
+    codepoint = ord(character)
+    if codepoint <= 0x7F:
+        return 1
+    if codepoint <= 0x7FF:
+        return 2
+    if codepoint <= 0xFFFF:
+        return 3
+    return 4
+
+
+def _maximum_source_tokens(text: str) -> int:
+    return sum(_utf8_width(character) for character in text)
+
+
+def _validated_source_offset_groups(
+    offsets: tuple[tuple[int, int], ...], text: str
+) -> tuple[tuple[int, int], ...] | None:
+    if not offsets:
+        return ()
+    group_start, group_end = offsets[0]
+    group_tokens = 1
+    previous_start = group_start
+    for start, end in offsets[1:]:
+        if start < previous_start:
+            return None
+        if start < group_end:
+            group_end = max(group_end, end)
+            group_tokens += 1
+        else:
+            if group_tokens > _maximum_source_tokens(text[group_start:group_end]):
+                return None
+            group_start, group_end = start, end
+            group_tokens = 1
+        previous_start = start
+    if group_tokens > _maximum_source_tokens(text[group_start:group_end]):
+        return None
+    return offsets
 
 
 def _join_excerpts(first: _Excerpt, second: _Excerpt) -> _Excerpt:
@@ -1572,6 +1654,42 @@ def _token_boundary(
     if index == len(offsets):
         return text_length
     return offsets[index][0]
+
+
+def _token_group_boundaries(
+    offsets: tuple[tuple[int, int], ...],
+) -> tuple[int, ...]:
+    boundaries = [0]
+    for _, _, weight in _token_offset_groups(offsets):
+        boundaries.append(boundaries[-1] + weight)
+    return tuple(boundaries)
+
+
+def _token_offset_groups(
+    offsets: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int, int], ...]:
+    if not offsets:
+        return ()
+    groups: list[tuple[int, int, int]] = []
+    group_start, group_end = offsets[0]
+    group_token_start = 0
+    for index, (start, end) in enumerate(offsets[1:], start=1):
+        if start >= group_end:
+            groups.append((group_start, group_end, index - group_token_start))
+            group_start, group_end = start, end
+            group_token_start = index
+        else:
+            group_end = max(group_end, end)
+    groups.append((group_start, group_end, len(offsets) - group_token_start))
+    return tuple(groups)
+
+
+def _floor_token_group_boundary(boundaries: tuple[int, ...], index: int) -> int:
+    return boundaries[bisect_right(boundaries, index) - 1]
+
+
+def _ceil_token_group_boundary(boundaries: tuple[int, ...], index: int) -> int:
+    return boundaries[bisect_left(boundaries, index)]
 
 
 def _slice_excerpt_with_line_ends(

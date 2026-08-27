@@ -44,6 +44,7 @@ def _source_snapshot(*files: tuple[str, bytes]) -> SourceSnapshot:
             ArchiveFile(source_path=source_path, content=content)
             for source_path, content in sorted(files)
         ),
+        excluded_file_count=0,
     )
 
 
@@ -264,6 +265,7 @@ def test_version_scope_uses_an_exact_case_sensitive_path_segment(
     [
         ("docs/research/spec.md", "docs"),
         ("uiux/spec.md", "uiux"),
+        ("design/wiki/spec.md", "docs"),
     ],
 )
 def test_owner_domain_comes_only_from_the_first_path_segment(
@@ -1515,6 +1517,7 @@ def test_relation_parser_rejects_a_snapshot_subclass() -> None:
     snapshot = SourceSnapshotSubclass(
         commit_sha=VALID_COMMIT_SHA,
         archive_files=_relation_snapshot().archive_files,
+        excluded_file_count=0,
     )
 
     with pytest.raises(RelationSidecarValidationError):

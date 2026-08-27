@@ -39,6 +39,7 @@ def test_domain_enums_expose_approved_wire_values() -> None:
         "ready",
         "active",
         "previous",
+        "archived",
         "failed",
     ]
     assert [member.value for member in RelationType] == [

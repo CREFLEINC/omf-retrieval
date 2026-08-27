@@ -299,6 +299,7 @@ def test_snapshot_reads_requested_commit_bytes_in_lexical_profile_order(
             ArchiveFile("docs/research/direct.md", b"A direct\x00bytes\n"),
             ArchiveFile("uiux/spec.md", b"UI A\n"),
         ),
+        excluded_file_count=3,
     )
     assert commit_a != commit_b
     assert _index_state(repo) == before["index"]
@@ -306,6 +307,31 @@ def test_snapshot_reads_requested_commit_bytes_in_lexical_profile_order(
     assert _git_status(repo) == before["status"]
     assert (repo / "docs/research/direct.md").read_bytes() == before["tracked"]
     assert (repo / "ignored.tmp").read_bytes() == before["ignored"]
+
+
+def test_snapshot_rejects_a_commit_other_than_the_profile_fixed_commit(
+    tmp_path: Path,
+) -> None:
+    """The committed OMF profile cannot be used to index another revision."""
+    module = importlib.import_module("omf_retrieval.infrastructure.source.git_archive")
+    repo, commit_a, commit_b = _make_two_commit_repo(tmp_path)
+    base_profile = _omf_test_profile()
+    fixed_profile = SourceProfileConfig(
+        source_key=base_profile.source_key,
+        include_patterns=base_profile.include_patterns,
+        exclude_patterns=base_profile.exclude_patterns,
+        commit_sha=commit_a,
+    )
+    provider = module.GitArchiveSnapshotProvider(fixed_profile)
+
+    with pytest.raises(module.GitArchiveSnapshotError, match="fixed commit"):
+        provider.snapshot(repo, commit_b)
+
+    with pytest.raises(module.GitArchiveSnapshotError, match="HEAD"):
+        provider.snapshot(repo, commit_a)
+
+    _git(repo, "checkout", "--detach", commit_a)
+    assert provider.snapshot(repo, commit_a).commit_sha == commit_a
 
 
 def test_snapshot_allows_an_empty_profile_result(tmp_path: Path) -> None:
@@ -326,7 +352,11 @@ def test_snapshot_allows_an_empty_profile_result(tmp_path: Path) -> None:
 
     snapshot = provider_type(empty_profile).snapshot(repo, commit_a)
 
-    assert snapshot == SourceSnapshot(commit_sha=commit_a, archive_files=())
+    assert snapshot == SourceSnapshot(
+        commit_sha=commit_a,
+        archive_files=(),
+        excluded_file_count=6,
+    )
 
 
 def test_git_failures_use_a_module_specific_exception() -> None:
@@ -636,6 +666,7 @@ def test_snapshot_ignores_ambient_git_repository_context(
     assert snapshot == SourceSnapshot(
         commit_sha=commit_sha,
         archive_files=(ArchiveFile("docs/research/source.md", b"primary bytes\n"),),
+        excluded_file_count=0,
     )
     assert (_worktree_state(repo), _index_state(repo)) == source_before
     assert (_worktree_state(decoy_repo), _index_state(decoy_repo)) == decoy_before
@@ -659,6 +690,7 @@ def test_snapshot_disables_actual_git_replacement_refs(tmp_path: Path) -> None:
             ArchiveFile("docs/research/direct.md", b"A direct\x00bytes\n"),
             ArchiveFile("uiux/spec.md", b"UI A\n"),
         ),
+        excluded_file_count=3,
     )
     assert (
         _worktree_state(repo),
@@ -913,6 +945,7 @@ def test_snapshot_accepts_safe_directories_and_long_unicode_pax_file_bytes(
     assert snapshot == SourceSnapshot(
         commit_sha=commit_a,
         archive_files=(ArchiveFile(source_path=long_path, content=content),),
+        excluded_file_count=0,
     )
     assert observed_modes == [(0o700, (("extracted", 0o700),))]
     assert list(temp_parent.iterdir()) == []
@@ -1779,6 +1812,7 @@ def test_real_git_pax_archive_accepts_an_exact_one_byte_file_limit(
     assert snapshot == SourceSnapshot(
         commit_sha=commit_sha,
         archive_files=(ArchiveFile("docs/research/one.md", b"x"),),
+        excluded_file_count=0,
     )
 
 
@@ -2053,6 +2087,7 @@ def test_cat_file_batch_reads_large_unique_blob_once_in_bounded_chunks(
     assert snapshot == SourceSnapshot(
         commit_sha=commit_sha,
         archive_files=tuple(ArchiveFile(path, content) for path in selected_paths),
+        excluded_file_count=0,
     )
     assert len(observed_kwargs) == 1
     assert observed_kwargs[0]["cwd"] == repo

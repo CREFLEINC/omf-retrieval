@@ -1725,7 +1725,7 @@ def test_tokenizer_declared_length_one_over_text_is_rejected_without_consumption
         ("offsets", ((0, 1),)),
         (
             "offsets",
-            ((0, 1), (0, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)),
+            ((1, 2), (0, 1), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)),
         ),
         (
             "offsets",

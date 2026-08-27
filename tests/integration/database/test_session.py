@@ -189,6 +189,11 @@ def test_all_models_flush_commit_and_load_with_application_uuid_defaults(
             content_id=content.id,
             parser_version="markdown-it-py",
             chunk_config_hash="d" * 64,
+            section_count=1,
+            chunk_count=1,
+            artifact_hash=(
+                "a3e0d7796c24dc68645ab5e97dc3900eaad7bea0bde3d8a9af9be249609d2d1f"
+            ),
         )
         grant = ClientSourceGrant(
             client_id=client.id,

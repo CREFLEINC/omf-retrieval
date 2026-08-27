@@ -79,6 +79,88 @@ class _PairTokenCounter:
         )
 
 
+class _FrozenKoreanByteFallbackTokenCounter:
+    """Mirror Qwen's repeated Korean character spans without a model load."""
+
+    @staticmethod
+    def _spans(text: str) -> tuple[tuple[int, int], ...]:
+        spans: list[tuple[int, int]] = []
+        for index, character in enumerate(text):
+            repeat = 3 if "\uac00" <= character <= "\ud7a3" else 1
+            spans.extend(((index, index + 1),) * repeat)
+        return tuple(spans)
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(range(len(self._spans(text))))
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return self._spans(text)
+
+
+class _FrozenNestedSuffixTokenCounter:
+    """Mirror Qwen's wider token followed by a contained suffix token."""
+
+    @staticmethod
+    def _spans(text: str) -> tuple[tuple[int, int], ...]:
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(text):
+            if text.startswith("—한", cursor):
+                spans.extend(((cursor, cursor + 2), (cursor + 1, cursor + 2)))
+                cursor += 2
+            else:
+                spans.append((cursor, cursor + 1))
+                cursor += 1
+        return tuple(spans)
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(range(len(self._spans(text))))
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return self._spans(text)
+
+
+class _FrozenUnionGrowthTokenCounter:
+    """Mirror Qwen's token span growing from ``숫`` to ``숫자``."""
+
+    @staticmethod
+    def _spans(text: str) -> tuple[tuple[int, int], ...]:
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(text):
+            if text.startswith("숫자", cursor):
+                spans.extend(((cursor, cursor + 1), (cursor, cursor + 2)))
+                cursor += 2
+            else:
+                spans.append((cursor, cursor + 1))
+                cursor += 1
+        return tuple(spans)
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(range(len(self._spans(text))))
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return self._spans(text)
+
+
+class _FrozenOversizedNestedGroupTokenCounter:
+    """Produce one source group whose token weight exceeds a child limit."""
+
+    @staticmethod
+    def _spans(text: str) -> tuple[tuple[int, int], ...]:
+        if not text:
+            return ()
+        return ((0, len(text)),) + tuple(
+            (index, len(text)) for index in range(1, len(text))
+        )
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(range(len(self._spans(text))))
+
+    def offsets(self, text: str) -> tuple[tuple[int, int], ...]:
+        return self._spans(text)
+
+
 class _CountingTokenCounter(_FakeTokenCounter):
     """Count adapter input work and optionally stop superlinear regressions."""
 
@@ -2246,6 +2328,103 @@ def test_single_oversized_atomic_unit_uses_offsets_and_safe_warning_only(
     assert (captured.out, captured.err) == ("", "")
 
 
+def test_korean_byte_fallback_group_is_not_split_at_atomic_token_boundary() -> None:
+    """A shared character span stays whole without duplicating source lines."""
+    counter = _FrozenKoreanByteFallbackTokenCounter()
+    atomic_text = "- " + "한" * 400 + "\n"
+
+    chunks = _chunker(counter).split(
+        _section(f"# H\n{atomic_text}"), parser_version="parser-v1"
+    )
+
+    assert len(counter.encode("한")) == 3
+    assert len(chunks) == 2
+    assert "".join(chunk.raw_text for chunk in chunks) == atomic_text
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [(2, 2), (2, 2)]
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+    assert all(chunk.warnings for chunk in chunks)
+
+
+def test_nested_suffix_group_is_not_split_at_atomic_token_boundary() -> None:
+    """A contained suffix token cannot become a separate source-side cut."""
+    counter = _FrozenNestedSuffixTokenCounter()
+    atomic_text = "- " + "x" * 795 + "—한" + "y" * 100 + "\n"
+
+    chunks = _chunker(counter).split(
+        _section(f"# H\n{atomic_text}"), parser_version="parser-v1"
+    )
+
+    assert counter.offsets("—한") == ((0, 2), (1, 2))
+    assert len(chunks) == 2
+    assert "".join(chunk.raw_text for chunk in chunks) == atomic_text
+    assert all(not chunk.raw_text.endswith("—") for chunk in chunks)
+    assert all(not chunk.raw_text.startswith("한") for chunk in chunks)
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [(2, 2), (2, 2)]
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+
+
+def test_union_growth_group_is_not_split_at_atomic_token_boundary() -> None:
+    """A growing union keeps ``숫자`` together while preserving both tokens."""
+    counter = _FrozenUnionGrowthTokenCounter()
+    atomic_text = "- " + "x" * 795 + "숫자는" + "y" * 100 + "\n"
+
+    chunks = _chunker(counter).split(
+        _section(f"# H\n{atomic_text}"), parser_version="parser-v1"
+    )
+
+    assert counter.offsets("숫자는") == ((0, 1), (0, 2), (2, 3))
+    assert len(chunks) == 2
+    assert "".join(chunk.raw_text for chunk in chunks) == atomic_text
+    assert all(not chunk.raw_text.endswith("숫") for chunk in chunks)
+    assert all(not chunk.raw_text.startswith("자") for chunk in chunks)
+    assert all((chunk.line_start, chunk.line_end) == (2, 2) for chunk in chunks)
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 800
+        for chunk in chunks
+    )
+
+
+def test_nested_suffix_group_is_not_split_at_normal_overlap_boundary() -> None:
+    """Overlap may shrink rather than begin inside a nested token group."""
+    counter = _FrozenNestedSuffixTokenCounter()
+    prefix = "".join(chr(0x4000 + index) for index in range(333))
+    suffix = "".join(chr(0x5000 + index) for index in range(500))
+    body = prefix + "—한" + suffix + "\n"
+
+    chunks = _chunker(counter).split(
+        _section(f"# H\n{body}"), parser_version="parser-v1"
+    )
+
+    assert len(chunks) >= 2
+    assert _reconstruct_variable_overlap(chunks) == body
+    assert all(not chunk.raw_text.endswith("—") for chunk in chunks)
+    assert all(not chunk.raw_text.startswith("한") for chunk in chunks)
+    assert all((chunk.line_start, chunk.line_end) == (2, 2) for chunk in chunks)
+    assert all(
+        chunk.token_count == len(counter.encode(chunk.search_text)) <= 600
+        for chunk in chunks
+    )
+
+
+def test_single_nested_group_over_child_budget_fails_explicitly() -> None:
+    """A group cannot be split internally just to satisfy the token limit."""
+    counter = _FrozenOversizedNestedGroupTokenCounter()
+    atomic_text = "- " + "z" * 900 + "\n"
+
+    with pytest.raises(
+        ValueError, match="^Tokenizer offsets cannot form a non-empty child$"
+    ):
+        _chunker(counter).split(
+            _section(f"# H\n{atomic_text}"), parser_version="parser-v1"
+        )
+
+
 def test_atomic_limit_is_inclusive_and_one_token_over_forces_warning_split() -> None:
     """Treating 800 as exclusive or permitting 801 breaks the approved boundary."""
     exact_raw = "- " + "x" * 795 + "\n"
@@ -2420,16 +2599,22 @@ def _invalid_offset_results(text_length: int) -> tuple[object, ...]:
     valid = [(index, index + 1) for index in range(text_length)]
     too_short = tuple(valid[:-1])
     zero_length = tuple([(0, 0), *valid[1:]])
-    overlapping = tuple([valid[0], (0, 2), *valid[2:]])
+    start_decrease = tuple([(1, 2), (0, 1), *valid[2:]])
     out_of_bounds = tuple([*valid[:-1], (text_length - 1, text_length + 1)])
     list_span = tuple([[0, 1], *valid[1:]])
-    return too_short, zero_length, overlapping, out_of_bounds, list_span
+    return too_short, zero_length, start_decrease, out_of_bounds, list_span
 
 
 @pytest.mark.parametrize(
     "offset_result",
     _invalid_offset_results(601),
-    ids=["unaligned", "zero-length", "overlap", "out-of-bounds", "non-tuple-span"],
+    ids=[
+        "unaligned",
+        "zero-length",
+        "start-decrease",
+        "out-of-bounds",
+        "non-tuple-span",
+    ],
 )
 def test_malformed_offset_results_fail_closed_without_source(
     offset_result: object,
@@ -2738,12 +2923,13 @@ def test_adapter_declared_length_text_boundary_preserves_unicode_behavior(
 
 
 @pytest.mark.parametrize("side", ["encode", "offsets"])
-def test_adapter_declared_length_one_over_text_is_rejected_without_consumption(
+def test_adapter_declared_length_one_over_utf8_max_is_rejected_without_consumption(
     side: str,
 ) -> None:
-    """Even a one-item impossible declaration must fail before iteration."""
+    """One item beyond byte-fallback capacity must fail before iteration."""
     source = "# 제목\n본문🙂\n" if side == "encode" else "한🙂" * 301
-    counter = _DeclaredLengthCounter(side, extra_declared_items=1)
+    byte_fallback_extra = sum(len(character.encode()) - 1 for character in source)
+    counter = _DeclaredLengthCounter(side, extra_declared_items=byte_fallback_extra + 1)
 
     with pytest.raises(ValueError, match="^Token counter returned malformed data$"):
         _chunker(counter).split(_section(source), parser_version="parser-v1")

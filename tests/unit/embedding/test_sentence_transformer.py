@@ -205,6 +205,7 @@ def test_adapter_descriptors_snapshot_settings_at_construction(
     provider = module.SentenceTransformerEmbeddingProvider(settings)
     counter = module.SentenceTransformerTokenCounter(settings)
     provider_descriptor = provider.descriptor
+    provider_config = provider.embedding_config_snapshot
     counter_descriptor = counter.descriptor
 
     settings.embedding_model_name = "changed/model"
@@ -213,6 +214,11 @@ def test_adapter_descriptors_snapshot_settings_at_construction(
     settings.embedding_cache_dir = Path("changed-cache")
 
     assert provider.descriptor == provider_descriptor
+    assert provider.embedding_config_snapshot == provider_config
+    assert provider_config.descriptor == provider_descriptor
+    assert provider_config.as_config()["query"] == {  # type: ignore[index]
+        "instruction": provider_config.query_instruction
+    }
     assert counter.descriptor == counter_descriptor
 
 
