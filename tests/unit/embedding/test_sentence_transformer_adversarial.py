@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
-from math import inf, nan
+from math import inf, isclose, nan, sqrt
 from threading import Barrier, Event, Lock
 from time import sleep
 from types import SimpleNamespace
@@ -80,6 +80,32 @@ def test_malformed_embedding_outputs_fail_closed(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert type(caught.value) is DomainError
+
+
+def test_bfloat16_quantized_vectors_are_deterministically_renormalized(
+    monkeypatch: Any,
+) -> None:
+    """Real Qwen CPU bfloat16 output needs host-float normalization."""
+    quantized = (
+        0.50390625,
+        0.8671875,
+        *((0.0,) * (DIMENSION - 2)),
+    )
+    raw_norm = sqrt(sum(value * value for value in quantized))
+    assert not isclose(raw_norm, 1.0, rel_tol=1e-5, abs_tol=1e-5)
+    provider = _provider(monkeypatch, _OutputModel((quantized,)))
+
+    query_vector = provider.embed_query("한국어 설계 문서")
+    document_vector = provider.embed_documents(("한국어 설계 문서",))[0]
+
+    assert query_vector == document_vector
+    assert query_vector != quantized
+    assert isclose(
+        sqrt(sum(value * value for value in query_vector)),
+        1.0,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    )
 
 
 def test_numeric_conversion_failure_is_sanitized_without_secret_context(

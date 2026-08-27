@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.metadata import version
-from math import isclose, isfinite, sqrt
+from math import fsum, isclose, isfinite, sqrt
 from numbers import Real
 from pathlib import Path
 from threading import BoundedSemaphore, Condition, Lock, get_ident
@@ -20,12 +20,14 @@ from omf_retrieval.infrastructure.embedding.manifest import (
 )
 from omf_retrieval.infrastructure.embedding.provider import (
     EmbeddingBatch,
+    EmbeddingConfigSnapshot,
     EmbeddingVector,
 )
 from omf_retrieval.settings import Settings
 
 _TOKENIZER_LIBRARY_NAME = "transformers"
-_NORMALIZATION_TOLERANCE = 1e-5
+_EMBEDDING_PROVIDER_NAME = "sentence-transformers"
+_FINAL_NORMALIZATION_TOLERANCE = 1e-12
 _MAX_INPUTS_PER_CALL = 1_000_000
 
 
@@ -48,6 +50,7 @@ class _LoadedBackend:
 class _EmbeddingSnapshot:
     identity: _RuntimeIdentity
     descriptor: EmbeddingDescriptor
+    embedding_config: EmbeddingConfigSnapshot
     query_instruction: str
     dimension: int
     batch_size: int
@@ -244,13 +247,20 @@ def _identity(settings: Settings) -> _RuntimeIdentity:
 
 
 def _embedding_snapshot(settings: Settings) -> _EmbeddingSnapshot:
+    embedding_config = EmbeddingConfigSnapshot(
+        provider=_EMBEDDING_PROVIDER_NAME,
+        model_name=settings.embedding_model_name,
+        revision=settings.embedding_model_revision,
+        dimension=settings.embedding_dimension,
+        normalize_embeddings=True,
+        library_name=_EMBEDDING_PROVIDER_NAME,
+        library_version=version(_EMBEDDING_PROVIDER_NAME),
+        query_instruction=settings.query_instruction,
+    )
     return _EmbeddingSnapshot(
         identity=_identity(settings),
-        descriptor=EmbeddingDescriptor(
-            model_name=settings.embedding_model_name,
-            revision=settings.embedding_model_revision,
-            dimension=settings.embedding_dimension,
-        ),
+        descriptor=embedding_config.descriptor,
+        embedding_config=embedding_config,
         query_instruction=settings.query_instruction,
         dimension=settings.embedding_dimension,
         batch_size=settings.embedding_batch_size,
@@ -296,15 +306,19 @@ def _validated_vectors(
             conversion_failed = True
         if conversion_failed:
             raise DomainError("Embedding backend returned malformed vectors")
-        vector = tuple(converted)
-        if not all(isfinite(value) for value in vector):
+        raw_vector_values = tuple(converted)
+        if not all(isfinite(value) for value in raw_vector_values):
             raise DomainError("Embedding backend returned malformed vectors")
-        norm = sqrt(sum(value * value for value in vector))
+        raw_norm = sqrt(fsum(value * value for value in raw_vector_values))
+        if not isfinite(raw_norm) or raw_norm <= 0.0:
+            raise DomainError("Embedding backend returned malformed vectors")
+        vector = tuple(value / raw_norm for value in raw_vector_values)
+        final_norm = sqrt(fsum(value * value for value in vector))
         if not isclose(
-            norm,
+            final_norm,
             1.0,
-            rel_tol=_NORMALIZATION_TOLERANCE,
-            abs_tol=_NORMALIZATION_TOLERANCE,
+            rel_tol=_FINAL_NORMALIZATION_TOLERANCE,
+            abs_tol=_FINAL_NORMALIZATION_TOLERANCE,
         ):
             raise DomainError("Embedding backend returned malformed vectors")
         vectors.append(vector)
@@ -372,7 +386,7 @@ def _materialize_bounded_sequence(
 
 
 def _validated_tokenization(
-    result: object, *, text_length: int
+    result: object, *, text: str
 ) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
     raw_token_ids: object | None = None
     raw_offsets: object | None = None
@@ -387,15 +401,17 @@ def _validated_tokenization(
     if access_failed:
         raise ValueError("Tokenizer backend returned malformed data")
 
-    token_ids = _materialize_bounded_sequence(raw_token_ids, maximum_items=text_length)
-    offsets = _materialize_bounded_sequence(raw_offsets, maximum_items=text_length)
+    maximum_tokens = _maximum_source_tokens(text)
+    token_ids = _materialize_bounded_sequence(
+        raw_token_ids, maximum_items=maximum_tokens
+    )
+    offsets = _materialize_bounded_sequence(raw_offsets, maximum_items=maximum_tokens)
     if token_ids is None or offsets is None or len(token_ids) != len(offsets):
         raise ValueError("Tokenizer backend returned malformed data")
     if any(type(token_id) is not int or token_id < 0 for token_id in token_ids):
         raise ValueError("Tokenizer backend returned malformed data")
 
-    validated_offsets: list[tuple[int, int]] = []
-    previous_end = 0
+    materialized_offsets: list[tuple[int, int]] = []
     for raw_offset in offsets:
         if (
             type(raw_offset) is not tuple
@@ -405,11 +421,55 @@ def _validated_tokenization(
         ):
             raise ValueError("Tokenizer backend returned malformed data")
         start, end = raw_offset
-        if start < previous_end or start < 0 or end <= start or end > text_length:
+        if start < 0 or end <= start or end > len(text):
             raise ValueError("Tokenizer backend returned malformed data")
-        validated_offsets.append((start, end))
-        previous_end = end
-    return tuple(token_ids), tuple(validated_offsets)  # type: ignore[return-value]
+        materialized_offsets.append((start, end))
+    validated_offsets = _validated_source_offset_groups(
+        tuple(materialized_offsets), text
+    )
+    if validated_offsets is None:
+        raise ValueError("Tokenizer backend returned malformed data")
+    return tuple(token_ids), validated_offsets  # type: ignore[return-value]
+
+
+def _utf8_width(character: str) -> int:
+    codepoint = ord(character)
+    if codepoint <= 0x7F:
+        return 1
+    if codepoint <= 0x7FF:
+        return 2
+    if codepoint <= 0xFFFF:
+        return 3
+    return 4
+
+
+def _maximum_source_tokens(text: str) -> int:
+    return sum(_utf8_width(character) for character in text)
+
+
+def _validated_source_offset_groups(
+    offsets: tuple[tuple[int, int], ...], text: str
+) -> tuple[tuple[int, int], ...] | None:
+    if not offsets:
+        return ()
+    group_start, group_end = offsets[0]
+    group_tokens = 1
+    previous_start = group_start
+    for start, end in offsets[1:]:
+        if start < previous_start:
+            return None
+        if start < group_end:
+            group_end = max(group_end, end)
+            group_tokens += 1
+        else:
+            if group_tokens > _maximum_source_tokens(text[group_start:group_end]):
+                return None
+            group_start, group_end = start, end
+            group_tokens = 1
+        previous_start = start
+    if group_tokens > _maximum_source_tokens(text[group_start:group_end]):
+        return None
+    return offsets
 
 
 class SentenceTransformerEmbeddingProvider:
@@ -427,6 +487,11 @@ class SentenceTransformerEmbeddingProvider:
     def descriptor(self) -> EmbeddingDescriptor:
         """Return the configured immutable embedding identity."""
         return self._snapshot.descriptor
+
+    @property
+    def embedding_config_snapshot(self) -> EmbeddingConfigSnapshot:
+        """Return the immutable full behavior identity captured at construction."""
+        return self._snapshot.embedding_config
 
     def embed_query(self, query: str) -> EmbeddingVector:
         """Embed a query after applying the configured instruction."""
@@ -528,4 +593,4 @@ class SentenceTransformerTokenCounter:
             )
 
         result = self._runtime.inference(tokenize)
-        return _validated_tokenization(result, text_length=len(text))
+        return _validated_tokenization(result, text=text)

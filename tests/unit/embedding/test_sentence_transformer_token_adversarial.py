@@ -57,7 +57,7 @@ def _counter(monkeypatch: Any, tokenizer: object) -> object:
         {"input_ids": [1], "offset_mapping": [(0, 0)]},
         {"input_ids": [1], "offset_mapping": [(1, 0)]},
         {"input_ids": [1], "offset_mapping": [(0, 4)]},
-        {"input_ids": [1, 2], "offset_mapping": [(0, 2), (1, 3)]},
+        {"input_ids": [1, 2], "offset_mapping": [(1, 2), (0, 1)]},
     ],
 )
 @pytest.mark.parametrize("method_name", ["encode", "offsets"])
@@ -74,6 +74,59 @@ def test_malformed_tokenizer_results_fail_closed(
 
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+def test_korean_byte_fallback_tokens_preserve_ids_and_shared_character_spans(
+    monkeypatch: Any,
+) -> None:
+    """Qwen fast-tokenizer byte fallback maps several IDs to one character."""
+    output = {
+        "input_ids": [101, 102, 103, 201, 202, 203],
+        "offset_mapping": [(0, 1), (0, 1), (0, 1), (1, 2), (1, 2), (1, 2)],
+    }
+    counter = _counter(monkeypatch, _OutputTokenizer(output))
+
+    assert counter.encode("한글") == (101, 102, 103, 201, 202, 203)
+    assert counter.offsets("한글") == (
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (1, 2),
+        (1, 2),
+        (1, 2),
+    )
+
+
+def test_qwen_nested_suffix_offsets_preserve_every_token_id(
+    monkeypatch: Any,
+) -> None:
+    """Freeze the real ``(17, 19), (18, 19)`` Qwen offset shape."""
+    text = "0123456789abcdefg로그"
+    output = {
+        "input_ids": [501, 502],
+        "offset_mapping": [(17, 19), (18, 19)],
+    }
+    counter = _counter(monkeypatch, _OutputTokenizer(output))
+
+    assert len(text) == 19
+    assert counter.encode(text) == (501, 502)
+    assert counter.offsets(text) == ((17, 19), (18, 19))
+
+
+def test_qwen_union_growth_offsets_preserve_every_token_id(
+    monkeypatch: Any,
+) -> None:
+    """Freeze the corpus-observed ``숫`` then wider ``숫자`` token group."""
+    text = "x" * 52 + "숫자는"
+    output = {
+        "input_ids": [601, 602, 603],
+        "offset_mapping": [(52, 53), (52, 54), (54, 55)],
+    }
+    counter = _counter(monkeypatch, _OutputTokenizer(output))
+
+    assert len(text) == 55
+    assert counter.encode(text) == (601, 602, 603)
+    assert counter.offsets(text) == ((52, 53), (52, 54), (54, 55))
 
 
 @pytest.mark.parametrize("method_name", ["encode", "offsets"])

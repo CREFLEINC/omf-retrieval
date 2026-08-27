@@ -1,6 +1,7 @@
 """OMF source-profile configuration and path-selection helpers."""
 
 import json
+import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -18,11 +19,13 @@ class SourceProfileConfig:
         source_key: Non-empty profile identifier.
         include_patterns: Repository-relative POSIX glob patterns to include.
         exclude_patterns: Repository-relative POSIX glob patterns to exclude.
+        commit_sha: Optional fixed lowercase full Git commit for this profile.
     """
 
     source_key: str
     include_patterns: tuple[str, ...]
     exclude_patterns: tuple[str, ...]
+    commit_sha: str | None = None
 
     def __post_init__(self) -> None:
         """Validate profile fields before exposing the immutable profile."""
@@ -35,6 +38,13 @@ class SourceProfileConfig:
         )
         _require_patterns(value=self.include_patterns, field_name="include_patterns")
         _require_patterns(value=self.exclude_patterns, field_name="exclude_patterns")
+        if self.commit_sha is not None and (
+            type(self.commit_sha) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", self.commit_sha) is None
+        ):
+            raise SourceProfileValidationError(
+                "commit_sha must be a lowercase full Git SHA"
+            )
 
     def includes(self, source_path: str) -> bool:
         """Return whether a canonicalized repository path is selectable.
@@ -79,8 +89,8 @@ def load_source_profile(profile_path: Path) -> SourceProfileConfig:
     if type(raw_profile) is not dict:
         raise SourceProfileValidationError("Source profile must be a JSON object")
 
-    expected_keys = {"source_key", "include_patterns", "exclude_patterns"}
-    if set(raw_profile) != expected_keys:
+    required_keys = {"source_key", "include_patterns", "exclude_patterns"}
+    if set(raw_profile) not in (required_keys, required_keys | {"commit_sha"}):
         raise SourceProfileValidationError(
             "Source profile keys must match the contract"
         )
@@ -96,6 +106,7 @@ def load_source_profile(profile_path: Path) -> SourceProfileConfig:
         source_key=source_key,
         include_patterns=tuple(include_patterns),
         exclude_patterns=tuple(exclude_patterns),
+        commit_sha=raw_profile.get("commit_sha"),
     )
 
 

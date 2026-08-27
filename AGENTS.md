@@ -84,8 +84,10 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 - 첫 번째 검증 대상은 OMF-MES 설계 문서이며, 이후 다른 프로젝트를 같은 방식으로 연결할 수 있어야 한다.
 - OMF 문서 저장소는 검색 원본이고 이 저장소는 색인·검색·Agent 인터페이스·배포를 소유한다. 두 저장소의 수명주기와 릴리스를 분리한다.
 - 개발 시 OMF 저장소(`/Users/rangkim/projects/crefle/ohmyfactory/apps/omf`)는 읽기 전용 데이터 소스로 취급한다. 수정이 필요하면 별도 승인받는다.
-- 첫 MVP는 사용자와 Agent가 함께 3일 안에 학습과 구현을 병행하며 검증 가능한 결과를 만드는 것이 목표다.
-- 공유 서비스로 배포하며 Ubuntu와 Docker Compose를 사용한다. 초기 재색인은 관리자가 수동 실행해도 된다.
+- 첫 MVP는 고정된 OMF 현재본을 색인하고 인증된 HTTP 질의에 재현 가능한 근거
+  패키지를 반환하는 사용자 기능을 가장 빠르게 완성하는 것이 목표다.
+- MVP 완료선은 로컬 PostgreSQL과 실제 임베딩 모델을 사용한 기능 검증이다. Ubuntu와
+  Docker Compose를 사용하는 공유 서비스 배포는 후속 범위다.
 
 ## 단계별 공동 진행
 
@@ -123,7 +125,9 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 - 사내 Agent의 LLM은 Codex API 사용을 전제로 한다.
 - Agent가 조회 필요성을 자율 판단하되, 내부 설계 사실·규정·정책·API·데이터 모델에 답할 때는 조회를 강제한다.
 - 대표 질의는 “특정 기능의 요구사항 및 정책 결정 사항 원문을 찾아줘” 유형이다.
-- 응답에는 요약, 직접 인용, 저장소 기준 파일 경로, 제목 계층, 원문 행 범위, 색인 커밋 SHA, 내용 해시, 문서 날짜·버전·결정 상태를 포함한다.
+- 호출 Agent의 최종 응답에는 요약과 직접 인용을 포함한다. MVP 검색 서비스는 이를
+  위해 저장소 기준 파일 경로, 제목 계층, 원문 행 범위, 검색 순위, 모든 원본 경로,
+  색인 run·commit SHA와 내용 해시를 반환한다.
 - 근거가 없으면 추측하지 않고 확인 가능한 근거가 없음을 명시한다.
 - 문서가 충돌하면 하나를 임의로 선택하지 않고 양쪽 근거와 충돌 내용을 제시한다.
 
@@ -132,15 +136,15 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 ### 소스 범위
 
 - 첫 source profile은 OMF다.
-- 포함: `docs/research/**/*.md`, `docs/planning/**/*.md`, `uiux/**/*.md`의 정리된 Markdown.
-- 제외: `docs/raw/**`, `docs/_workspace/**`, Agent 설정·작업 파일, HTML, PDF, Excel, 이미지, 생성물과 임시 작업물.
+- 고정 원본 commit은 `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2`다.
+- 포함: `design/wiki/**/*.md`의 현재본 Markdown.
+- 제외: `design/raw/**`, `design/schema/**`, `docs/**`, `_workspace/**`, Agent 설정·작업
+  파일, HTML, PDF, Excel, 이미지, 생성물과 임시 작업물.
 
 ### 정본·버전·충돌
 
-- 전체 문서와 명시적 버전 스냅샷을 색인하되 일반 검색은 현재본을 우선한다.
-- 과거본은 사용자가 이전 버전·변경 전·최초 결정을 요구할 때 검색한다.
+- MVP는 고정 commit의 현재본만 색인·검색한다. 과거본과 임의 commit 검색은 후속 범위다.
 - 완전히 같은 내용은 해시로 감지하되 모든 원본 경로를 보존한다.
-- 화면 구성·IA·프로그램 배치 정책은 `uiux`, 업무 흐름·요구사항·데이터 모델은 `docs`의 소유권을 따른다.
 - `확정기록`, `결정서`, `[확정]` 표기는 일반 조사 문서보다 우선한다. 같은 지위에서는 버전과 결정일을 비교하고, 남은 충돌은 사용자에게 공개한다.
 - Git 이력 전체를 DB에 복제하지 않는다. 색인은 커밋된 깨끗한 작업 트리에서 수행하고 색인 실행의 `commit_sha`, `indexed_at`과 문서 `content_hash`를 기록한다.
 - Git 커밋 SHA는 이력 저장 기능이 아니라 인용 원문을 재현하기 위한 좌표다. Git 이력 전체 검색은 MVP 이후 범위다.
@@ -156,9 +160,40 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 - 리랭커는 초기 제외하고 평가 기준 미달 시 추가한다.
 - 한국어 키워드 품질이 부족하면 ParadeDB `pg_search`와 Korean Lindera를 우선 대안으로 검토한다.
 
+### 근거 하한선과 no_evidence
+
+- 각 검색 lane은 원시 점수(raw score)를 사용한다. 키워드 lane은 `pg_trgm`
+  similarity, 벡터 lane은 정규화한 임베딩의 cosine similarity다.
+- 키워드 하한선은 `0.03658536400000001`, 벡터 하한선은
+  `0.48344050397156374`, 상태는 `calibrated`로 고정한다. 점수가 lane별 하한선
+  이상(`>=`)인 후보만 해당 lane의 RRF 후보가 된다.
+- 하한선은 문서에 없는 smoke 질의에서 관찰한 lane별 최고 점수에
+  `nextafter(+inf)`를 적용한 다음 표현 가능 부동소수점 값이다. 따라서 관찰된
+  unknown 최고점은 하한선 비교에서 제외된다.
+- 두 lane 모두 하한선을 통과한 후보가 없으면 HTTP 200,
+  `status: no_evidence`, 빈 `evidence_items`를 반환한다.
+- 후보 수 50/50, RRF `k=60`, 키워드·벡터 가중치 `1.0`과 위 하한선·상태를
+  index config에 byte-exact 값으로 저장한다. Search와 ready는 persisted config의
+  누락·추가 key, 타입 또는 값 불일치 시 안전하게 503으로 실패한다.
+- 현재 6개 smoke에서 확인한 acceptable-evidence 분리 margin은
+  `0.16857380984674064`다. 이는 고정 smoke의 관련 근거 분리 관찰값이며 정식 검색
+  품질 metric이나 성능 기준은 아니다.
+
+### 사용자 인터페이스와 인증
+
+- 공개 MVP 인터페이스는 `POST /v1/search`, `GET /health/live`, 인증된
+  `GET /health/ready`다.
+- 검색 요청은 `query`와 선택적 `limit`만 받는다. source는 `omf`, version은 활성
+  현재본으로 고정하며 path·decision·history·context filter는 제공하지 않는다.
+- Bearer token과 source grant를 API와 검색 후보 범위 양쪽에서 강제한다.
+- 응답은 자연어 생성 답변이 아니라 인용, 저장소 경로, 제목 계층, 원문 행 범위,
+  개별 검색 순위와 RRF 점수, 모든 원본 경로, 색인 run·commit SHA와 내용 해시를 담은
+  근거 패키지다.
+
 ### 임베딩
 
-- 최초 임베딩 모델은 `Qwen/Qwen3-Embedding-0.6B`, 출력은 1024차원으로 시작한다.
+- 최초 임베딩 모델은 `Qwen/Qwen3-Embedding-0.6B`, 고정 revision
+  `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`, CPU, 출력 1024차원으로 시작한다.
 - 질의용 instruction과 모델명·차원은 설정으로 분리해 재색인과 모델 교체가 가능하게 한다.
 - OMF 평가 질문에서 기준 미달일 때 `BAAI/bge-m3`와 비교한다.
 - Kanana Instruct 모델은 임베딩 생성에 사용하지 않는다.
@@ -181,10 +216,32 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
 ## 승인된 설계와 현재 구현 기준
 
 - MVP 시스템 설계 정본은
-  `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v1.0이다.
+  `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.0이다.
 - 상세 구현 계획 정본은
-  `docs/superpowers/plans/2026-08-13-omf-retrieval-mvp-implementation.md` v1.2이며,
-  상태는 **최종 승인 · 개발 착수 가능**이다.
+  `docs/superpowers/plans/2026-08-13-omf-retrieval-mvp-implementation.md` v2.0이며,
+  상태는 **MVP 완료 · 단위 1~4 독립 검증 PASS**다.
+- 작업 1~7의 완료 구현과 작업 8~10에서 시작한 구현을 보존·재사용했다.
+- 기존 통합 `0002` manifest·lifecycle migration을 MVP 기준으로 채택한다. v1.3의
+  8A-1 분리 및 별도 `0003` migration 계획은 v2.0이 명시적으로 대체한다.
+- 정본 전환, 기존 색인·활성화·인증 WIP 안정화, 검색 core와 API·CLI의 수직 절편,
+  로컬 실제 모델 E2E와 6개 smoke 검증의 네 단위를 완료했고 각 단위의 독립 검증이
+  PASS했다.
+- 고정 source 실측은 158개 문서, 4,202개 section, 5,584개 chunk·embedding이며
+  최대 chunk 크기는 800 token이다. 첫 CPU 전체 embedding은 약 11시간 3분이
+  걸렸고 artifact 재사용 재색인은 약 20초였다. 전자는 MVP 성능 합격 기준이 아니라
+  로컬 운영 위험과 진행 가시성에 관한 관찰값이다.
+- 6개 smoke의 acceptable evidence 순위는 정상 5개가 각각 3·3·1·1·1위였고,
+  문서에 없는 질의는 `no_evidence`였다. 모든 반환 경로는 `design/wiki/**`, 대조한
+  provenance 좌표는 87개였다.
+- 사용자 업무 흐름의 이상적 diagnostic target은 top 20에 없었고 프로젝트 용어의
+  이상적 target은 8위였다. 직접 acceptable evidence는 두 질의 모두 top 5에 있어
+  MVP gate는 통과했지만, 정식 평가와 리랭커 검토는 후속 범위로 유지한다.
+- 인증·오류 정보 비노출, 원문 provenance와 전체 회귀 검증은 PASS했다.
+- 생성형 답변, 과거본·상세 filter, 정식 평가·감사, 운영 Docker·배포·성능 gate와
+  runbook은 후속 범위다. 기존 구현이 있으면 삭제하지 않고 비노출 상태로 보존한다.
+- v1.2 작업 13~18 전체는 v2.0 후속으로 이동했다: 작업 13 평가 dataset·metric,
+  작업 14 logging·audit, 작업 15 Docker·Compose, 작업 16 Buildx·digest deploy,
+  작업 17 server E2E·performance, 작업 18 operations handoff.
 - 이전 세션의 미확정 목록과 설계 재개 절차는 더 이상 현재 상태가 아니다. 구현 시
   위 두 정본의 범위, 정지 조건, 단계별 사용자 확인 지점과 테스트 설계를 따른다.
 - 운영 배포 전 입력값과 외부 변경은 설계서와 구현 계획에 적힌 checkpoint에서

@@ -5,6 +5,7 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import Mock
+from uuid import uuid4
 
 import database_test_utils as database_test_support
 import pytest
@@ -24,6 +25,12 @@ from schema_expectations import (
     EXPECTED_NON_ID_DEFAULTS,
 )
 from sqlalchemy import Connection, make_url, text
+from sqlalchemy.exc import DBAPIError
+
+from omf_retrieval.application.indexing.artifact_identity import (
+    parse_artifact_manifest,
+)
+from omf_retrieval.application.indexing.ports import ChunkDraft, ParsedSection
 
 REQUIRED_EXTENSIONS = {"pg_trgm", "vector"}
 EXPECTED_EXTENSION_VERSIONS = {"pg_trgm": "1.6", "vector": "0.8.6"}
@@ -74,6 +81,7 @@ EXPECTED_COLUMNS = {
         "status text required",
         "started_at timestamp with time zone required",
         "indexed_at timestamp with time zone nullable",
+        "activated_at timestamp with time zone nullable",
         "stats jsonb required",
         "failure_code text nullable",
         "failure_detail text nullable",
@@ -100,6 +108,9 @@ EXPECTED_COLUMNS = {
         "content_id uuid required",
         "parser_version text required",
         "chunk_config_hash character varying(64) required",
+        "section_count integer required",
+        "chunk_count integer required",
+        "artifact_hash character varying(64) required",
     },
     "sections": {
         "id uuid required",
@@ -239,6 +250,205 @@ def downgraded_database(
         ).get_current_head()
         assert applied_revision == expected_revision
         assert _application_tables(database_connection) == APPLICATION_TABLES
+
+
+@pytest.fixture
+def activation_parent_revision(
+    database_connection: Connection,
+    alembic_config: Config,
+) -> Iterator[None]:
+    """Start at 0001 and restore an empty head schema after a lifecycle test."""
+    database_connection.rollback()
+    command.downgrade(alembic_config, "0001_initial_schema")
+    try:
+        yield
+    finally:
+        database_connection.rollback()
+        database_connection.execute(
+            text("UPDATE source_profiles SET active_index_run_id = NULL")
+        )
+        database_connection.execute(text("DELETE FROM index_runs"))
+        database_connection.execute(text("DELETE FROM source_profiles"))
+        database_connection.execute(text("DELETE FROM index_configs"))
+        database_connection.execute(text("DELETE FROM document_contents"))
+        database_connection.commit()
+        command.upgrade(alembic_config, "head")
+
+
+def _seed_parent_lifecycle_rows(
+    connection: Connection,
+    *,
+    statuses: tuple[str, ...],
+) -> tuple[object, tuple[object, ...]]:
+    source_id = uuid4()
+    config_id = uuid4()
+    run_ids = tuple(uuid4() for _ in statuses)
+    connection.execute(
+        text("INSERT INTO source_profiles (id, source_key) VALUES (:id, 'omf')"),
+        {"id": source_id},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO index_configs "
+            "(id, config_hash, parser_config, chunk_config, tokenizer_config, "
+            "embedding_config, rrf_config) VALUES "
+            "(:id, :hash, '{}', '{}', '{}', '{}', '{}')"
+        ),
+        {"id": config_id, "hash": "a" * 64},
+    )
+    for ordinal, (run_id, status) in enumerate(zip(run_ids, statuses, strict=True)):
+        connection.execute(
+            text(
+                "INSERT INTO index_runs "
+                "(id, source_profile_id, index_config_id, commit_sha, status, "
+                "started_at, indexed_at) VALUES "
+                "(:id, :source, :config, :commit, :status, "
+                ":started, :indexed)"
+            ),
+            {
+                "id": run_id,
+                "source": source_id,
+                "config": config_id,
+                "commit": str(ordinal + 1) * 40,
+                "status": status,
+                "started": f"2026-08-{ordinal + 1:02d}T00:00:00+00:00",
+                "indexed": (
+                    None
+                    if ordinal == 0
+                    else f"2026-08-{ordinal + 1:02d}T01:00:00+00:00"
+                ),
+            },
+        )
+    active_ids = tuple(
+        run_id
+        for run_id, status in zip(run_ids, statuses, strict=True)
+        if status == "active"
+    )
+    if active_ids:
+        connection.execute(
+            text(
+                "UPDATE source_profiles SET active_index_run_id = :run_id "
+                "WHERE id = :source_id"
+            ),
+            {"run_id": active_ids[0], "source_id": source_id},
+        )
+    connection.commit()
+    return source_id, run_ids
+
+
+def _seed_parent_parse_rows(
+    connection: Connection,
+    *,
+    include_section: bool = True,
+) -> tuple[object, object, object | None, object | None]:
+    """Seed one 0001 parse whose current rows are the legacy baseline truth."""
+    content_id, parse_id = uuid4(), uuid4()
+    section_id = uuid4() if include_section else None
+    chunk_id = uuid4() if include_section else None
+    connection.execute(
+        text(
+            "INSERT INTO document_contents "
+            "(id, content_hash, content, byte_size) VALUES "
+            "(:id, :hash, :content, :byte_size)"
+        ),
+        {
+            "id": content_id,
+            "hash": "c" * 64,
+            "content": "legacy current state\n",
+            "byte_size": len("legacy current state\n".encode()),
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO document_parses "
+            "(id, content_id, parser_version, chunk_config_hash) VALUES "
+            "(:id, :content_id, 'parser-v1', :chunk_hash)"
+        ),
+        {"id": parse_id, "content_id": content_id, "chunk_hash": "b" * 64},
+    )
+    if include_section:
+        connection.execute(
+            text(
+                "INSERT INTO sections "
+                "(id, parse_id, ordinal, level, heading, heading_path, body, "
+                "line_start, line_end) VALUES "
+                "(:id, :parse_id, 0, 1, 'Legacy', ARRAY['Legacy'], "
+                "'legacy current state\n', 1, 2)"
+            ),
+            {"id": section_id, "parse_id": parse_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO chunks "
+                "(id, section_id, ordinal, raw_text, search_text, token_count, "
+                "line_start, line_end, chunk_hash) VALUES "
+                "(:id, :section_id, 0, 'legacy current state\n', "
+                "'# Legacy\nlegacy current state\n', 5, 2, 2, :chunk_hash)"
+            ),
+            {"id": chunk_id, "section_id": section_id, "chunk_hash": "d" * 64},
+        )
+    connection.commit()
+    return content_id, parse_id, section_id, chunk_id
+
+
+def _seed_parent_parse_batch(
+    connection: Connection,
+    *,
+    parse_count: int,
+) -> tuple[object, ...]:
+    """Seed several 0001 parse identities sharing one exact content projection."""
+    content_id = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO document_contents "
+            "(id, content_hash, content, byte_size) VALUES "
+            "(:id, :hash, 'legacy current state\n', :byte_size)"
+        ),
+        {
+            "id": content_id,
+            "hash": "e" * 64,
+            "byte_size": len("legacy current state\n".encode()),
+        },
+    )
+    parse_ids: list[object] = []
+    for ordinal in range(parse_count):
+        parse_id, section_id = uuid4(), uuid4()
+        parse_ids.append(parse_id)
+        connection.execute(
+            text(
+                "INSERT INTO document_parses "
+                "(id, content_id, parser_version, chunk_config_hash) VALUES "
+                "(:id, :content_id, :parser_version, :chunk_hash)"
+            ),
+            {
+                "id": parse_id,
+                "content_id": content_id,
+                "parser_version": f"parser-v{ordinal}",
+                "chunk_hash": "b" * 64,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sections "
+                "(id, parse_id, ordinal, level, heading, heading_path, body, "
+                "line_start, line_end) VALUES "
+                "(:id, :parse_id, 0, 1, 'Legacy', ARRAY['Legacy'], "
+                "'legacy current state\n', 1, 2)"
+            ),
+            {"id": section_id, "parse_id": parse_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO chunks "
+                "(id, section_id, ordinal, raw_text, search_text, token_count, "
+                "line_start, line_end, chunk_hash) VALUES "
+                "(:id, :section_id, 0, 'legacy current state\n', "
+                "'# Legacy\nlegacy current state\n', 5, 2, 2, :chunk_hash)"
+            ),
+            {"id": uuid4(), "section_id": section_id, "chunk_hash": "d" * 64},
+        )
+    connection.commit()
+    return tuple(parse_ids)
 
 
 def test_generic_database_environment_requires_explicit_test_override(
@@ -563,6 +773,271 @@ def test_alembic_revision_is_at_head(
     expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
 
     assert applied_revision == expected_revision
+
+
+def test_activation_migration_backfills_only_known_lifecycle_history(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """Use indexed/start time rather than inventing a current activation time."""
+    _, run_ids = _seed_parent_lifecycle_rows(
+        database_connection,
+        statuses=("active", "previous", "ready"),
+    )
+
+    command.upgrade(alembic_config, "head")
+
+    rows = database_connection.execute(
+        text(
+            "SELECT id, activated_at, indexed_at, started_at FROM index_runs "
+            "ORDER BY commit_sha"
+        )
+    ).all()
+    by_id = {row.id: row for row in rows}
+    assert by_id[run_ids[0]].activated_at == by_id[run_ids[0]].started_at
+    assert by_id[run_ids[1]].activated_at == by_id[run_ids[1]].indexed_at
+    assert by_id[run_ids[2]].activated_at is None
+
+
+def test_activation_migration_backfills_legacy_parse_manifest_with_app_parity(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """The current persisted legacy projection is the deterministic baseline truth."""
+    content_id, parse_id, section_id, chunk_id = _seed_parent_parse_rows(
+        database_connection
+    )
+    expected = parse_artifact_manifest(
+        (
+            ParsedSection(
+                ordinal=0,
+                parent_ordinal=None,
+                level=1,
+                heading="Legacy",
+                heading_path=("Legacy",),
+                body="legacy current state\n",
+                line_start=1,
+                line_end=2,
+                blocks=(),
+            ),
+        ),
+        (
+            ChunkDraft(
+                ordinal=0,
+                raw_text="legacy current state\n",
+                search_text="# Legacy\nlegacy current state\n",
+                token_count=5,
+                line_start=2,
+                line_end=2,
+                chunk_hash="d" * 64,
+            ),
+        ),
+        (0,),
+    )
+
+    command.upgrade(alembic_config, "head")
+
+    row = database_connection.execute(
+        text(
+            "SELECT section_count, chunk_count, artifact_hash "
+            "FROM document_parses WHERE id = :parse_id"
+        ),
+        {"parse_id": parse_id},
+    ).one()
+    assert tuple(row) == (
+        expected.section_count,
+        expected.chunk_count,
+        expected.artifact_hash,
+    )
+
+    # Release this fixture connection's ACCESS SHARE lock before Alembic opens a
+    # separate connection for ALTER TABLE during downgrade.
+    database_connection.commit()
+    command.downgrade(alembic_config, "0001_initial_schema")
+    assert (
+        database_connection.execute(
+            text("SELECT count(*) FROM document_contents WHERE id = :id"),
+            {"id": content_id},
+        ).scalar_one()
+        == 1
+    )
+    assert (
+        database_connection.execute(
+            text("SELECT count(*) FROM sections WHERE id = :id"),
+            {"id": section_id},
+        ).scalar_one()
+        == 1
+    )
+    assert (
+        database_connection.execute(
+            text("SELECT count(*) FROM chunks WHERE id = :id"),
+            {"id": chunk_id},
+        ).scalar_one()
+        == 1
+    )
+
+
+def test_activation_migration_backfills_multiple_legacy_parses_with_app_parity(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """Every parse in a legacy multi-row batch receives the same canonical truth."""
+    parse_ids = _seed_parent_parse_batch(database_connection, parse_count=3)
+    expected = parse_artifact_manifest(
+        (
+            ParsedSection(
+                0,
+                None,
+                1,
+                "Legacy",
+                ("Legacy",),
+                "legacy current state\n",
+                1,
+                2,
+                (),
+            ),
+        ),
+        (
+            ChunkDraft(
+                0,
+                "legacy current state\n",
+                "# Legacy\nlegacy current state\n",
+                5,
+                2,
+                2,
+                "d" * 64,
+            ),
+        ),
+        (0,),
+    )
+
+    command.upgrade(alembic_config, "head")
+
+    rows = database_connection.execute(
+        text(
+            "SELECT id, section_count, chunk_count, artifact_hash "
+            "FROM document_parses WHERE id = ANY(CAST(:parse_ids AS uuid[]))"
+        ),
+        {"parse_ids": list(parse_ids)},
+    ).all()
+    assert len(rows) == 3
+    assert {
+        (row.section_count, row.chunk_count, row.artifact_hash) for row in rows
+    } == {(expected.section_count, expected.chunk_count, expected.artifact_hash)}
+
+
+def test_activation_migration_rejects_legacy_parse_without_sections(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """Do not invent structure for a legacy parse that has no persisted section."""
+    _seed_parent_parse_rows(database_connection, include_section=False)
+
+    with pytest.raises(DBAPIError, match="parse without sections"):
+        command.upgrade(alembic_config, "head")
+
+    database_connection.rollback()
+    assert (
+        database_connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        == "0001_initial_schema"
+    )
+
+
+@pytest.mark.parametrize(
+    ("statuses", "pointer_index", "expected"),
+    [
+        (("active",), None, "ACTIVE row without pointer"),
+        (("ready",), 0, "pointer target is not ACTIVE"),
+        (("previous",), None, "PREVIOUS row without ACTIVE pointer"),
+        (("active", "ready"), 1, "pointer target is not ACTIVE"),
+        (("active", "active"), 0, "multiple ACTIVE rows"),
+        (("previous", "previous"), None, "multiple PREVIOUS rows"),
+    ],
+)
+def test_activation_migration_rejects_inconsistent_legacy_lifecycle(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+    statuses: tuple[str, ...],
+    pointer_index: int | None,
+    expected: str,
+) -> None:
+    """Never infer, select, or relabel an inconsistent legacy lifecycle."""
+    source_id, run_ids = _seed_parent_lifecycle_rows(
+        database_connection,
+        statuses=statuses,
+    )
+    database_connection.execute(
+        text(
+            "UPDATE source_profiles SET active_index_run_id = :pointer "
+            "WHERE id = :source_id"
+        ),
+        {
+            "pointer": run_ids[pointer_index] if pointer_index is not None else None,
+            "source_id": source_id,
+        },
+    )
+    database_connection.commit()
+
+    with pytest.raises(DBAPIError, match=expected):
+        command.upgrade(alembic_config, "head")
+
+    database_connection.rollback()
+    assert (
+        database_connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        == "0001_initial_schema"
+    )
+
+
+def test_activation_migration_downgrades_without_archived_history(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """A reversible no-archive deployment returns exactly to the parent schema."""
+    _seed_parent_lifecycle_rows(database_connection, statuses=("active", "previous"))
+    command.upgrade(alembic_config, "head")
+
+    command.downgrade(alembic_config, "0001_initial_schema")
+
+    columns = set(
+        database_connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'index_runs'"
+            )
+        ).scalars()
+    )
+    assert "activated_at" not in columns
+
+
+def test_activation_migration_refuses_lossy_archived_downgrade(
+    database_connection: Connection,
+    alembic_config: Config,
+    activation_parent_revision: None,
+) -> None:
+    """Downgrade must not silently relabel archived lifecycle history."""
+    _, run_ids = _seed_parent_lifecycle_rows(database_connection, statuses=("ready",))
+    command.upgrade(alembic_config, "head")
+    database_connection.execute(
+        text(
+            "UPDATE index_runs SET status = 'archived', activated_at = started_at "
+            "WHERE id = :run_id"
+        ),
+        {"run_id": run_ids[0]},
+    )
+    database_connection.commit()
+
+    with pytest.raises(DBAPIError, match="cannot downgrade with archived index runs"):
+        command.downgrade(alembic_config, "0001_initial_schema")
 
 
 def test_application_table_set_is_exact(database_connection: Connection) -> None:

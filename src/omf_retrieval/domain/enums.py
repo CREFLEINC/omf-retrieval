@@ -33,6 +33,7 @@ class IndexRunStatus(str, Enum):
     READY = "ready"
     ACTIVE = "active"
     PREVIOUS = "previous"
+    ARCHIVED = "archived"
     FAILED = "failed"
 
 

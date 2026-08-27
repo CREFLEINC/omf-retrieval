@@ -9,6 +9,12 @@ from sqlalchemy.exc import IntegrityError
 SHA256 = "a" * 64
 OTHER_SHA256 = "b" * 64
 COMMIT_SHA = "c" * 40
+BODY_PARSE_ARTIFACT_HASH = (
+    "a729f298eebdc5651447bb04f4713d261fac883f979e2f101366c6e4577a7911"
+)
+HEADING_ONLY_ARTIFACT_HASH = (
+    "0226d200b612144412bc70604a2a1185d4fe6d845378c85c0df9b3847ba107df"
+)
 
 
 def _seed_valid_graph(connection: Connection) -> dict[str, object]:
@@ -74,10 +80,16 @@ def _seed_valid_graph(connection: Connection) -> dict[str, object]:
     connection.execute(
         text(
             "INSERT INTO document_parses "
-            "(id, content_id, parser_version, chunk_config_hash) VALUES "
-            "(:parse_id, :content_id, 'markdown-it-1', :chunk_config_hash)"
+            "(id, content_id, parser_version, chunk_config_hash, section_count, "
+            "chunk_count, artifact_hash) VALUES "
+            "(:parse_id, :content_id, 'markdown-it-1', :chunk_config_hash, "
+            "1, 1, :artifact_hash)"
         ),
-        {**identifiers, "chunk_config_hash": SHA256},
+        {
+            **identifiers,
+            "chunk_config_hash": SHA256,
+            "artifact_hash": BODY_PARSE_ARTIFACT_HASH,
+        },
     )
     connection.execute(
         text(
@@ -207,6 +219,21 @@ INVALID_VALUE_UPDATES = (
         "chunk_config_hash = 'xyz'",
         "parse_id",
         id="parse-config-hash",
+    ),
+    pytest.param(
+        "document_parses", "section_count = -1", "parse_id", id="parse-section-count"
+    ),
+    pytest.param(
+        "document_parses",
+        "section_count = 0",
+        "parse_id",
+        id="parse-zero-section-count",
+    ),
+    pytest.param(
+        "document_parses", "chunk_count = -1", "parse_id", id="parse-chunk-count"
+    ),
+    pytest.param(
+        "document_parses", "artifact_hash = 'xyz'", "parse_id", id="artifact-hash"
     ),
     pytest.param("sections", "ordinal = -1", "section_id", id="section-ordinal"),
     pytest.param("sections", "level = 7", "section_id", id="section-level"),
@@ -440,8 +467,9 @@ def test_invalid_values_are_rejected(
         ),
         pytest.param(
             "INSERT INTO document_parses "
-            "(id, content_id, parser_version, chunk_config_hash) VALUES "
-            "(:new_id, :content_id, 'markdown-it-1', :sha)",
+            "(id, content_id, parser_version, chunk_config_hash, section_count, "
+            "chunk_count, artifact_hash) VALUES "
+            "(:new_id, :content_id, 'markdown-it-1', :sha, 1, 1, :sha)",
             {"sha": SHA256},
             id="parse-identity",
         ),
@@ -511,13 +539,29 @@ def test_parser_versions_can_coexist_for_same_content_and_config(
     """Parser version participates in parse identity."""
     identifiers = _seed_valid_graph(database_connection)
 
+    parse_id = uuid4()
     database_connection.execute(
         text(
             "INSERT INTO document_parses "
-            "(id, content_id, parser_version, chunk_config_hash) VALUES "
-            "(:id, :content_id, 'markdown-it-2', :sha)"
+            "(id, content_id, parser_version, chunk_config_hash, section_count, "
+            "chunk_count, artifact_hash) VALUES "
+            "(:id, :content_id, 'markdown-it-2', :sha, 1, 0, :artifact_hash)"
         ),
-        {"id": uuid4(), "content_id": identifiers["content_id"], "sha": SHA256},
+        {
+            "id": parse_id,
+            "content_id": identifiers["content_id"],
+            "sha": SHA256,
+            "artifact_hash": HEADING_ONLY_ARTIFACT_HASH,
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO sections "
+            "(id, parse_id, ordinal, level, heading, heading_path, body, "
+            "line_start, line_end) VALUES "
+            "(:id, :parse_id, 0, 1, 'Other', ARRAY['Other'], '', 1, 1)"
+        ),
+        {"id": uuid4(), "parse_id": parse_id},
     )
     count = database_connection.execute(
         text("SELECT count(*) FROM document_parses WHERE content_id = :content_id"),
@@ -525,6 +569,28 @@ def test_parser_versions_can_coexist_for_same_content_and_config(
     ).scalar_one()
 
     assert count == 2
+
+
+def test_zero_section_count_insert_is_rejected(
+    database_connection: Connection,
+) -> None:
+    """A newly inserted parse must declare at least one persisted section."""
+    identifiers = _seed_valid_graph(database_connection)
+
+    with pytest.raises(IntegrityError), database_connection.begin_nested():
+        database_connection.execute(
+            text(
+                "INSERT INTO document_parses "
+                "(id, content_id, parser_version, chunk_config_hash, section_count, "
+                "chunk_count, artifact_hash) VALUES "
+                "(:id, :content_id, 'markdown-it-zero', :sha, 0, 0, :sha)"
+            ),
+            {
+                "id": uuid4(),
+                "content_id": identifiers["content_id"],
+                "sha": SHA256,
+            },
+        )
 
 
 def _add_second_run(
@@ -671,10 +737,25 @@ def test_cross_parse_section_parent_is_rejected(
     database_connection.execute(
         text(
             "INSERT INTO document_parses "
-            "(id, content_id, parser_version, chunk_config_hash) VALUES "
-            "(:id, :content_id, 'markdown-it-2', :sha)"
+            "(id, content_id, parser_version, chunk_config_hash, section_count, "
+            "chunk_count, artifact_hash) VALUES "
+            "(:id, :content_id, 'markdown-it-2', :sha, 1, 0, :artifact_hash)"
         ),
-        {"id": other_parse_id, "content_id": identifiers["content_id"], "sha": SHA256},
+        {
+            "id": other_parse_id,
+            "content_id": identifiers["content_id"],
+            "sha": SHA256,
+            "artifact_hash": HEADING_ONLY_ARTIFACT_HASH,
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO sections "
+            "(id, parse_id, ordinal, level, heading, heading_path, body, "
+            "line_start, line_end) VALUES "
+            "(:id, :parse_id, 0, 1, 'Other', ARRAY['Other'], '', 1, 1)"
+        ),
+        {"id": uuid4(), "parse_id": other_parse_id},
     )
 
     with pytest.raises(IntegrityError), database_connection.begin_nested():
@@ -683,7 +764,7 @@ def test_cross_parse_section_parent_is_rejected(
                 "INSERT INTO sections "
                 "(id, parse_id, parent_section_id, ordinal, level, heading_path, "
                 "body, line_start, line_end) VALUES "
-                "(:id, :parse_id, :parent_id, 0, 1, ARRAY['child'], 'child', 1, 1)"
+                "(:id, :parse_id, :parent_id, 1, 1, ARRAY['child'], 'child', 1, 1)"
             ),
             {
                 "id": uuid4(),

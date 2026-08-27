@@ -3,26 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CREFLE 정보 조회 플랫폼 MVP 시스템 설계서</title>
+<title>CREFLE 정보 조회 플랫폼 초고속 MVP 시스템 설계서</title>
 <link rel="stylesheet" href="./crefle-doc/crefle-doc.css">
 <style>
-  :root { --doc-running-title: '정보 조회 플랫폼 MVP 시스템 설계서'; }
+  :root { --doc-running-title: '정보 조회 플랫폼 초고속 MVP 시스템 설계서'; }
 </style>
 </head>
 
 <body class="doc doc-numbered">
 <header class="doc-cover">
   <p class="eyebrow">CREFLE · 시스템 설계서</p>
-  <h1>정보 조회 플랫폼 MVP 시스템 설계서</h1>
-  <p class="lede">OMF-MES 문서를 첫 검증 대상으로 삼아, 사용자의 정보 요청에 적합한 원문 근거를 재현 가능한 인용 정보와 함께 전달하는 검색 플랫폼의 개발 기준을 정의한다.</p>
+  <h1>정보 조회 플랫폼 초고속 MVP 시스템 설계서</h1>
+  <p class="lede">고정된 OMF 현재본을 색인하고 인증된 HTTP 질의에 재현 가능한 원문 근거 패키지를 반환하는 최소 검색 플랫폼의 개발 기준을 정의한다.</p>
 
   <table data-document-info>
     <caption>문서 정보</caption>
     <tbody>
-      <tr><th>작성자</th><td>CREFLE Inc. CTO 김정규</td></tr>
-      <tr><th>작성일</th><td>2026-08-13</td></tr>
-      <tr><th>작성시간</th><td>15:27 KST</td></tr>
-      <tr><th>문서 버전</th><td>1.0</td></tr>
+      <tr><th>작성자</th><td>Codex — 사용자 승인 반영</td></tr>
+      <tr><th>작성일</th><td>2026-08-27</td></tr>
+      <tr><th>작성시간</th><td>15:53 KST</td></tr>
+      <tr><th>문서 버전</th><td>v2.0</td></tr>
       <tr><th>열람 대상</th><td>프로젝트 관련자</td></tr>
     </tbody>
   </table>
@@ -30,444 +30,230 @@
 
 <h2>요약</h2>
 
-<p>
-  이번 MVP는 생성형 답변 시스템이 아니라 <strong>검증 가능한 근거 검색 시스템</strong>이다.
-  사용자가 필요한 자료를 자연어로 요청하면, OMF 문서의 관련 절을 하이브리드 검색하고
-  직접 인용·파일 경로·제목 계층·행 범위·색인 커밋 SHA·내용 해시·문서 버전 및 결정 상태와
-  함께 전달한다. 검색 후 LLM 요약·분석은 2차 개발로 분리한다.
-</p>
+<p>이번 MVP는 자연어 답변을 생성하는 서비스가 아니라 <strong>검증 가능한 근거 검색 서비스</strong>다. OMF의 고정 commit에서 현재 wiki Markdown만 색인하고, 인증된 질의에 인용·경로·제목 계층·행 범위·검색 순위·commit SHA·내용 해시를 반환한다.</p>
 
 <div class="kpi">
-  <div><span class="big">3일</span><span class="lbl">MVP 학습·구현<br>목표 기간</span></div>
-  <div><span class="big">30개</span><span class="lbl">사람이 검증한<br>골드 질의</span></div>
-  <div><span class="big">2세대</span><span class="lbl">활성·직전 성공<br>색인 보존</span></div>
+  <div><span class="big">1개</span><span class="lbl">고정 OMF<br>현재본</span></div>
+  <div><span class="big">3개</span><span class="lbl">공개 HTTP<br>endpoint</span></div>
+  <div><span class="big">6개</span><span class="lbl">로컬 실제 모델<br>smoke 질의</span></div>
 </div>
 
 <div class="callout callout-success">
-  <p><strong>설계 상태.</strong> 본 문서의 핵심 기능, 서비스 경계, 데이터 모델, 검색·색인·평가·보안·배포 방식은 사용자와 단계별로 합의한 확정안이다. 개발은 본 문서 검토 및 최종 승인 후 시작한다.</p>
+  <p><strong>MVP 완료.</strong> 로컬 PostgreSQL과 실제 Qwen 임베딩 모델로 고정 OMF 현재본을 색인하고 인증된 API 검색과 6개 smoke를 검증했다. 네 실행 단위의 독립 검증은 모두 PASS했으며, 공유 Ubuntu·Docker Compose 배포는 후속이다.</p>
 </div>
 
-<h3>핵심 기술 선택</h3>
+<h3>용어</h3>
 
 <table>
-  <caption>MVP 핵심 기술과 책임</caption>
-  <thead>
-    <tr><th>영역</th><th>확정 선택</th><th>목적</th></tr>
-  </thead>
+  <thead><tr><th>용어</th><th>뜻</th></tr></thead>
   <tbody>
-    <tr><th>애플리케이션</th><td>Python · FastAPI · Typer 모듈러 모놀리스</td><td>단일 이미지의 단순한 배포와 명확한 내부 경계</td></tr>
-    <tr><th>데이터베이스</th><td>PostgreSQL 18 · pgvector 0.8.6 · pg_trgm</td><td>키워드·벡터·메타데이터 검색을 한 저장소에서 처리</td></tr>
-    <tr><th>임베딩</th><td>Qwen/Qwen3-Embedding-0.6B · 1024차원</td><td>한국어 내부 설계 문서의 의미 검색</td></tr>
-    <tr><th>검색 결합</th><td>pg_trgm + cosine 정확 검색 + 동일 가중치 RRF</td><td>식별자와 의미적 관련성을 함께 확보</td></tr>
-    <tr><th>배포</th><td>Docker Compose · RTX 4090 GPU 0 · 중앙 Nginx Gateway</td><td>현재 사내 운영 환경에 맞춘 단일 호스트 배포</td></tr>
-    <tr><th>평가</th><td>사람이 검증한 30개 골드 질의와 검색 전용 지표</td><td>LLM 판정에 의존하지 않는 재현 가능한 품질 게이트</td></tr>
+    <tr><th>RAG</th><td>Retrieval-Augmented Generation. 이 MVP에서는 생성 없이 검색과 근거 반환까지만 담당</td></tr>
+    <tr><th>근거 패키지</th><td>인용문, 원문 좌표, 검색 순위와 색인 재현 정보를 묶은 응답</td></tr>
+    <tr><th>RRF</th><td>Reciprocal Rank Fusion. 키워드·벡터 후보 순위를 역수로 결합하는 방식</td></tr>
+    <tr><th>검색 lane</th><td>키워드 또는 벡터 검색이 독립적으로 후보와 순위를 만드는 경로</td></tr>
+    <tr><th>원시 점수</th><td>RRF 결합 전의 lane별 관련도. 키워드는 <code>pg_trgm</code> similarity, 벡터는 정규화한 임베딩의 cosine similarity</td></tr>
+    <tr><th>근거 하한선</th><td>후보가 해당 lane의 RRF 입력이 되기 위해 충족해야 하는 원시 점수 최솟값</td></tr>
+    <tr><th>분리 margin</th><td>고정 smoke에서 정상 질의의 acceptable evidence가 문서에 없는 질의의 lane별 최고점보다 앞선 최소 여유</td></tr>
+    <tr><th>WIP</th><td>Work In Progress. 작업 8~10에서 시작해 이번 MVP에 안정화한 기존 구현</td></tr>
   </tbody>
 </table>
 
 <h2>목표와 범위</h2>
 
-<h3>사용자 가치</h3>
-
-<blockquote>
-  “어떤 자료가 필요한지 요청”하면 “거기에 맞는 자료를 찾아 근거와 함께 전달”한다.
-</blockquote>
-
-<p>MVP의 성공은 답변 문장이 자연스러운지가 아니라, 필요한 근거를 빠짐없이 찾고 그 근거를 원문에서 다시 확인할 수 있는지로 판단한다.</p>
+<blockquote>고정된 OMF 현재본을 색인하고, 인증된 HTTP 질의에 재현 가능한 근거 패키지를 반환한다.</blockquote>
 
 <h3>포함 범위</h3>
 
 <ul>
-  <li>자연어 검색 요청과 source·버전·경로·결정 상태 필터</li>
-  <li>지정 Git commit의 정리된 Markdown 문서 색인</li>
-  <li>제목 계층 기반 Parent–Child 분할과 콘텐츠 기반 재사용</li>
-  <li>키워드·벡터 검색 및 RRF 결합</li>
-  <li>원문 근거 패키지와 충돌·중복·버전 정보 반환</li>
-  <li>REST API, API를 호출하는 Search CLI, 운영자 전용 Admin CLI</li>
-  <li>인증·source 권한·감사 이벤트·최소 헬스체크와 구조화 로그</li>
-  <li>검색 품질·성능 평가와 원자적 색인 전환·직전 성공본 롤백</li>
+  <li>고정 OMF commit의 <code>design/wiki/**/*.md</code> 현재본 색인</li>
+  <li>제목 계층 기반 Parent–Child 분할과 콘텐츠 해시 기반 재사용</li>
+  <li><code>pg_trgm</code> 키워드 검색, exact <code>pgvector</code> cosine 검색과 RRF 결합</li>
+  <li>Bearer token, OMF source grant와 활성 색인 범위 강제</li>
+  <li>검색 API, 최소 health endpoint와 API를 호출하는 Search CLI</li>
+  <li>로컬 PostgreSQL·실제 임베딩 모델 E2E와 6개 smoke 검증</li>
 </ul>
 
-<h3>2차 개발 범위</h3>
+<h3>후속 범위</h3>
 
 <ul>
-  <li>Codex API 또는 내부 Kanana 모델을 이용한 요약·분석·답변 생성</li>
-  <li>대화형 Agent, MCP, function tool 및 후속 질의</li>
-  <li>기존 CrefleAI GPU 모델 서버 연동</li>
-  <li>TEI 분리, 리랭커, ANN 인덱스, ParadeDB·Korean Lindera</li>
-  <li>자동 백업·외부 복제·복원 훈련·RPO/RTO</li>
-  <li>Prometheus, Grafana, 중앙 로그 수집과 알림</li>
-  <li>Git 전체 이력 검색과 완전한 의미 기반 충돌 판정</li>
+  <li>LLM 생성 답변과 Codex·Kanana 연동</li>
+  <li>과거본·임의 commit과 path·decision·history·context filter</li>
+  <li>명시적 conflict/relation 전용 API, rollback 노출과 2세대 운영 절차</li>
+  <li>30개 골드셋, 정식 검색 metric, 성능 benchmark</li>
+  <li>감사 HMAC, JSON audit logging과 운영 관측성</li>
+  <li>운영 Docker image·Compose, Buildx, digest 배포, 서버 E2E와 runbook</li>
+  <li>자동 배포·복구, MCP와 function tool</li>
 </ul>
 
-<div class="callout callout-warning">
-  <p><strong>MVP 운영 한계.</strong> PostgreSQL 영속 볼륨은 사용하지만 자동 백업은 제공하지 않는다. DB 장애 시 원본 Git commit으로 색인을 재생성할 수 있으나 API 클라이언트, 감사 로그와 실행 이력은 소실될 수 있다. 사용자 확대 또는 정식 운영 전에 2차 백업·복구 개발을 완료해야 한다.</p>
-</div>
+<table>
+  <caption>v1.2 작업 13~18의 v2.0 후속 이동 추적</caption>
+  <thead><tr><th>기존 작업</th><th>기존 책임</th><th>v2.0 상태</th></tr></thead>
+  <tbody>
+    <tr><th>작업 13</th><td>평가 dataset·metric</td><td>후속</td></tr>
+    <tr><th>작업 14</th><td>Logging·audit</td><td>후속</td></tr>
+    <tr><th>작업 15</th><td>Docker·Compose</td><td>후속</td></tr>
+    <tr><th>작업 16</th><td>Buildx·digest deploy</td><td>후속</td></tr>
+    <tr><th>작업 17</th><td>Server E2E·performance</td><td>후속</td></tr>
+    <tr><th>작업 18</th><td>Operations handoff</td><td>후속</td></tr>
+  </tbody>
+</table>
+
+<p>위 표는 v1.2 작업 13~18 전체를 v2.0 MVP 완료선 밖으로 이동한 추적 기록이다.</p>
+
+<p>기존 구현이 있는 후속 기능은 삭제하지 않고 MVP 공개 경로에서 비노출 상태로 보존한다.</p>
 
 <h2>원본 데이터와 정본 정책</h2>
 
-<h3>첫 source profile: OMF</h3>
-
 <table>
-  <caption>OMF 색인 포함·제외 규칙</caption>
-  <thead>
-    <tr><th>구분</th><th>경로·유형</th></tr>
-  </thead>
+  <caption>OMF source profile</caption>
+  <thead><tr><th>항목</th><th>확정 값</th></tr></thead>
   <tbody>
-    <tr><th>포함</th><td><code>docs/research/**/*.md</code>, <code>docs/planning/**/*.md</code>, <code>uiux/**/*.md</code></td></tr>
-    <tr><th>제외</th><td><code>docs/raw/**</code>, <code>docs/_workspace/**</code>, Agent 설정·작업 파일, HTML, PDF, Excel, 이미지, 생성물, 임시 작업물</td></tr>
-    <tr><th>취급</th><td>OMF 저장소는 읽기 전용 데이터 소스이며 검색 플랫폼 저장소와 릴리스 주기를 분리</td></tr>
-    <tr><th>색인 좌표</th><td>커밋된 깨끗한 Git commit SHA와 색인 시각, 문서 SHA-256 내용 해시</td></tr>
+    <tr><th>Source ID</th><td><code>omf</code></td></tr>
+    <tr><th>고정 commit</th><td><code>a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2</code></td></tr>
+    <tr><th>포함</th><td><code>design/wiki/**/*.md</code></td></tr>
+    <tr><th>제외</th><td><code>design/raw/**</code>, <code>design/schema/**</code>, <code>docs/**</code>, <code>_workspace/**</code>, Agent 설정·작업 파일, HTML, PDF, Excel, 이미지, 생성물, 임시 작업물</td></tr>
+    <tr><th>버전</th><td>고정 commit의 현재본만 색인·검색</td></tr>
+    <tr><th>재현 좌표</th><td>색인 run ID·commit SHA·색인 시각·UTF-8 원문 SHA-256</td></tr>
   </tbody>
 </table>
-
-<h3>정본·버전·충돌 규칙</h3>
 
 <ol>
-  <li>전체 문서와 명시적 버전 스냅샷을 색인하되 일반 검색은 현재본을 우선한다.</li>
-  <li>사용자가 이전 버전·변경 전·최초 결정을 요구하면 과거본을 검색한다.</li>
-  <li>완전히 같은 내용은 콘텐츠 해시로 감지하고 실제 내용·chunk·embedding은 재사용하되 모든 원본 경로를 보존한다.</li>
-  <li>화면 구성·IA·프로그램 배치 정책은 <code>uiux</code>, 업무 흐름·요구사항·데이터 모델은 <code>docs</code>의 소유권을 따른다.</li>
-  <li><code>확정기록</code>, <code>결정서</code>, <code>[확정]</code> 표기는 일반 조사 문서보다 우선한다.</li>
-  <li>같은 지위에서는 버전과 결정일을 비교하며, 남은 충돌은 양쪽 근거를 함께 공개한다.</li>
-  <li>MVP는 의미적 충돌을 LLM으로 추론하지 않는다. 원문이나 관리 설정에서 명시적으로 확인된 관계만 <code>potential_conflict</code>로 표시한다.</li>
+  <li>OMF 저장소는 읽기 전용이며 깨끗한 고정 commit에서 색인한다.</li>
+  <li>완전히 같은 내용은 해시로 감지하고 parse·chunk·embedding을 재사용하되 모든 원본 경로를 보존한다.</li>
+  <li>Git commit SHA는 Git 이력을 DB에 복제하는 값이 아니라 반환 근거를 재현하는 좌표다.</li>
+  <li>과거본과 임의 commit 검색은 이번 MVP에서 제공하지 않는다.</li>
 </ol>
 
-<h2>전체 시스템 구성</h2>
+<h2>시스템 구성</h2>
 
 <figure>
-<pre><code>┌────────────────────────────── 사내 사용자 영역 ──────────────────────────────┐
-│ 사용자 · Agent · Search CLI                                                │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │ HTTPS + Bearer token
-                                ▼
-┌──────────────────────── 기존 중앙 Nginx Gateway ────────────────────────────┐
-│ crefle.com TLS 인증서 · A 레코드 호스트명 라우팅 · Reverse Proxy           │
-│ Forwarded 헤더 재설정 · Request ID 전달                                    │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │ 사내망 HTTP / Gateway IP만 허용
-                                ▼
-┌────────────────── phoebe-onpremise-test / Docker Compose ───────────────────┐
-│                                                                             │
-│  ┌───────────────────────────┐       ┌───────────────────────────────────┐  │
-│  │ FastAPI Search API        │ SQL   │ PostgreSQL 18                    │  │
-│  │ · 인증·권한               ├──────►│ · pg_trgm 키워드 검색            │  │
-│  │ · Query embedding         │       │ · pgvector cosine 정확 검색      │  │
-│  │ · RRF · Evidence package  │       │ · 색인·권한·감사 데이터          │  │
-│  │ · Qwen3 Embedding / GPU 0 │       └───────────────────────────────────┘  │
-│  └───────────────────────────┘                                               │
-│                                                                             │
-│  ┌───────────────────────────┐       ┌───────────────────────────────────┐  │
-│  │ 일회성 Admin CLI          │ :ro   │ OMF Git clone                    │  │
-│  │ · index/evaluate/rollback ├──────►│ 지정 commit → git archive        │  │
-│  │ · client 관리 · GPU 0     │       │ API 컨테이너에는 미노출           │  │
-│  └───────────────────────────┘       └───────────────────────────────────┘  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘</code></pre>
-  <figcaption>중앙 Gateway와 단일 검색 호스트로 구성한 MVP 배포 토폴로지</figcaption>
-</figure>
-
-<h3>배포 호스트 기준</h3>
-
-<table>
-  <caption>확인된 배포 서버와 경로</caption>
-  <thead>
-    <tr><th>항목</th><th>확정 값</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>SSH alias</th><td><code>phoebe-onpremise-test</code></td></tr>
-    <tr><th>OS·아키텍처</th><td>Ubuntu 22.04.4 LTS · linux/amd64</td></tr>
-    <tr><th>CPU·메모리</th><td>AMD Ryzen 9 7950X3D · 32 threads · RAM 124GiB</td></tr>
-    <tr><th>GPU</th><td>RTX 4090 24GB × 2 중 GPU 0 전용 사용</td></tr>
-    <tr><th>Driver·CUDA 상한</th><td>NVIDIA 575.64.03 · CUDA 12.9</td></tr>
-    <tr><th>컨테이너</th><td>Docker 27.2.0 · Compose 2.29.2 · NVIDIA Container Toolkit 1.18.0</td></tr>
-    <tr><th>배포 위치</th><td><code>/opt/omf-retrieval</code></td></tr>
-    <tr><th>영속 데이터</th><td><code>/home/storage_disk3/omf-retrieval-disk</code></td></tr>
-    <tr><th>애플리케이션 이미지</th><td><code>hub.crefle.com/crefle-ai/omf-retrieval:&lt;git-sha&gt;</code></td></tr>
-    <tr><th>PostgreSQL 이미지</th><td><code>pgvector/pgvector:0.8.6-pg18-trixie</code> · 운영 시 digest 고정</td></tr>
-  </tbody>
-</table>
-
-<h3>호스트 디렉터리 배치</h3>
-
-<pre><code>/opt/omf-retrieval/
-├── compose.yaml
-├── deploy.env                  # 비밀이 아닌 배포 변수
-└── secrets/
-    └── postgres_password       # 600, Git 비관리
-
-/home/storage_disk3/omf-retrieval-disk/
-├── postgres/                   # PostgreSQL 영속 데이터
-├── models/                     # Hugging Face 모델 캐시
-├── evaluations/                # 평가 결과
-└── sources/
-    └── omf/                    # 호스트 관리형 Git clone, Admin CLI에 :ro</code></pre>
-
-<h2>소프트웨어 컴포넌트</h2>
-
-<figure>
-<pre><code>interfaces.api ─────┐
-interfaces.cli ─────┼──► application use cases ──► domain policies
-                    │            │
-                    │            ├── search
-                    │            ├── indexing
-                    │            ├── evaluation
-                    │            └── admin
-                    │
-                    └──────────────────────────────► infrastructure adapters
-                                                     ├── database
-                                                     ├── embedding
-                                                     ├── source
-                                                     └── observability</code></pre>
-  <figcaption>모듈러 모놀리스의 의존성 방향</figcaption>
+<pre><code>사용자 · Agent · Search CLI
+          │ HTTP + Bearer token
+          ▼
+┌──────────────────────── FastAPI ────────────────────────┐
+│ 인증·OMF grant │ query embedding │ RRF │ evidence 조립 │
+└───────────────┬───────────────────────────┬──────────────┘
+                │ SQL                       │ Qwen CPU
+                ▼                           ▼
+┌──────────────────────── PostgreSQL ─────────────────────┐
+│ active OMF run │ pg_trgm │ exact pgvector │ provenance │
+└─────────────────────────────────────────────────────────┘
+                ▲
+                │ index / client create
+┌───────────────┴─────────────────────────────────────────┐
+│ Admin CLI · read-only OMF fixed commit                  │
+└─────────────────────────────────────────────────────────┘</code></pre>
+  <figcaption>로컬 실제 기능 검증을 완료선으로 둔 최소 수직 구성</figcaption>
 </figure>
 
 <table>
-  <caption>Python 패키지별 책임</caption>
-  <thead>
-    <tr><th>패키지</th><th>책임</th><th>주요 의존성</th></tr>
-  </thead>
+  <caption>핵심 기술 선택</caption>
+  <thead><tr><th>영역</th><th>선택</th><th>목적</th></tr></thead>
   <tbody>
-    <tr><th><code>interfaces.api</code></th><td>FastAPI 라우팅, 인증, 요청 검증, 응답 DTO, 헬스체크</td><td>Application</td></tr>
-    <tr><th><code>interfaces.cli</code></th><td>Typer 검색·색인·평가·롤백·클라이언트 관리 명령</td><td>Application 또는 REST API</td></tr>
-    <tr><th><code>application.search</code></th><td>후보 검색, RRF, parent grouping, evidence 생성</td><td>Domain·Repository·EmbeddingProvider</td></tr>
-    <tr><th><code>application.indexing</code></th><td>Git snapshot, 선별, 파싱, 청킹, 임베딩, 활성 전환</td><td>Domain·Source·Repository·EmbeddingProvider</td></tr>
-    <tr><th><code>application.evaluation</code></th><td>골드셋 평가, 지표 계산, 성능 리포트</td><td>Search use case</td></tr>
-    <tr><th><code>application.admin</code></th><td>색인 상태·롤백·API 클라이언트 수명주기</td><td>Domain·Repository</td></tr>
-    <tr><th><code>domain</code></th><td>버전·정본·충돌·근거·권한 정책과 순수 모델</td><td>외부 프레임워크 없음</td></tr>
-    <tr><th><code>infrastructure.database</code></th><td>SQLAlchemy repository와 PostgreSQL 검색 SQL</td><td>PostgreSQL</td></tr>
-    <tr><th><code>infrastructure.embedding</code></th><td>EmbeddingProvider와 Sentence Transformers 구현</td><td>PyTorch·CUDA</td></tr>
-    <tr><th><code>infrastructure.source</code></th><td>source profile, Git archive, Markdown parser</td><td>Git·Filesystem</td></tr>
-    <tr><th><code>infrastructure.observability</code></th><td>JSON 로그, 감사 이벤트, 단계별 지연시간</td><td>stdout·PostgreSQL</td></tr>
-    <tr><th><code>migrations</code></th><td>스키마와 확장 활성화</td><td>Alembic</td></tr>
+    <tr><th>애플리케이션</th><td>Python 3.12 · FastAPI · Typer</td><td>기존 구현 보존과 최소 HTTP·CLI surface</td></tr>
+    <tr><th>저장·검색</th><td>PostgreSQL · <code>pg_trgm</code> · <code>pgvector</code></td><td>메타데이터와 하이브리드 검색을 한 DB에서 처리</td></tr>
+    <tr><th>임베딩</th><td>Qwen/Qwen3-Embedding-0.6B · revision <code>97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3</code> · CPU · 1024차원</td><td>한국어 내부 문서 의미 검색</td></tr>
+    <tr><th>결합</th><td>RRF <code>k=60</code>, 양쪽 가중치 <code>1.0</code></td><td>식별자와 의미 후보의 안정적 결합</td></tr>
+    <tr><th>실행 환경</th><td>기존 lock · Python 3.12 · <code>uv 0.9.28</code> 허용</td><td>도구 재설치로 인한 지연 제거</td></tr>
   </tbody>
 </table>
 
-<p>검색 CLI는 REST API를 호출하여 외부 소비자와 동일한 계약을 검증한다. 색인·평가·롤백·클라이언트 관리 CLI는 SSH 운영 권한 아래 동일 이미지의 Application 계층을 직접 호출하며 Admin API는 만들지 않는다.</p>
+<h2>데이터와 색인 수명주기</h2>
 
-<h2>데이터 모델</h2>
-
-<h3>관계 개요</h3>
-
-<figure>
-<pre><code>SOURCE_PROFILES 1 ── N INDEX_RUNS N ── 1 INDEX_CONFIGS
-       │ active_index_run_id
-       ├── N CLIENT_SOURCE_GRANTS N ── 1 API_CLIENTS
-       └── N SEARCH_AUDIT_EVENTS
-
-INDEX_RUNS 1 ── N DOCUMENT_OCCURRENCES N ── 1 DOCUMENT_CONTENTS
-DOCUMENT_CONTENTS 1 ── N DOCUMENT_PARSES 1 ── N SECTIONS
-SECTIONS 1 ── N CHUNKS 1 ── N CHUNK_EMBEDDINGS
-
-DOCUMENT_OCCURRENCES N ── N DOCUMENT_RELATIONS
-exact duplicate paths share one DOCUMENT_CONTENTS row</code></pre>
-  <figcaption>콘텐츠 주소 기반 핵심 엔터티 관계</figcaption>
-</figure>
+<p>작업 1~7 완료 구현과 작업 8~10 WIP를 보존한다. 기존 <code>0002_index_run_activation_lifecycle.py</code>를 MVP migration으로 채택한다.</p>
 
 <table>
-  <caption>핵심 테이블과 불변 조건</caption>
-  <thead>
-    <tr><th>테이블</th><th>저장 내용</th><th>핵심 제약</th></tr>
-  </thead>
+  <caption>MVP migration 연쇄</caption>
+  <thead><tr><th>Revision</th><th>책임</th></tr></thead>
   <tbody>
-    <tr><th><code>source_profiles</code></th><td>OMF 포함·제외 규칙, 현재 활성 실행</td><td>source key 고유</td></tr>
-    <tr><th><code>index_configs</code></th><td>파서·청킹·토크나이저·임베딩·instruction·RRF 설정의 불변 스냅샷</td><td>config hash 고유</td></tr>
-    <tr><th><code>index_runs</code></th><td>commit SHA, 상태, 시각, 통계, 실패 코드</td><td>활성 전환 단위</td></tr>
-    <tr><th><code>document_contents</code></th><td>UTF-8 원문, SHA-256 내용 해시, 크기</td><td>content hash 고유</td></tr>
-    <tr><th><code>document_occurrences</code></th><td>실행별 경로, 내용 연결, 버전·날짜·결정 상태·소유 영역</td><td><code>(run_id, source_path)</code> 고유</td></tr>
-    <tr><th><code>document_parses</code></th><td>동일 내용과 청킹 설정의 파싱 산출물</td><td><code>(content_id, chunk_config_hash)</code> 고유</td></tr>
-    <tr><th><code>sections</code></th><td>제목, 제목 계층, 부모 절, 순서, 원문 행 범위</td><td>원문 범위 재현 가능</td></tr>
-    <tr><th><code>chunks</code></th><td>child 원문, 제목 포함 검색문, 토큰 수, 행 범위, chunk hash</td><td><code>search_text</code>에 pg_trgm GIN</td></tr>
-    <tr><th><code>chunk_embeddings</code></th><td>chunk·embedding 설정별 vector, 차원과 생성 상태</td><td><code>(chunk_id, embedding_config_hash)</code> 고유; 활성 설정 차원 검증</td></tr>
-    <tr><th><code>document_relations</code></th><td><code>supersedes</code>, <code>potential_conflict</code>와 명시적 근거</td><td>추론 관계 저장 금지</td></tr>
-    <tr><th><code>api_clients</code></th><td>key ID, token hash, 상태, 만료일</td><td>token 원문 저장 금지</td></tr>
-    <tr><th><code>client_source_grants</code></th><td>클라이언트별 허용 source</td><td>후보 검색 전 강제</td></tr>
-    <tr><th><code>search_audit_events</code></th><td>질의 해시, 필터, 반환 ID, commit SHA, 지연·상태</td><td>질의·근거 원문 저장 금지</td></tr>
+    <tr><th><code>0001</code></th><td>기반 schema, 검색·권한 데이터 구조</td></tr>
+    <tr><th><code>0002</code></th><td>Parse artifact manifest의 <code>section_count</code>, <code>chunk_count</code>, <code>artifact_hash</code> backfill과 activation lifecycle의 <code>activated_at</code>, <code>ARCHIVED</code>, 활성 버전 제약</td></tr>
   </tbody>
 </table>
 
-<h3>콘텐츠 주소 기반 저장</h3>
-
-<pre><code>docs/planning/policy.md ───────┐
-                               ├──► content_hash = abc123 ──► parse/chunk/embedding 1세트
-docs/research/policy-copy.md ──┘
-
-응답: 동일 근거 1개 + 원본 경로 2개</code></pre>
-
-<p>파일 경로는 출처 좌표이고 콘텐츠의 정체성은 SHA-256 해시다. 같은 경로의 내용이 새 commit에서 바뀌면 새 해시가 생기며, 같은 내용이 여러 경로에 있으면 검색 산출물은 한 번만 만들고 모든 경로를 인용 정보로 보존한다.</p>
-
-<p>초기 벡터는 1024차원이지만 모델 교체 가능성을 유지하기 위해 차원을 고정하지 않은 PostgreSQL <code>vector</code> 컬럼을 사용한다. 검색 시 활성 index config의 모델과 차원이 모든 query·document vector에 동일한지 검증하며, 모델 또는 차원이 바뀌면 별도 embedding 설정으로 재색인한다.</p>
-
-<h2>문서 분할과 임베딩</h2>
-
-<h3>Parent–Child 청킹</h3>
-
-<table>
-  <caption>초기 청킹 설정</caption>
-  <thead>
-    <tr><th>항목</th><th>설정</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>작은 절</th><td>600 tokens 이하이면 하나의 child</td></tr>
-    <tr><th>긴 절</th><td>목표 400 tokens, soft max 600</td></tr>
-    <tr><th>일반 문단 overlap</th><td>64 tokens</td></tr>
-    <tr><th>표·목록·인용문</th><td>가능한 한 원자 블록으로 보존; 너무 크면 행·항목 경계에서 최대 800 tokens</td></tr>
-    <tr><th>검색문</th><td>제목 계층을 child 앞에 항상 포함</td></tr>
-    <tr><th>상위 문맥</th><td>요청 시 parent context 최대 1,200 tokens</td></tr>
-    <tr><th>재현성</th><td>토크나이저·청킹 설정·파서 버전과 해시 기록</td></tr>
-  </tbody>
-</table>
-
-<h3>임베딩 정책</h3>
-
-<ul>
-  <li>모델: <code>Qwen/Qwen3-Embedding-0.6B</code>, 초기 출력 1024차원</li>
-  <li>구현: 같은 Python 이미지 안의 Sentence Transformers 기반 <code>EmbeddingProvider</code></li>
-  <li>운영: GPU 0을 필수 사용하고 CUDA가 보이지 않으면 readiness 실패</li>
-  <li>API: 프로세스당 모델을 한 번 로딩하므로 초기 worker는 1개</li>
-  <li>Admin CLI: 같은 provider로 문서 embedding을 생성</li>
-  <li>모델명·revision·차원·instruction·라이브러리 버전을 설정과 색인 실행에 기록</li>
-  <li>OMF 평가가 기준 미달일 때만 <code>BAAI/bge-m3</code>와 비교</li>
-  <li>Kanana Instruct는 임베딩에 사용하지 않음</li>
-</ul>
-
-<p>질의에만 다음 instruction을 적용하며 문서에는 instruction을 붙이지 않는다.</p>
-
-<blockquote>
-  <p><code>Instruct: Retrieve passages from Korean internal software design documents that provide the requirements, policies, API definitions, data models, or decisions needed to answer the query.</code><br><code>Query: {query}</code></p>
-</blockquote>
-
-<h2>색인 처리</h2>
-
-<div class="process-flow-scroll">
-  <table class="process-flow">
-    <caption>색인 생성과 활성 전환 흐름</caption>
-    <thead>
-      <tr><th scope="col">단계</th><th scope="col">Source·Parser</th><th scope="col">Embedding</th><th scope="col">PostgreSQL</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <th scope="row"><strong>실행 준비</strong><small>commit 고정</small></th>
-        <td data-transition="enter"><span class="process-flow-transition">시작</span><div class="process-flow-items">Git commit 존재 확인 · archive 생성</div></td>
-        <td><span class="process-flow-empty" aria-label="항목 없음">—</span></td>
-        <td><div class="process-flow-items"><code>building</code> run 생성 · advisory lock</div></td>
-      </tr>
-      <tr>
-        <th scope="row"><strong>전체 스캔</strong><small>현재 상태 확인</small></th>
-        <td><div class="process-flow-items">포함·제외 규칙 · 경로·hash 목록</div></td>
-        <td><span class="process-flow-empty" aria-label="항목 없음">—</span></td>
-        <td><div class="process-flow-items">기존 콘텐츠·설정 hash 비교</div></td>
-      </tr>
-      <tr>
-        <th scope="row"><strong>변경 처리</strong><small>산출물 재사용</small></th>
-        <td><div class="process-flow-items">신규·변경 문서만 parse·chunk</div></td>
-        <td><div class="process-flow-items">필요한 chunk만 GPU 0 embedding</div></td>
-        <td><div class="process-flow-items">동일 콘텐츠·설정 산출물 재사용</div></td>
-      </tr>
-      <tr>
-        <th scope="row"><strong>검증</strong><small>노출 전 게이트</small></th>
-        <td><div class="process-flow-items">문서 수 · 행 범위 · 제외 규칙</div></td>
-        <td><div class="process-flow-items">누락·차원·모델 revision</div></td>
-        <td><div class="process-flow-items"><code>ready</code> 전환</div></td>
-      </tr>
-      <tr>
-        <th scope="row"><strong>활성 전환</strong><small>단일 트랜잭션</small></th>
-        <td><span class="process-flow-empty" aria-label="항목 없음">—</span></td>
-        <td><span class="process-flow-empty" aria-label="항목 없음">—</span></td>
-        <td data-transition="exit"><span class="process-flow-transition">종료</span><div class="process-flow-items"><code>active_index_run_id</code> 교체</div></td>
-      </tr>
-    </tbody>
-  </table>
+<div class="callout callout-warning">
+  <p><strong>대체된 결정.</strong> v1.3의 8A-1 manifest <code>0002</code>와 별도 lifecycle <code>0003</code> 분리 계획은 v2.0이 명시적으로 대체한다. 통합 <code>0002</code>를 안정화하되 새 schema를 추가하지 않는다.</p>
 </div>
 
-<h3>원자적 전환과 2세대 보존</h3>
+<ol>
+  <li><code>index</code> 명령은 고정 commit을 snapshot으로 읽고 include/exclude 규칙을 적용한다.</li>
+  <li>문서를 parse·chunk·embed하고 artifact identity가 같은 산출물은 재사용한다.</li>
+  <li>모든 저장과 무결성 검사가 성공해 run이 READY가 되면 즉시 active pointer를 전환한다.</li>
+  <li>색인 실패 시 새 run만 실패로 기록하고 기존 active pointer를 유지한다.</li>
+  <li>Rollback 인터페이스는 MVP에 노출하지 않는다.</li>
+</ol>
 
-<pre><code>색인 A: active   ────────────────┐ 모든 검색은 완성된 A 사용
-색인 B: building → ready         │
-                                ▼ 단일 DB 트랜잭션
-색인 A: previous ◄──── active 포인터 ────► 색인 B: active
-
-B 실패 시: 포인터를 바꾸지 않고 A 유지
-B 문제 시: Admin CLI로 active 포인터를 A로 롤백</code></pre>
-
-<ul>
-  <li>현재 활성본과 직전 성공본의 검색 데이터를 보존한다.</li>
-  <li>더 오래된 실행은 commit SHA·설정 hash·통계만 보존하고 검색 데이터는 정리한다.</li>
-  <li>실패 실행은 실패 원인과 통계만 남기고 미완성 데이터를 정리한다.</li>
-  <li>같은 source profile의 동시 색인은 PostgreSQL advisory lock으로 막는다.</li>
-  <li>RRF 값만 바뀌면 재색인하지 않고, 청킹 설정 변경은 재파싱하며, 모델·차원 변경은 embedding을 다시 만든다.</li>
-</ul>
-
-<h2>검색 처리</h2>
+<h2>검색·권한 흐름</h2>
 
 <figure>
-<pre><code>POST /v1/search
-      │
-      ├─ 1. Bearer token 검증 · source grant 강제
-      ├─ 2. 요청·필터 검증 · active run 고정
-      ├─ 3. Query instruction 적용 · GPU 0 embedding
-      │
-      ├──────────────┬────────────────┐
-      ▼              ▼                │
- pg_trgm Top 50   cosine Top 50       │ 권한·버전·경로 필터 선적용
-      └──────┬───────┘                │
-             ▼                        │
-        RRF k=60                      │ keyword 1.0 · vector 1.0
-             ▼
-  동일 child 병합 · parent section grouping
-             ▼
-  최고 child RRF로 evidence item 순위 결정
-             ▼
-  limit 적용 · 인용·점수·경로·commit SHA 반환</code></pre>
-  <figcaption>하이브리드 검색과 근거 패키지 생성 흐름</figcaption>
+<pre><code>Bearer 검증 → omf grant 확인 → active run 고정
+                       │
+             ┌─────────┴─────────┐
+             ▼                   ▼
+   pg_trgm raw ≥ floor  cosine raw ≥ floor
+          Top 50             Top 50
+             └─────────┬─────────┘
+                       ▼
+             RRF(k=60, 1.0/1.0)
+                       ▼
+        parent section grouping · origins
+                       ▼
+       limit 적용 · evidence 또는 no_evidence</code></pre>
+  <figcaption>권한과 활성 현재본을 후보 검색 전에 고정하는 검색 흐름</figcaption>
 </figure>
 
-<h3>하이브리드 검색 기본값</h3>
-
 <ul>
-  <li>키워드와 벡터 검색을 독립적으로 실행하여 각각 상위 50개 child를 선택한다.</li>
-  <li>RRF 상수 <code>k=60</code>, 키워드 가중치 <code>1.0</code>, 벡터 가중치 <code>1.0</code>으로 시작한다.</li>
-  <li>결합 점수는 각 검색기의 순위 <code>r</code>에 대해 <code>weight / (60 + r)</code>를 합산한다.</li>
-  <li>벡터는 초기 코퍼스가 작으므로 ANN 없이 cosine 정확 검색한다.</li>
-  <li>같은 parent의 여러 child는 전달 화면에서 묶되 원본 child와 개별 행 범위·점수를 보존한다.</li>
-  <li>긴 절 편향을 막기 위해 evidence item은 포함된 child 중 최고 RRF로 순위를 정하고 추가 match는 가산하지 않는다.</li>
-  <li>초기 RRF 값은 골드셋 결과로 조정할 수 있으나 품질 기준을 낮추지 않는다.</li>
+  <li>API 인증과 검색 SQL 후보 CTE 양쪽에서 token·source grant·active run을 제한한다.</li>
+  <li>점수가 lane별 하한선 이상(<code>&gt;=</code>)인 후보만 해당 lane의 RRF 후보가 된다.</li>
+  <li>작은 child로 검색하고 같은 parent section의 child를 하나의 evidence item으로 묶는다.</li>
+  <li>그룹은 가장 높은 child RRF 점수로 정렬한다.</li>
+  <li>ANN index와 리랭커는 사용하지 않는다.</li>
 </ul>
 
-<h2>외부 인터페이스</h2>
-
-<h3>REST API</h3>
+<h3>확정 근거 하한선 정책</h3>
 
 <table>
-  <caption>MVP HTTP 엔드포인트</caption>
-  <thead>
-    <tr><th>메서드·경로</th><th>인증</th><th>책임</th></tr>
-  </thead>
+  <caption>Runtime·persisted config의 byte-exact 검색 값</caption>
+  <thead><tr><th>항목</th><th>확정 값</th><th>의미</th></tr></thead>
   <tbody>
-    <tr><th><code>POST /v1/search</code></th><td>Bearer token</td><td>검색과 evidence package 반환</td></tr>
-    <tr><th><code>GET /health/live</code></th><td>Bearer 불필요</td><td>프로세스 생존만 최소 정보로 반환; Gateway·내부 점검 경로</td></tr>
-    <tr><th><code>GET /health/ready</code></th><td>내부 또는 인증</td><td>DB·활성 색인·모델·CUDA·GPU 0 확인; 일반 공개 금지</td></tr>
+    <tr><th>Keyword candidate limit</th><td><code>50</code></td><td>하한선 통과 후보 중 <code>pg_trgm</code> 상위 수</td></tr>
+    <tr><th>Vector candidate limit</th><td><code>50</code></td><td>하한선 통과 후보 중 exact cosine 상위 수</td></tr>
+    <tr><th>RRF</th><td><code>k=60</code>, keyword/vector <code>1.0/1.0</code></td><td>기존 동등 가중 결합 유지</td></tr>
+    <tr><th>Keyword similarity floor</th><td><code>0.03658536400000001</code></td><td><code>pg_trgm</code> raw similarity 하한선</td></tr>
+    <tr><th>Vector similarity floor</th><td><code>0.48344050397156374</code></td><td>정규화 cosine raw similarity 하한선</td></tr>
+    <tr><th>Evidence floor status</th><td><code>calibrated</code></td><td>공개 search·ready 허용 상태</td></tr>
+    <tr><th>현재 분리 margin</th><td><code>0.16857380984674064</code></td><td>고정 6개 smoke의 acceptable-evidence 분리 관찰값</td></tr>
   </tbody>
 </table>
 
-<p>전체 문서 내용을 내려주는 엔드포인트와 색인 관리 API는 만들지 않는다.</p>
+<p>각 하한선은 문서에 없는 smoke 질의에서 관찰한 해당 lane 최고점에 <code>nextafter(+inf)</code>를 적용한 다음 표현 가능 부동소수점 값이다. 비교는 <code>&gt;=</code>이므로 관찰된 unknown 최고점은 배제하고 하한선 자체와 같은 점수는 포함한다. 두 lane 모두 하한선을 통과한 후보가 없으면 HTTP 200, <code>status: no_evidence</code>, 빈 <code>evidence_items</code>를 반환한다.</p>
+
+<p>후보 수, RRF 값, 두 하한선과 상태는 index config에 그대로 저장한다. Search와 ready는 runtime 값과 persisted 값의 누락·추가 key, 타입, 값이 하나라도 다르면 안전한 503으로 실패한다. 현재 분리 margin은 이 고정 smoke의 재현성 좌표이며 정식 품질 metric이나 운영 성능 기준이 아니다.</p>
+
+<h2>공개 인터페이스</h2>
+
+<table>
+  <caption>MVP HTTP endpoint</caption>
+  <thead><tr><th>Endpoint</th><th>인증</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><th><code>POST /v1/search</code></th><td>Bearer token + OMF grant</td><td>활성 현재본 근거 패키지 반환</td></tr>
+    <tr><th><code>GET /health/live</code></th><td>없음</td><td>프로세스 생존만 반환</td></tr>
+    <tr><th><code>GET /health/ready</code></th><td>Bearer token</td><td>DB·활성 색인·모델 준비 상태 반환</td></tr>
+  </tbody>
+</table>
 
 <h3>검색 요청</h3>
 
 <pre><code>{
-  "query": "특정 기능의 요구사항 및 정책 결정 사항 원문을 찾아줘",
-  "source_profile": "omf",
-  "version_scope": "current",
-  "limit": 5,
-  "include_context": false,
-  "path_prefixes": ["docs/planning"],
-  "decision_states": ["confirmed"]
+  "query": "긴급 W/O 승인 정책 원문을 찾아줘",
+  "limit": 5
 }</code></pre>
 
 <ul>
-  <li><code>version_scope</code>: <code>current</code>, <code>historical</code>, <code>all</code></li>
-  <li><code>limit</code>: 기본 5, 최대 20</li>
-  <li><code>include_context</code>: 기본 false, true이면 parent context 최대 1,200 tokens</li>
-  <li>클라이언트 필터는 허용 범위를 좁힐 수만 있고 서버 권한 범위를 넓힐 수 없다.</li>
+  <li><code>query</code>는 공백 제거 후 비어 있지 않아야 한다.</li>
+  <li><code>limit</code>은 기본 5, 최소 1, 최대 20이다.</li>
+  <li>source는 <code>omf</code>, version은 활성 현재본으로 고정한다.</li>
+  <li>path·decision·history·context filter는 받지 않는다.</li>
 </ul>
 
 <h3>검색 응답</h3>
@@ -475,309 +261,108 @@ B 문제 시: Admin CLI로 active 포인터를 A로 롤백</code></pre>
 <pre><code>{
   "request_id": "...",
   "status": "ok",
-  "query": "...",
-  "index": {
-    "run_id": "...",
-    "commit_sha": "...",
-    "retrieval_config_id": "..."
-  },
-  "evidence_items": [
-    {
-      "rank": 1,
-      "heading_path": ["기능 요구사항", "승인 정책"],
-      "matches": [
-        {
-          "excerpt": "...",
-          "line_start": 120,
-          "line_end": 138,
-          "keyword_rank": 2,
-          "vector_rank": 1,
-          "rrf_score": 0.0325
-        }
-      ],
-      "origins": [
-        {
-          "source_path": "docs/planning/example.md",
-          "content_hash": "sha256:..."
-        }
-      ],
-      "document": {
-        "date": "...",
-        "version": "...",
-        "decision_state": "confirmed",
-        "owner_domain": "docs"
-      },
-      "potential_conflicts": []
-    }
-  ]
+  "index": {"run_id": "...", "commit_sha": "..."},
+  "evidence_items": [{
+    "rank": 1,
+    "heading_path": ["...", "..."],
+    "matches": [{
+      "excerpt": "...",
+      "line_start": 10,
+      "line_end": 18,
+      "keyword_rank": 2,
+      "vector_rank": 1,
+      "rrf_score": 0.0325
+    }],
+    "origins": [{
+      "source_path": "design/wiki/...",
+      "content_hash": "..."
+    }]
+  }]
 }</code></pre>
 
-<p>근거가 없으면 HTTP 200과 <code>status: no_evidence</code>, 빈 목록을 반환한다. 불완전한 추측 근거를 생성하지 않는다.</p>
-
-<h3>오류 계약</h3>
+<p>근거가 없으면 HTTP 200, <code>status: no_evidence</code>와 빈 목록을 반환한다. 오류는 request ID, 안정적 code와 안전한 message만 포함한다.</p>
 
 <table>
-  <caption>안정적인 오류 코드</caption>
-  <thead>
-    <tr><th>HTTP</th><th>의미</th></tr>
-  </thead>
+  <caption>오류 계약</caption>
+  <thead><tr><th>상황</th><th>HTTP</th></tr></thead>
   <tbody>
-    <tr><th>400·422</th><td>잘못된 요청 또는 검증 실패</td></tr>
-    <tr><th>401</th><td>토큰 누락·오류·폐기</td></tr>
-    <tr><th>403</th><td>source 접근 권한 없음</td></tr>
-    <tr><th>409</th><td>활성 색인 없음</td></tr>
-    <tr><th>503</th><td>DB·임베딩 모델·CUDA 준비 실패</td></tr>
+    <tr><th>인증 실패</th><td>401</td></tr>
+    <tr><th>OMF grant 없음</th><td>403</td></tr>
+    <tr><th>활성 색인 없음</th><td>409</td></tr>
+    <tr><th>요청 오류</th><td>422</td></tr>
+    <tr><th>DB·모델 불가</th><td>503</td></tr>
   </tbody>
 </table>
 
-<p>오류 응답에는 request ID, 안정적인 오류 code와 안전한 message만 포함하며 stack trace, 토큰, 내부 파일 경로와 원문을 노출하지 않는다.</p>
+<p>MVP CLI는 <code>model prepare</code>, <code>index</code>, <code>client create</code>, <code>serve</code>, <code>search</code>만 사용 경로로 노출한다. Search CLI는 HTTP API를 호출하고 token을 환경변수에서 읽는다.</p>
 
-<h3>CLI 경계</h3>
+<h2>구현 순서와 검증</h2>
 
-<pre><code>omf-retrieval search "질의" --source omf --context
-omf-retrieval index --source omf --commit &lt;sha&gt;
-omf-retrieval evaluate --dataset &lt;path&gt;
-omf-retrieval index-status
-omf-retrieval rollback --source omf
-omf-retrieval client create --name &lt;client&gt; --source omf
-omf-retrieval client revoke --key-id &lt;id&gt;
-omf-retrieval client list</code></pre>
+<table>
+  <caption>완료한 네 실행 단위</caption>
+  <thead><tr><th>단위</th><th>결과</th><th>독립 검증</th></tr></thead>
+  <tbody>
+    <tr><th>1 · 정본 전환</th><td>설계·계획·Agent 정책 v2.0 일치</td><td>PASS</td></tr>
+    <tr><th>2 · WIP 안정화</th><td>고정 wiki 색인·활성화·token/grant</td><td>PASS</td></tr>
+    <tr><th>3 · 검색 수직 절편</th><td>검색 core, HTTP·health·CLI 연결</td><td>PASS</td></tr>
+    <tr><th>4 · 로컬 실제 E2E</th><td>전체 색인, 6 smoke, 최소 README</td><td>PASS</td></tr>
+  </tbody>
+</table>
 
-<h2>보안과 접근 제어</h2>
+<p>단위 3은 검색 core와 API를 분리하면 어느 쪽도 독립적인 사용자 가치를 만들지 못해 하나의 수직 절편으로 수행했다. 각 코드 단위는 assertion 기반 RED → GREEN → REFACTOR를 적용했고 실행 Agent와 별도 검증 Agent가 검증했다.</p>
 
-<h3>네트워크 신뢰 경계</h3>
+<h3>로컬 MVP smoke</h3>
 
-<ul>
-  <li>중앙 Nginx Gateway가 <code>crefle.com</code> TLS 인증서와 호스트명 reverse proxy를 담당한다.</li>
-  <li>FastAPI 포트는 검색 서버의 사설 IP에만 bind하고 방화벽에서 Gateway IP만 허용한다.</li>
-  <li>Gateway가 <code>X-Forwarded-For</code>, <code>X-Forwarded-Proto=https</code>, <code>Host</code>, <code>X-Request-ID</code>를 재설정한다.</li>
-  <li>FastAPI는 지정된 Gateway에서 전달된 프록시 헤더만 신뢰한다.</li>
-  <li>PostgreSQL은 Compose 내부망에만 존재하며 호스트 포트를 공개하지 않는다.</li>
-</ul>
+<table>
+  <thead><tr><th>분류</th><th>합격 기준</th><th>실측 결과</th></tr></thead>
+  <tbody>
+    <tr><th>기능 요구사항</th><td>top 5 안에 직접 근거와 정확한 provenance</td><td>3위 · PASS</td></tr>
+    <tr><th>확정 의사결정·정책</th><td>top 5 안에 직접 근거와 정확한 provenance</td><td>3위 · PASS</td></tr>
+    <tr><th>API 계약</th><td>top 5 안에 직접 근거와 정확한 provenance</td><td>1위 · PASS</td></tr>
+    <tr><th>사용자 업무 흐름</th><td>top 5 안에 직접 근거와 정확한 provenance</td><td>1위 · PASS</td></tr>
+    <tr><th>프로젝트 용어</th><td>top 5 안에 직접 근거와 정확한 provenance</td><td>1위 · PASS</td></tr>
+    <tr><th>문서에 없는 질문</th><td><code>no_evidence</code>와 빈 목록</td><td><code>no_evidence</code> · PASS</td></tr>
+  </tbody>
+</table>
 
-<h3>API 토큰과 권한</h3>
+<p>모든 반환 경로가 <code>design/wiki/**</code>임을 확인했고, 87개 provenance 좌표의 행 범위·본문·commit SHA·content hash를 원문과 대조했다. 인증 실패, 활성 색인 없음, 모델 불가와 SQL 실패의 원문·token·host path 비노출 및 전체 회귀 검증도 PASS했다.</p>
 
-<ul>
-  <li>클라이언트별로 key ID와 256-bit 이상의 무작위 secret을 발급한다.</li>
-  <li>DB에는 key ID, token hash, 상태, 선택적 만료일만 저장하며 원문은 발급 시 한 번만 표시한다.</li>
-  <li>회전 시 새 토큰과 기존 토큰을 잠시 함께 활성화한 뒤 기존 토큰을 폐기한다.</li>
-  <li>API 토큰에는 검색 권한만 부여하고 Admin 권한은 제공하지 않는다.</li>
-  <li>Admin 작업은 SSH로 접속한 <code>phoebe-deploy</code> 운영자가 CLI로 수행한다.</li>
-  <li>source 권한 조건은 후보 검색 전에 적용하여 존재 여부와 점수도 노출하지 않는다.</li>
-</ul>
-
-<h3>비밀정보와 데이터 취급</h3>
-
-<ul>
-  <li>DB 비밀번호는 <code>/opt/omf-retrieval/secrets/postgres_password</code>의 권한 600 파일로 관리한다.</li>
-  <li>Git, Docker image, Compose 환경변수와 로그에 secret을 기록하지 않는다.</li>
-  <li>Registry 인증은 서버의 Docker credential store가 담당한다.</li>
-  <li>원문과 색인은 사내 환경에만 저장하고 <code>docs/raw</code> 등 제외 자료를 외부로 전송하지 않는다.</li>
-  <li>MVP에는 LLM 생성 호출이 없으므로 원문이 Codex API나 CrefleAI로 전송되지 않는다.</li>
-</ul>
-
-<h2>컨테이너 빌드와 배포</h2>
-
-<h3>이미지 공급</h3>
-
-<pre><code>개발 Mac / arm64
-    │ Docker Buildx --platform linux/amd64
-    ▼
-hub.crefle.com/crefle-ai/omf-retrieval:&lt;git-sha&gt;
-    │ 서버 Registry 로그인 · docker compose pull
-    ▼
-phoebe-onpremise-test / linux/amd64</code></pre>
-
-<ul>
-  <li>공식 PyTorch CUDA 12.8 runtime 기반으로 애플리케이션 이미지를 만든다.</li>
-  <li>Git commit SHA를 불변 태그로 사용하며 <code>latest</code>는 배포에 사용하지 않는다.</li>
-  <li>운영 Compose에는 pull 후 확인한 digest를 고정한다.</li>
-  <li>PostgreSQL은 공개 pgvector 이미지를 직접 사용하고 커스텀 이미지를 만들지 않는다.</li>
-  <li>API와 Admin CLI는 같은 애플리케이션 이미지를 사용한다.</li>
-  <li>API와 Admin CLI에 GPU 0만 노출하며 컨테이너 내부 장치 설정은 <code>cuda:0</code>이다.</li>
-  <li>모델은 이미지에 포함하지 않고 영속 캐시에 두며 최초 배포 전에 준비한다.</li>
-  <li>Docker image는 루트 디스크의 <code>/var/lib/docker</code>에 저장되며 확인 시 여유 공간은 215GB였다. 대형 AI 이미지가 이미 존재하므로 이전 애플리케이션 이미지는 수동으로 정리하고 디스크 사용량을 운영 점검에 포함한다.</li>
-</ul>
-
-<div class="callout">
-  <p><strong>배포 재현성.</strong> 애플리케이션 tag·digest, PostgreSQL digest, 임베딩 모델 revision과 index config hash를 함께 기록한다. 같은 commit과 설정으로 원문 근거를 다시 만들 수 있어야 한다.</p>
+<div class="callout callout-warning">
+  <p><strong>숨기지 않는 품질 관찰.</strong> 사용자 업무 흐름 질의의 이상적 diagnostic target은 top 20에 없었고, 프로젝트 용어 질의의 이상적 target은 8위였다. 두 질의 모두 별도의 직접 acceptable evidence가 1위여서 MVP top 5 gate는 PASS했지만, 이상적 문서의 순위 개선은 정식 평가와 리랭커 검토가 포함되는 후속 범위다.</p>
 </div>
 
-<h2>관측성과 성능</h2>
-
-<h3>최소 관측성</h3>
-
-<ul>
-  <li>JSON 구조화 로그를 stdout에 기록한다.</li>
-  <li>request ID, client ID, source, query hash, 결과 수, commit SHA, 상태 코드를 포함한다.</li>
-  <li>query embedding, 키워드, 벡터, RRF, 전체 처리시간을 분리한다.</li>
-  <li>질의 원문, Bearer token과 검색 원문은 로그에 기록하지 않는다.</li>
-  <li>Docker 로그 크기·파일 개수 제한으로 디스크 고갈을 막는다.</li>
-  <li>Admin CLI는 처리·재사용·제외·실패 문서와 chunk·embedding 수, 실행시간을 로그와 <code>index_runs</code>에 기록한다.</li>
-</ul>
-
-<h3>성능 합격 기준</h3>
+<h3>실제 색인·운영 관찰</h3>
 
 <table>
-  <caption>RTX 4090 GPU 0 warm 상태 기준</caption>
-  <thead>
-    <tr><th>항목</th><th>기준</th></tr>
-  </thead>
+  <thead><tr><th>항목</th><th>실측</th><th>해석</th></tr></thead>
   <tbody>
-    <tr><th>검색 API, 동시성 1</th><td><strong>p95 ≤ 2초</strong></td></tr>
-    <tr><th>검색 API, 동시성 5</th><td><strong>p95 ≤ 3초</strong></td></tr>
-    <tr><th>서버 오류율</th><td>&lt; 1%</td></tr>
-    <tr><th>모델 캐시 존재 시 readiness</th><td>≤ 120초</td></tr>
-    <tr><th>현재 OMF 전체 초기 색인</th><td>≤ 15분</td></tr>
-    <tr><th>운영 CUDA</th><td>GPU 0 미할당 시 readiness 성공 금지</td></tr>
+    <tr><th>고정 source</th><td>158개 문서 · 4,202개 section</td><td><code>design/wiki/**/*.md</code> 전체 현재본</td></tr>
+    <tr><th>검색 산출물</th><td>5,584개 chunk · 5,584개 embedding</td><td>최대 chunk 800 token</td></tr>
+    <tr><th>첫 전체 embedding</th><td>CPU 약 11시간 3분</td><td>로컬 운영 위험·진행 가시성 관찰</td></tr>
+    <tr><th>Artifact 재사용 재색인</th><td>약 20초</td><td>동일 artifact 재사용 경로 확인</td></tr>
   </tbody>
 </table>
 
-<p>30개 골드 질문을 반복해 최소 100회 warm 요청으로 측정하며, 단일 요청과 동시성 5를 각각 평가한다. 품질 기준을 통과한 설정끼리만 성능을 비교한다.</p>
-
-<h2>검색 품질 평가</h2>
-
-<h3>평가 데이터셋</h3>
-
-<table>
-  <caption>30개 골드 질문 구성</caption>
-  <thead>
-    <tr><th>질문 유형</th><th class="num">개수</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>단일 근거</th><td class="num">8</td></tr>
-    <tr><th>복수 필수 근거</th><td class="num">6</td></tr>
-    <tr><th>식별자·API·UI·데이터 모델</th><td class="num">4</td></tr>
-    <tr><th>현재본·과거본·버전</th><td class="num">4</td></tr>
-    <tr><th>충돌·소유권</th><td class="num">4</td></tr>
-    <tr><th>근거 없음</th><td class="num">4</td></tr>
-  </tbody>
-  <tfoot>
-    <tr><th>합계</th><td class="num"><strong>30</strong></td></tr>
-  </tfoot>
-</table>
-
-<p>정답은 chunk ID가 아니라 source path, heading, 행 범위, commit SHA와 content hash로 표시하여 청킹 설정이 바뀌어도 유지한다. 관련도는 3 직접 근거, 2 보조 근거, 1 부분 관련, 0 무관으로 사람이 판정한다. 20개는 조정용, 10개는 최종 hold-out으로 분리한다.</p>
-
-<p>골드셋은 저장소에서 버전 관리하는 YAML 또는 JSON 파일을 정본으로 삼고 DB 테이블로 관리하지 않는다. 평가 결과는 대상 commit SHA, index config hash, 애플리케이션 commit SHA와 지표를 포함한 재현 가능한 리포트로 <code>evaluations</code> 경로에 남긴다.</p>
-
-<h3>출시 품질 기준</h3>
-
-<table>
-  <caption>검색·근거 평가 지표</caption>
-  <thead>
-    <tr><th>지표</th><th>기준</th><th>의미</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>Evidence Recall@5</th><td class="num">≥ 0.85</td><td>상위 5개 내 필요한 근거 회수</td></tr>
-    <tr><th>Evidence Recall@10</th><td class="num">≥ 0.95</td><td>상위 10개 내 필요한 근거 회수</td></tr>
-    <tr><th>All-required Evidence@10</th><td class="num">≥ 0.85</td><td>복수 필수 근거를 모두 회수한 질문 비율</td></tr>
-    <tr><th>nDCG@10</th><td class="num">≥ 0.85</td><td>관련도 등급을 반영한 순위 품질</td></tr>
-    <tr><th>MRR@10</th><td class="num">≥ 0.90</td><td>첫 직접 근거의 순위</td></tr>
-    <tr><th>Context Precision</th><td class="num">≥ 0.80</td><td>전달된 evidence item의 유효 근거 비율</td></tr>
-    <tr><th>Duplicate Evidence Ratio</th><td class="num">≤ 0.10</td><td>같은 근거의 불필요한 반복</td></tr>
-  </tbody>
-</table>
-
-<h3>100% 필수 게이트</h3>
-
-<ul>
-  <li>인용 provenance가 원문 path·행·commit SHA·hash와 일치</li>
-  <li>권한 없는 source·경로 누출 0건</li>
-  <li>과거본 요청의 버전 선택 정확</li>
-  <li>충돌 문서 중 한쪽 근거를 숨기지 않음</li>
-  <li>근거 없음 질문에 근거를 만들어내지 않음</li>
-  <li>완전 중복 문서의 모든 원본 경로 보존</li>
-</ul>
-
-<p><code>pg_trgm</code>, 벡터, RRF를 동일한 골드셋에서 비교하며 하이브리드 Recall@10은 가장 좋은 단일 검색보다 낮아서는 안 된다. 기준 미달 시 RRF 가중치, instruction, chunk 순으로 조정하고 그 뒤에만 리랭커나 검색 확장을 검토한다. RAGAS·RAGChecker의 LLM-as-judge는 선택적 진단일 뿐 출시 게이트로 사용하지 않는다.</p>
-
-<h2>소프트웨어 테스트 전략</h2>
-
-<table>
-  <caption>테스트 계층과 검증 대상</caption>
-  <thead>
-    <tr><th>계층</th><th>검증 대상</th><th>환경</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>단위</th><td>Markdown 계층·행 범위, chunk, hash 중복, 정본·권한, RRF, evidence grouping</td><td>외부 서비스 없음</td></tr>
-    <tr><th>PostgreSQL 통합</th><td>migration, vector·pg_trgm, 검색 SQL, 권한 선필터, 원자 전환·롤백, 경로 보존</td><td>실제 pgvector 컨테이너</td></tr>
-    <tr><th>API·CLI 계약</th><td>정상·no_evidence·오류, 정보 비노출, REST·CLI 일치, Admin 명령</td><td>Compose 테스트 환경</td></tr>
-    <tr><th>서버 E2E</th><td>GPU 0, 전체 색인, 인용 재현, 변경 색인, 실패 격리, 롤백, 성능</td><td><code>phoebe-onpremise-test</code></td></tr>
-    <tr><th>검색 품질</th><td>30개 골드 질문과 출시 지표</td><td>고정 commit·config</td></tr>
-  </tbody>
-</table>
-
-<p>테스트 도구는 <code>pytest</code>를 기본으로 하고 PostgreSQL 통합 환경은 Docker Compose로 구성한다. 별도 Testcontainers 의존성은 추가하지 않는다. Domain·Application 계층은 코드 커버리지 80% 이상을 목표로 하되 핵심 정책 분기는 전부 테스트한다.</p>
-
-<h2>주요 장애와 처리</h2>
-
-<table>
-  <caption>실패 격리와 사용자 응답</caption>
-  <thead>
-    <tr><th>상황</th><th>처리</th><th>외부 상태</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>활성 색인 없음</th><td>검색하지 않고 안정적 오류 반환</td><td>409</td></tr>
-    <tr><th>DB·모델·CUDA 준비 실패</th><td>readiness 실패, 검색 차단</td><td>503</td></tr>
-    <tr><th>재색인 실패</th><td>새 run 실패 기록, 기존 active 유지</td><td>검색 지속</td></tr>
-    <tr><th>새 색인 품질 문제</th><td>Admin CLI로 previous 롤백</td><td>포인터 원자 전환</td></tr>
-    <tr><th>근거 없음</th><td>추측하지 않고 빈 evidence 반환</td><td>200 · no_evidence</td></tr>
-    <tr><th>문서 충돌</th><td>양쪽 근거와 관계 정보 반환</td><td>200 · ok</td></tr>
-    <tr><th>무권한 source 요청</th><td>후보 검색 전 거부, 존재 정보 미노출</td><td>403</td></tr>
-  </tbody>
-</table>
-
-<h2>배포 전 입력값</h2>
-
-<p>아래 항목은 설계 선택이 아니라 실제 환경에 넣을 값이다. 구현 계획 수립은 가능하지만 운영 배포 전에 반드시 제공·검증해야 한다.</p>
-
-<table>
-  <caption>아직 필요한 운영 환경 값</caption>
-  <thead>
-    <tr><th>항목</th><th>용도</th><th>상태</th></tr>
-  </thead>
-  <tbody>
-    <tr><th>서비스 FQDN</th><td>중앙 Nginx Gateway의 host 기반 routing</td><td>배포 전 입력</td></tr>
-    <tr><th>Gateway 사설 IP</th><td>검색 서버 방화벽 allowlist</td><td>배포 전 입력</td></tr>
-    <tr><th>검색 서버 사설 IP·backend port</th><td>Gateway upstream과 FastAPI bind</td><td>배포 전 입력</td></tr>
-    <tr><th>OMF Git remote·인증 방식</th><td>호스트 관리형 clone 준비</td><td>배포 전 입력</td></tr>
-    <tr><th>애플리케이션 base image의 정확한 PyTorch tag·digest</th><td>CUDA 12.8 런타임 재현성</td><td>의존성 lock 시 검증</td></tr>
-    <tr><th>운영 image digest</th><td>Compose 불변 배포</td><td>이미지 build 후 생성</td></tr>
-    <tr><th>초기 API 클라이언트 목록</th><td>key 발급과 source grant</td><td>운영 시작 전 입력</td></tr>
-  </tbody>
-</table>
-
-<h2>개발 전 최종 게이트</h2>
-
-<ol>
-  <li>본 설계서의 범위·구성도·DB·인터페이스·평가 기준을 사용자 검토로 승인한다.</li>
-  <li>승인된 설계를 기준으로 별도의 상세 구현 계획을 작성한다.</li>
-  <li>구현 계획을 작업 단위와 테스트 단위로 분해한다.</li>
-  <li>그 이후에만 스키마, 코드, Docker·Compose와 배포 자동화를 작성한다.</li>
-</ol>
-
-<div class="callout callout-success">
-  <p><strong>개발 착수 조건.</strong> 이 문서가 시스템 설계 정본이며, 사용자 최종 승인 이후에만 구현 단계로 전환한다.</p>
-</div>
+<p>첫 전체 embedding 시간은 성능 합격 기준이나 운영 SLO가 아니다. 장시간 CPU 작업의 진행 표시와 재시작·재사용 가시성이 필요하다는 로컬 운영 위험 기록이며, 정식 성능 benchmark는 후속 범위다.</p>
 
 <h2>개정 이력</h2>
 
 <table>
   <caption>개정 이력</caption>
-  <thead>
-    <tr><th>버전</th><th>날짜</th><th>변경</th><th>작성자</th></tr>
-  </thead>
+  <thead><tr><th>버전</th><th>날짜</th><th>변경</th><th>작성자</th></tr></thead>
   <tbody>
-    <tr><th>v1.0</th><td>2026-08-13</td><td>MVP 단계별 합의 내용을 전체 시스템 설계로 통합</td><td>CREFLE Inc. CTO 김정규</td></tr>
+    <tr><th>v2.0</th><td>2026-08-27 15:53 KST</td><td>확정 근거 하한선·no_evidence 정책, 실제 색인·6개 smoke·품질 관찰과 단위 1~4 독립 검증 결과 반영</td><td>Codex — 사용자 승인 반영</td></tr>
+    <tr><th>v2.0</th><td>2026-08-25 18:52 KST</td><td>현재본 근거 검색을 MVP 완료선으로 축소하고 기존 통합 migration과 4개 실행 단위를 채택; v1.2 작업 13~18 전체를 후속으로 이동</td><td>Codex — 사용자 승인 반영</td></tr>
+    <tr><th>v1.1</th><td>2026-08-25 16:27 KST</td><td>Parse artifact manifest와 activation lifecycle 분리 계획</td><td>Codex — 사용자 승인 반영</td></tr>
+    <tr><th>v1.0</th><td>2026-08-13</td><td>최초 전체 시스템 설계</td><td>CREFLE Inc. CTO 김정규</td></tr>
   </tbody>
 </table>
 
 <section class="footnotes">
   <ol>
-    <li>Git commit SHA는 Git 이력을 DB에 복제하기 위한 값이 아니라, 인용 원문을 재현하기 위한 좌표다.</li>
-    <li>RAG 전용 지표라는 표현은 이번 MVP에서는 Retriever·Context 품질 지표를 뜻한다. 생성 답변의 faithfulness·answer relevancy는 2차 개발에서 추가한다.</li>
-    <li>GPU·Docker·저장 공간 정보는 2026-08-13에 <code>phoebe-onpremise-test</code>에서 읽기 전용으로 확인했다.</li>
+    <li>자연어 답변 생성은 호출 Agent의 책임이며 검색 서비스는 최소 근거만 반환한다.</li>
+    <li>운영 배포 기능은 삭제된 것이 아니라 로컬 MVP가 확인된 뒤 진행할 후속 범위다.</li>
+    <li>실제 CPU 소요 시간은 관찰값이며 성능 gate가 아니다.</li>
   </ol>
 </section>
 

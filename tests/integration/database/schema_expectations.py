@@ -384,10 +384,25 @@ EXPECTED_CHECK_CONSTRAINTS = {
         ("chunk_config_hash",),
         "CHECK (chunk_config_hash::text ~ '^[0-9a-f]{64}$'::text)",
     ),
+    "ck_document_parses_artifact_hash_sha256": (
+        "document_parses",
+        ("artifact_hash",),
+        "CHECK (artifact_hash::text ~ '^[0-9a-f]{64}$'::text)",
+    ),
+    "ck_document_parses_chunk_count_nonnegative": (
+        "document_parses",
+        ("chunk_count",),
+        "CHECK (chunk_count >= 0)",
+    ),
     "ck_document_parses_parser_version_non_blank": (
         "document_parses",
         ("parser_version",),
         "CHECK (parser_version ~ '[^[:space:]]'::text)",
+    ),
+    "ck_document_parses_section_count_positive": (
+        "document_parses",
+        ("section_count",),
+        "CHECK (section_count > 0)",
     ),
     "ck_document_relations_evidence_line_range": (
         "document_relations",
@@ -439,6 +454,12 @@ EXPECTED_CHECK_CONSTRAINTS = {
         ("commit_sha",),
         "CHECK (commit_sha::text ~ '^[0-9a-f]{40}$'::text)",
     ),
+    "ck_index_runs_lifecycle_activated_at": (
+        "index_runs",
+        ("status", "activated_at"),
+        "CHECK ((status <> ALL (ARRAY['active'::text, 'previous'::text, "
+        "'archived'::text])) OR activated_at IS NOT NULL)",
+    ),
     "ck_index_runs_stats_object": (
         "index_runs",
         ("stats",),
@@ -447,7 +468,8 @@ EXPECTED_CHECK_CONSTRAINTS = {
     "ck_index_runs_status": (
         "index_runs",
         ("status",),
-        "CHECK (status = ANY (ARRAY['building'::text, 'ready'::text, 'active'::text, 'previous'::text, 'failed'::text]))",
+        "CHECK (status = ANY (ARRAY['building'::text, 'ready'::text, "
+        "'active'::text, 'previous'::text, 'archived'::text, 'failed'::text]))",
     ),
     "ck_search_audit_events_commit_sha_git": (
         "search_audit_events",
@@ -584,6 +606,18 @@ EXPECTED_EXPLICIT_INDEXES = {
         "btree",
         ("source_profile_id", "status"),
         ("uuid_ops", "text_ops"),
+    ),
+    "uq_index_runs_one_active_per_source": (
+        "index_runs",
+        "btree",
+        ("source_profile_id",),
+        ("uuid_ops",),
+    ),
+    "uq_index_runs_one_previous_per_source": (
+        "index_runs",
+        "btree",
+        ("source_profile_id",),
+        ("uuid_ops",),
     ),
     "ix_search_audit_events_client_id": (
         "search_audit_events",

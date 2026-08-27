@@ -107,8 +107,14 @@ class IndexRun(Base):
             name="ck_index_runs_commit_sha_git",
         ),
         sa.CheckConstraint(
-            "status IN ('building', 'ready', 'active', 'previous', 'failed')",
+            "status IN ('building', 'ready', 'active', 'previous', 'archived', "
+            "'failed')",
             name="ck_index_runs_status",
+        ),
+        sa.CheckConstraint(
+            "status NOT IN ('active', 'previous', 'archived') "
+            "OR activated_at IS NOT NULL",
+            name="ck_index_runs_lifecycle_activated_at",
         ),
         sa.CheckConstraint(
             "jsonb_typeof(stats) = 'object'",
@@ -134,6 +140,18 @@ class IndexRun(Base):
         ),
         sa.Index("ix_index_runs_source_status", "source_profile_id", "status"),
         sa.Index("ix_index_runs_index_config_id", "index_config_id"),
+        sa.Index(
+            "uq_index_runs_one_active_per_source",
+            "source_profile_id",
+            unique=True,
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        sa.Index(
+            "uq_index_runs_one_previous_per_source",
+            "source_profile_id",
+            unique=True,
+            postgresql_where=sa.text("status = 'previous'"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(postgresql.UUID(), default=uuid.uuid4)
@@ -145,6 +163,7 @@ class IndexRun(Base):
         sa.DateTime(timezone=True), server_default=sa.text("now()")
     )
     indexed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     stats: Mapped[dict[str, Any]] = mapped_column(
         postgresql.JSONB(), server_default=sa.text("'{}'::jsonb")
     )
@@ -253,6 +272,18 @@ class DocumentParse(Base):
             "chunk_config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_document_parses_chunk_config_hash_sha256",
         ),
+        sa.CheckConstraint(
+            "section_count > 0",
+            name="ck_document_parses_section_count_positive",
+        ),
+        sa.CheckConstraint(
+            "chunk_count >= 0",
+            name="ck_document_parses_chunk_count_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "artifact_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_document_parses_artifact_hash_sha256",
+        ),
         sa.ForeignKeyConstraint(
             ["content_id"],
             ["document_contents.id"],
@@ -272,6 +303,9 @@ class DocumentParse(Base):
     content_id: Mapped[UUID] = mapped_column(postgresql.UUID())
     parser_version: Mapped[str] = mapped_column(sa.Text())
     chunk_config_hash: Mapped[str] = mapped_column(sa.String(64))
+    section_count: Mapped[int] = mapped_column(sa.Integer())
+    chunk_count: Mapped[int] = mapped_column(sa.Integer())
+    artifact_hash: Mapped[str] = mapped_column(sa.String(64))
 
 
 class Section(Base):

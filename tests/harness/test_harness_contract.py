@@ -7,7 +7,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 COMMON_SKILL = Path(".agents/skills/development-workflow/SKILL.md")
 PLAN_TEMPLATE = Path(
@@ -40,7 +39,7 @@ REQUIRED_FILES = (
 
 PRESERVED_AGENTS_SECTION_HASHES = {
     "프로젝트 목표와 경계": (
-        "33996d6254dc663502d0c662b8bca1f924816d520c05ca149442128bd78dd9fa"
+        "62ba720e25d07aa9e08d3764f7c7ea0ca0e119904ae344fa491c5da942043410"
     ),
     "단계별 공동 진행": (
         "fc386a5312a7842a2c52e97ef655ba08c622e8e2fbf917284426065ed32f932b"
@@ -48,14 +47,12 @@ PRESERVED_AGENTS_SECTION_HASHES = {
     "사용자 승인 필수 의사결정": (
         "84e3565fb83eb843777eea3410a5018f512512dc0cf0a04ec8cb9ab94887aae1"
     ),
-    "문서 작성": (
-        "80914913fe266066d43a6cac6ffa748aee67bd526ef1be309e2a4aa4d1376f35"
-    ),
+    "문서 작성": ("80914913fe266066d43a6cac6ffa748aee67bd526ef1be309e2a4aa4d1376f35"),
     "Agent 조회 동작": (
-        "54c076ddba058454ad9d15b6b6933f81ed4f0f0733144c870ab2493db1f86930"
+        "1d6dd71cd362f9989e0a88b2d9ed1d1e9b729c72562c64df802f617f58636618"
     ),
     "확정된 MVP 설계 결정": (
-        "d67dc993b280701283608651c063990d1f3a90e1087c78d5ffb9f29cc7b2835b"
+        "3b9eaa8da5f09d8594de54f4a495b30fbe613ad328dae90ed8b5a7e11d46e2e7"
     ),
     "내부 모델 서버 현황": (
         "588b399157714c854352e4ec617fec4757452e52353e61f6d764aadb5882318a"
@@ -130,9 +127,7 @@ class HarnessContractTest(unittest.TestCase):
     def _assert_test_design_branch(self, text: str) -> None:
         self.assertRegex(
             text,
-            re.compile(
-                r"테스트 설계가 있으면.{0,80}그대로 사용", re.DOTALL
-            ),
+            re.compile(r"테스트 설계가 있으면.{0,80}그대로 사용", re.DOTALL),
         )
         self.assertRegex(
             text,
@@ -238,9 +233,7 @@ class HarnessContractTest(unittest.TestCase):
         codex_executor = parse_limited_agent_toml(
             self._read(Path(".codex/agents/task-executor.toml"))
         )["developer_instructions"]
-        _, claude_executor = self._frontmatter(
-            Path(".claude/agents/task-executor.md")
-        )
+        _, claude_executor = self._frontmatter(Path(".claude/agents/task-executor.md"))
         for text in (
             self._read(Path("AGENTS.md")),
             self._read(COMMON_SKILL),
@@ -254,13 +247,9 @@ class HarnessContractTest(unittest.TestCase):
     ) -> None:
         for path in (Path("AGENTS.md"), COMMON_SKILL):
             text = self._read(path)
-            section = self._section(
-                text, "조정 Agent와 검증 실패 루프", level=3
-            )
+            section = self._section(text, "조정 Agent와 검증 실패 루프", level=3)
             self.assertRegex(section, r"조정 Agent.{0,50}구현하지 않")
-            self.assertRegex(
-                section, r"자기 결과.{0,50}합격 판정.{0,30}내리지 않"
-            )
+            self.assertRegex(section, r"자기 결과.{0,50}합격 판정.{0,30}내리지 않")
             self._assert_terms_in_order(
                 section,
                 (
@@ -390,23 +379,17 @@ class HarnessContractTest(unittest.TestCase):
             Path(".claude/agents/task-verifier.md")
         )
 
-        self.assertEqual(
-            set(executor_frontmatter), {"name", "description", "tools"}
-        )
-        self.assertEqual(
-            set(verifier_frontmatter), {"name", "description", "tools"}
-        )
+        self.assertEqual(set(executor_frontmatter), {"name", "description", "tools"})
+        self.assertEqual(set(verifier_frontmatter), {"name", "description", "tools"})
         self.assertEqual(executor_frontmatter["name"], "task-executor")
         self.assertEqual(verifier_frontmatter["name"], "task-verifier")
         self.assertEqual(
             executor_frontmatter["description"],
-            "승인된 단일 작업을 구현하고 쉬운 검증까지만 "
-            "수행할 때 사용한다.",
+            "승인된 단일 작업을 구현하고 쉬운 검증까지만 수행할 때 사용한다.",
         )
         self.assertEqual(
             verifier_frontmatter["description"],
-            "구현과 분리된 인스턴스에서 승인 계획을 독립 "
-            "검증할 때 사용한다.",
+            "구현과 분리된 인스턴스에서 승인 계획을 독립 검증할 때 사용한다.",
         )
         executor_tools = set(executor_frontmatter["tools"].split(", "))
         verifier_tools = set(verifier_frontmatter["tools"].split(", "))

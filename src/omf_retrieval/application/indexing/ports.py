@@ -18,9 +18,11 @@ class MarkdownStructureValidationError(ValueError):
 class TokenCounter(Protocol):
     """Describe token IDs and their exact source-backed character offsets.
 
-    Implementations return one offset for every encoded token. Offsets are
-    monotonic and non-overlapping, satisfy ``0 <= start < end <= len(text)``,
-    and never represent special tokens with zero-length source offsets.
+    Implementations return one offset for every encoded token. Offsets satisfy
+    ``0 <= start < end <= len(text)``. Consecutive tokenizer byte-fallback
+    offsets may be identical, contained, or grow one connected source union;
+    token starts never decrease and all other spans are non-overlapping.
+    Special-token zero-length offsets are never returned.
     """
 
     def encode(self, text: str) -> Sequence[int]:
@@ -40,7 +42,7 @@ class TokenCounter(Protocol):
             text: Exact source text passed to ``encode``.
 
         Returns:
-            Monotonic, non-overlapping half-open source character spans.
+            Nondecreasing half-open source spans grouped by connected unions.
         """
 
 
@@ -312,6 +314,7 @@ class SourceSnapshot:
     Args:
         commit_sha: Lowercase full 40-character Git SHA-1 identifier.
         archive_files: Unique lexical-order archive files at that commit.
+        excluded_file_count: Non-directory files rejected by the source profile.
 
     Raises:
         SourceSnapshotValidationError: If commit or archive-file invariants fail.
@@ -319,6 +322,7 @@ class SourceSnapshot:
 
     commit_sha: str
     archive_files: tuple[ArchiveFile, ...]
+    excluded_file_count: int
 
     def __post_init__(self) -> None:
         """Validate snapshot identity and deterministic archive ordering."""
@@ -332,6 +336,10 @@ class SourceSnapshot:
         if type(self.archive_files) is not tuple:
             raise SourceSnapshotValidationError(
                 "Snapshot archive_files must be a tuple"
+            )
+        if type(self.excluded_file_count) is not int or self.excluded_file_count < 0:
+            raise SourceSnapshotValidationError(
+                "Snapshot excluded_file_count must be a non-negative exact integer"
             )
         if not all(
             type(archive_file) is ArchiveFile for archive_file in self.archive_files

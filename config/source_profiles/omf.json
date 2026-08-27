@@ -1,18 +1,22 @@
 {
   "source_key": "omf",
+  "commit_sha": "a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2",
   "include_patterns": [
-    "docs/research/**/*.md",
-    "docs/planning/**/*.md",
-    "uiux/**/*.md"
+    "design/wiki/**/*.md"
   ],
   "exclude_patterns": [
-    "docs/raw/**",
-    "docs/_workspace/**",
+    "design/raw/**",
+    "design/schema/**",
+    "docs/**",
     "**/AGENTS.md",
     "**/CLAUDE.md",
     "**/.agents/**",
     "**/.claude/**",
+    "**/.codex/**",
     "**/_workspace/**",
+    "**/generated/**",
+    "**/temp/**",
+    "**/tmp/**",
     "**/.omc/**",
     "**/crefle-doc/**"
   ]

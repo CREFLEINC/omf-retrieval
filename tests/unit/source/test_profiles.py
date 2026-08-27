@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OMF_PROFILE_PATH = PROJECT_ROOT / "config/source_profiles/omf.json"
 OMF_RELATIONS_PATH = PROJECT_ROOT / "config/source_profiles/omf-relations.json"
 VALID_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+OMF_FIXED_COMMIT_SHA = "a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2"
 
 
 class StringSubclass(str):
@@ -20,6 +21,10 @@ class StringSubclass(str):
 
 class BytesSubclass(bytes):
     """Represent an invalid bytes subclass at an exact-type boundary."""
+
+
+class IntegerSubclass(int):
+    """Represent an invalid integer subclass at an exact-type boundary."""
 
 
 class TupleSubclass(tuple[object, ...]):
@@ -35,19 +40,21 @@ def test_committed_omf_profile_has_the_approved_contract() -> None:
     assert OMF_PROFILE_PATH.is_file()
     assert json.loads(OMF_PROFILE_PATH.read_text(encoding="utf-8")) == {
         "source_key": "omf",
-        "include_patterns": [
-            "docs/research/**/*.md",
-            "docs/planning/**/*.md",
-            "uiux/**/*.md",
-        ],
+        "commit_sha": OMF_FIXED_COMMIT_SHA,
+        "include_patterns": ["design/wiki/**/*.md"],
         "exclude_patterns": [
-            "docs/raw/**",
-            "docs/_workspace/**",
+            "design/raw/**",
+            "design/schema/**",
+            "docs/**",
             "**/AGENTS.md",
             "**/CLAUDE.md",
             "**/.agents/**",
             "**/.claude/**",
+            "**/.codex/**",
             "**/_workspace/**",
+            "**/generated/**",
+            "**/temp/**",
+            "**/tmp/**",
             "**/.omc/**",
             "**/crefle-doc/**",
         ],
@@ -68,18 +75,39 @@ def test_omf_profile_matches_the_approved_source_matrix() -> None:
 
     assert callable(profile_factory)
     profile = profile_factory()
+    assert profile.commit_sha == OMF_FIXED_COMMIT_SHA
     assert [
         profile.includes(source_path)
         for source_path in (
-            "docs/research/a.md",
-            "docs/planning/versions/v1.md",
-            "uiux/spec.md",
-            "docs/raw/secret.md",
-            "docs/_workspace/note.md",
-            "uiux/CLAUDE.md",
-            "uiux/image.png",
+            "design/wiki/a.md",
+            "design/wiki/versions/v1.md",
+            "design/raw/secret.md",
+            "design/schema/model.md",
+            "docs/research/legacy.md",
+            "design/wiki/_workspace/note.md",
+            "design/wiki/generated/output.md",
+            "design/wiki/temp/note.md",
+            "design/wiki/tmp/note.md",
+            "design/wiki/CLAUDE.md",
+            "design/wiki/.codex/work.md",
+            "design/wiki/image.png",
+            "design/wiki/generated.html",
         )
-    ] == [True, True, True, False, False, False, False]
+    ] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
 
 
 def test_profile_applies_segment_globs_exclusions_and_canonicalization() -> None:
@@ -109,10 +137,10 @@ def test_profile_applies_segment_globs_exclusions_and_canonicalization() -> None
         exclude_patterns=(),
     )
 
-    assert profile.includes("docs/research/direct.md")
-    assert profile.includes("docs/research/nested/deep.md")
-    assert profile.includes("./uiux//spec.md")
-    assert not profile.includes("docs/research/image.png")
+    assert profile.includes("design/wiki/direct.md")
+    assert profile.includes("design/wiki/nested/deep.md")
+    assert profile.includes("./design//wiki/spec.md")
+    assert not profile.includes("design/wiki/image.png")
     assert [
         broad_markdown_profile.includes(source_path)
         for source_path in (
@@ -221,11 +249,14 @@ def test_profile_config_rejects_mutable_pattern_containers() -> None:
             source_path="docs/a.md", content=BytesSubclass(b"source")
         ),
         lambda: ports.SourceSnapshot(
-            commit_sha=StringSubclass(VALID_COMMIT_SHA), archive_files=()
+            commit_sha=StringSubclass(VALID_COMMIT_SHA),
+            archive_files=(),
+            excluded_file_count=0,
         ),
         lambda: ports.SourceSnapshot(
             commit_sha=VALID_COMMIT_SHA,
             archive_files=TupleSubclass(()),
+            excluded_file_count=0,
         ),
     ],
 )
@@ -254,6 +285,7 @@ def test_snapshot_rejects_an_archive_file_subclass() -> None:
         ports.SourceSnapshot(
             commit_sha=VALID_COMMIT_SHA,
             archive_files=(archive_file,),
+            excluded_file_count=0,
         )
 
 
@@ -274,6 +306,7 @@ def test_loader_returns_immutable_profile_tuples(tmp_path: Path) -> None:
     profile = profiles.load_source_profile(profile_path)
 
     assert profile.source_key == "sample"
+    assert profile.commit_sha is None
     assert profile.include_patterns == ("docs/**/*.md",)
     assert profile.exclude_patterns == ("docs/raw/**",)
     with pytest.raises(AttributeError):
@@ -287,6 +320,7 @@ def test_loader_returns_immutable_profile_tuples(tmp_path: Path) -> None:
         "[]",
         '{"source_key": "sample", "include_patterns": []}',
         '{"source_key": "sample", "include_patterns": [], "exclude_patterns": [], "extra": true}',
+        '{"source_key": "sample", "commit_sha": "not-a-commit", "include_patterns": [], "exclude_patterns": []}',
         '{"source_key": "sample", "include_patterns": [], "exclude_patterns": "docs/raw/**"}',
         '{"source_key": "", "include_patterns": [], "exclude_patterns": []}',
         '{"source_key": "sample", "include_patterns": [""], "exclude_patterns": []}',
@@ -314,13 +348,42 @@ def test_snapshot_dtos_retain_immutable_sorted_source_bytes() -> None:
     snapshot = ports.SourceSnapshot(
         commit_sha="0123456789abcdef0123456789abcdef01234567",
         archive_files=(archive_file,),
+        excluded_file_count=3,
     )
 
     assert archive_file.source_path == "docs/research/a.md"
     assert archive_file.content == b"source bytes"
     assert snapshot.archive_files == (archive_file,)
+    assert snapshot.excluded_file_count == 3
     with pytest.raises(AttributeError):
         snapshot.archive_files.append(archive_file)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "excluded_file_count",
+    [-1, True, 1.0, "1", None, IntegerSubclass(1)],
+)
+def test_snapshot_rejects_invalid_excluded_file_count(
+    excluded_file_count: object,
+) -> None:
+    """Excluded-file totals are non-negative exact integers."""
+    with pytest.raises(ports.SourceSnapshotValidationError):
+        ports.SourceSnapshot(
+            commit_sha=VALID_COMMIT_SHA,
+            archive_files=(),
+            excluded_file_count=excluded_file_count,  # type: ignore[arg-type]
+        )
+
+
+def test_snapshot_accepts_zero_excluded_files() -> None:
+    """A provider must explicitly report a valid zero exclusion total."""
+    snapshot = ports.SourceSnapshot(
+        commit_sha=VALID_COMMIT_SHA,
+        archive_files=(),
+        excluded_file_count=0,
+    )
+
+    assert snapshot.excluded_file_count == 0
 
 
 @pytest.mark.parametrize(
@@ -356,7 +419,11 @@ def test_archive_file_rejects_noncanonical_or_unsafe_source_paths(
 def test_snapshot_rejects_noncanonical_git_sha(commit_sha: str) -> None:
     """Snapshot commits are lowercase, full Git SHA-1 identifiers."""
     with pytest.raises(ports.SourceSnapshotValidationError):
-        ports.SourceSnapshot(commit_sha=commit_sha, archive_files=())
+        ports.SourceSnapshot(
+            commit_sha=commit_sha,
+            archive_files=(),
+            excluded_file_count=0,
+        )
 
 
 def test_snapshot_rejects_duplicate_or_unsorted_archive_paths() -> None:
@@ -366,9 +433,17 @@ def test_snapshot_rejects_duplicate_or_unsorted_archive_paths() -> None:
     commit_sha = "0123456789abcdef0123456789abcdef01234567"
 
     with pytest.raises(ports.SourceSnapshotValidationError):
-        ports.SourceSnapshot(commit_sha=commit_sha, archive_files=(second, first))
+        ports.SourceSnapshot(
+            commit_sha=commit_sha,
+            archive_files=(second, first),
+            excluded_file_count=0,
+        )
     with pytest.raises(ports.SourceSnapshotValidationError):
-        ports.SourceSnapshot(commit_sha=commit_sha, archive_files=(first, first))
+        ports.SourceSnapshot(
+            commit_sha=commit_sha,
+            archive_files=(first, first),
+            excluded_file_count=0,
+        )
 
 
 def test_snapshot_dtos_reject_mutable_or_nonbyte_inputs() -> None:
@@ -379,4 +454,5 @@ def test_snapshot_dtos_reject_mutable_or_nonbyte_inputs() -> None:
         ports.SourceSnapshot(
             commit_sha="0123456789abcdef0123456789abcdef01234567",
             archive_files=[],  # type: ignore[arg-type]
+            excluded_file_count=0,
         )
