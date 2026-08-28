@@ -26,7 +26,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable \
+COPY config/source_profiles/omf.json ./config/source_profiles/omf.json
+RUN test -r config/source_profiles/omf.json \
+    && uv sync --frozen --no-dev --no-editable \
     && chown -R omf-retrieval:omf-retrieval /app
 
 USER omf-retrieval

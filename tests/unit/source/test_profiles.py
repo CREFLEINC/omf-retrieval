@@ -15,6 +15,31 @@ VALID_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 OMF_FIXED_COMMIT_SHA = "a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2"
 
 
+def _installed_profile_module_path(app_root: Path) -> Path:
+    module_path = (
+        app_root
+        / ".venv/lib/python3.12/site-packages/omf_retrieval/infrastructure/source/profiles.py"
+    )
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("# installed module fixture\n", encoding="utf-8")
+    return module_path
+
+
+def _write_source_profile(profile_path: Path) -> None:
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "source_key": "installed-omf",
+                "commit_sha": VALID_COMMIT_SHA,
+                "include_patterns": ["design/wiki/**/*.md"],
+                "exclude_patterns": ["design/raw/**"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class StringSubclass(str):
     """Represent an invalid string subclass at an exact-type boundary."""
 
@@ -108,6 +133,46 @@ def test_omf_profile_matches_the_approved_source_matrix() -> None:
         False,
         False,
     ]
+
+
+def test_omf_profile_discovers_project_root_from_installed_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-editable install finds repository-owned runtime profile assets."""
+    app_root = tmp_path / "app"
+    module_path = _installed_profile_module_path(app_root)
+    (app_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    _write_source_profile(app_root / "config/source_profiles/omf.json")
+    monkeypatch.setattr(profiles, "__file__", str(module_path))
+
+    assert profiles._project_root() == app_root
+    profile = profiles.omf_profile()
+    assert profile.source_key == "installed-omf"
+    assert profile.commit_sha == VALID_COMMIT_SHA
+
+
+@pytest.mark.parametrize("existing_marker", ["pyproject", "profile"])
+def test_omf_profile_fails_safely_when_project_markers_are_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_marker: str,
+) -> None:
+    """Incomplete ancestor markers fail without disclosing a host path."""
+    app_root = tmp_path / "app"
+    module_path = _installed_profile_module_path(app_root)
+    if existing_marker == "pyproject":
+        (app_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    else:
+        _write_source_profile(app_root / "config/source_profiles/omf.json")
+    monkeypatch.setattr(profiles, "__file__", str(module_path))
+
+    with pytest.raises(
+        profiles.SourceProfileValidationError,
+        match="^OMF source profile root is unavailable$",
+    ) as caught:
+        profiles.omf_profile()
+
+    assert str(tmp_path) not in str(caught.value)
 
 
 def test_profile_applies_segment_globs_exclusions_and_canonicalization() -> None:

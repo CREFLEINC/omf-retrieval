@@ -189,6 +189,65 @@ def test_dockerfile_uses_locked_python_runtime_with_git_and_non_root_user() -> N
     assert 'CMD ["omf-retrieval", "serve"' in source
 
 
+def test_omf_profile_is_tracked_and_not_explicitly_ignored() -> None:
+    """Static safeguards keep the runtime profile in the Docker context."""
+    profile_relative_path = Path("config/source_profiles/omf.json")
+    profile = ROOT / profile_relative_path
+
+    assert profile.is_file()
+    assert not profile.is_symlink()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", profile_relative_path.as_posix()],
+        cwd=ROOT,
+        env={"PATH": os.environ["PATH"]},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert tracked.returncode == 0, tracked.stderr
+
+    dockerignore_patterns = {
+        line.strip().removeprefix("/")
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert dockerignore_patterns.isdisjoint(
+        {
+            "config",
+            "config/",
+            "config/*",
+            "config/**",
+            "config/source_profiles",
+            "config/source_profiles/",
+            "config/source_profiles/*",
+            "config/source_profiles/**",
+            profile_relative_path.as_posix(),
+        }
+    )
+
+
+def test_dockerfile_packages_and_checks_the_omf_source_profile() -> None:
+    """The image build fails closed before installing an unreadable profile."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile_lines = dockerfile.splitlines()
+    copy_command = (
+        "COPY config/source_profiles/omf.json ./config/source_profiles/omf.json"
+    )
+    readability_check = "RUN test -r config/source_profiles/omf.json \\"
+    install_command = "    && uv sync --frozen --no-dev --no-editable \\"
+    chown_command = "    && chown -R omf-retrieval:omf-retrieval /app"
+    assert dockerfile_lines.count(copy_command) == 1
+    assert dockerfile_lines.count(readability_check) == 1
+    assert (
+        dockerfile_lines.index("WORKDIR /app")
+        < dockerfile_lines.index(copy_command)
+        < dockerfile_lines.index(readability_check)
+        < dockerfile_lines.index(install_command)
+        < dockerfile_lines.index(chown_command)
+        < dockerfile_lines.index("USER omf-retrieval")
+    )
+
+
 def test_repository_and_image_context_exclude_private_runtime_material() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
