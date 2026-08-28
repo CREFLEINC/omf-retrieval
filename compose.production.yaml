@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: pgvector/pgvector@sha256:1963bc48febf543433baa1ce3edcc6cc08154de722e22495f86681cc9a849026
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/omf-retrieval/secrets/postgres_password
+    volumes:
+      - type: bind
+        source: ${OMF_POSTGRES_DATA_DIR:?OMF_POSTGRES_DATA_DIR is required}
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ${OMF_POSTGRES_PASSWORD_FILE:?OMF_POSTGRES_PASSWORD_FILE is required}
+        target: /run/omf-retrieval/secrets/postgres_password
+        read_only: true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    image: omf-retrieval:local
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${OMF_APP_UID:?OMF_APP_UID is required}
+        APP_GID: ${OMF_APP_GID:?OMF_APP_GID is required}
+    user: ${OMF_APP_UID:?OMF_APP_UID is required}:${OMF_APP_GID:?OMF_APP_GID is required}
+    environment:
+      OMF_RETRIEVAL_ENVIRONMENT: production
+      OMF_RETRIEVAL_DATABASE_URL: ${OMF_RETRIEVAL_DATABASE_URL:?OMF_RETRIEVAL_DATABASE_URL is required}
+      OMF_RETRIEVAL_EMBEDDING_DEVICE: cuda:0
+      OMF_RETRIEVAL_EMBEDDING_CACHE_DIR: /var/cache/omf-retrieval/models
+      OMF_RETRIEVAL_POSTGRES_PASSWORD_FILE: /run/omf-retrieval/secrets/postgres_password
+      OMF_RETRIEVAL_AUDIT_HMAC_KEY_FILE: /run/omf-retrieval/secrets/audit_hmac_key
+      OMF_RETRIEVAL_SOURCE_REPO: /srv/omf-source
+    volumes:
+      - type: bind
+        source: ${OMF_MODEL_CACHE_DIR:?OMF_MODEL_CACHE_DIR is required}
+        target: /var/cache/omf-retrieval/models
+      - type: bind
+        source: ${OMF_SOURCE_REPO_DIR:?OMF_SOURCE_REPO_DIR is required}
+        target: /srv/omf-source
+        read_only: true
+      - type: bind
+        source: ${OMF_POSTGRES_PASSWORD_FILE:?OMF_POSTGRES_PASSWORD_FILE is required}
+        target: /run/omf-retrieval/secrets/postgres_password
+        read_only: true
+      - type: bind
+        source: ${OMF_AUDIT_HMAC_KEY_FILE:?OMF_AUDIT_HMAC_KEY_FILE is required}
+        target: /run/omf-retrieval/secrets/audit_hmac_key
+        read_only: true
+    command:
+      - omf-retrieval
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - target: 8000
+        published: ${OMF_PUBLIC_PORT:-9090}
+        host_ip: ${OMF_BIND_ADDRESS:-192.168.1.185}
+        protocol: tcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped

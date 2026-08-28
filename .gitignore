@@ -3,3 +3,7 @@
 .env.*
 !.env.example
 .superpowers/
+/secrets/
+/postgres/
+/model-cache/
+/source/
