@@ -135,7 +135,12 @@ def canonical_source_path(source_path: str) -> str:
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    for candidate in Path(__file__).resolve().parents:
+        profile_path = candidate / "config/source_profiles/omf.json"
+        if (candidate / "pyproject.toml").is_file() and profile_path.is_file():
+            return candidate
+
+    raise SourceProfileValidationError("OMF source profile root is unavailable")
 
 
 def _require_non_empty_string(*, value: object, field_name: str) -> None:
