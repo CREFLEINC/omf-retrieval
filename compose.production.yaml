@@ -9,7 +9,7 @@ services:
     volumes:
       - type: bind
         source: ${OMF_POSTGRES_DATA_DIR:?OMF_POSTGRES_DATA_DIR is required}
-        target: /var/lib/postgresql/data
+        target: /var/lib/postgresql
       - type: bind
         source: ${OMF_POSTGRES_PASSWORD_FILE:?OMF_POSTGRES_PASSWORD_FILE is required}
         target: /run/omf-retrieval/secrets/postgres_password

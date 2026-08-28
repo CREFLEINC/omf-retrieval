@@ -96,11 +96,14 @@ def test_production_compose_renders_the_approved_runtime(tmp_path: Path) -> None
     result = _compose_config(_write_render_environment(tmp_path))
 
     assert result.returncode == 0, result.stderr
+    assert "/var/lib/postgresql/data" not in COMPOSE.read_text(encoding="utf-8")
     rendered = json.loads(result.stdout)
     services = rendered["services"]
     assert set(services) == {"api", "postgres"}
 
     database = services["postgres"]
+    database_targets = {volume["target"] for volume in database["volumes"]}
+    assert "/var/lib/postgresql/data" not in database_targets
     assert database["image"] == PGVECTOR_DIGEST
     assert database["platform"] == "linux/amd64"
     assert database["healthcheck"]["test"][0] == "CMD-SHELL"
@@ -108,7 +111,7 @@ def test_production_compose_renders_the_approved_runtime(tmp_path: Path) -> None
     assert database["environment"]["POSTGRES_PASSWORD_FILE"] == (
         "/run/omf-retrieval/secrets/postgres_password"
     )
-    database_data = _volume(database, "/var/lib/postgresql/data")
+    database_data = _volume(database, "/var/lib/postgresql")
     database_password = _volume(
         database, "/run/omf-retrieval/secrets/postgres_password"
     )
