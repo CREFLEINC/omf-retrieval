@@ -24,11 +24,13 @@ from omf_retrieval.infrastructure.database.models import (
     IndexConfig,
     IndexRun,
     SearchAuditEvent,
+    SearchPolicyManifest,
     Section,
     SourceProfile,
 )
 
 APPLICATION_TABLE_NAMES = (
+    "search_policy_manifests",
     "search_audit_events",
     "client_source_grants",
     "api_clients",
@@ -148,16 +150,22 @@ def test_all_models_flush_commit_and_load_with_application_uuid_defaults(
         embedding_config={},
         rrf_config={},
     )
+    policy = SearchPolicyManifest(
+        config_hash="f" * 64,
+        snapshot={"policy": "test"},
+    )
 
     assert source.id is None
     assert config.id is None
+    assert policy.id is None
 
     with orm_session_factory() as database_session:
-        database_session.add_all([source, config])
+        database_session.add_all([source, config, policy])
         database_session.flush()
 
         assert isinstance(source.id, UUID)
         assert isinstance(config.id, UUID)
+        assert isinstance(policy.id, UUID)
 
         run = IndexRun(
             source_profile_id=source.id,
@@ -279,12 +287,13 @@ def test_all_models_flush_commit_and_load_with_application_uuid_defaults(
                 client,
                 grant,
                 audit_event,
+                policy,
             )
         }
         source_id = source.id
         database_session.commit()
 
-    assert len(mapped_types) == 13
+    assert len(mapped_types) == 14
     assert source.source_key == f"omf-{suffix}"
 
     with orm_session_factory() as database_session:

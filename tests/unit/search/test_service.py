@@ -1,5 +1,6 @@
 """Application search service contracts with deterministic fakes."""
 
+import inspect
 from uuid import UUID
 
 import pytest
@@ -15,8 +16,10 @@ from omf_retrieval.application.search import (
     NoActiveIndexError,
     Origin,
     ScoredCandidate,
+    SearchPolicyManifest,
     SearchService,
     SearchUnavailableError,
+    validated_search_policy_snapshot,
 )
 from omf_retrieval.domain.models import EmbeddingDescriptor
 from omf_retrieval.settings import Settings
@@ -35,6 +38,11 @@ CANDIDATE = Candidate(
     origins=(Origin("design/wiki/policy.md", "b" * 64),),
 )
 DEFAULT_BATCH = CandidateBatch(ACTIVE, (ScoredCandidate(CANDIDATE, 0.5),), ())
+
+
+def _manifest(settings: Settings, policy_id: int = 7) -> SearchPolicyManifest:
+    snapshot = settings.search_policy_snapshot()
+    return SearchPolicyManifest(UUID(int=policy_id), snapshot.config_hash, snapshot)
 
 
 class FakeProvider:
@@ -66,10 +74,13 @@ class FakeRepository:
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> ActiveIndex:
         if isinstance(self.batch, Exception):
             raise self.batch
         assert authorized == AUTHORIZED and descriptor.dimension == 2
+        assert normalize_embeddings is True
         return self.batch.index
 
     def retrieve(
@@ -81,6 +92,7 @@ class FakeRepository:
         *,
         keyword_limit: int,
         vector_limit: int,
+        normalize_embeddings: bool,
         keyword_similarity_floor: float,
         vector_similarity_floor: float,
     ) -> CandidateBatch:
@@ -92,6 +104,7 @@ class FakeRepository:
                 descriptor,
                 keyword_limit,
                 vector_limit,
+                normalize_embeddings,
                 keyword_similarity_floor,
                 vector_similarity_floor,
             )
@@ -104,11 +117,14 @@ class FakeRepository:
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> bool:
         return (
             self.batch is not None
             and authorized == AUTHORIZED
             and descriptor.dimension == 2
+            and normalize_embeddings is True
         )
 
 
@@ -116,17 +132,27 @@ def _service(
     repository: FakeRepository | None = None,
     provider: FakeProvider | None = None,
 ) -> SearchService:
+    settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+        keyword_similarity_floor=0.25,
+        vector_similarity_floor=0.5,
+        evidence_floor_status="calibrated",
+    )
     return SearchService(
         repository=repository or FakeRepository(),
         embeddings=provider or FakeProvider(),
-        settings=Settings(
-            environment="test",
-            embedding_dimension=2,
-            keyword_similarity_floor=0.25,
-            vector_similarity_floor=0.5,
-            evidence_floor_status="calibrated",
-        ),
+        settings=settings,
+        policy_manifest=_manifest(settings),
     )
+
+
+def test_search_service_requires_one_startup_resolved_policy_manifest() -> None:
+    parameters = inspect.signature(SearchService).parameters
+
+    assert "policy_manifest" in parameters
 
 
 def test_valid_search_returns_complete_ranked_evidence_and_fixed_policy() -> None:
@@ -136,10 +162,11 @@ def test_valid_search_returns_complete_ranked_evidence_and_fixed_policy() -> Non
     result = _service(repository, provider).search(AUTHORIZED, " 정책 원문 ", limit=5)
 
     assert (result.status, result.index) == ("ok", ACTIVE)
+    assert result.search_policy.policy_id == UUID(int=7)
     assert len(result.evidence_items) == 1
     assert result.evidence_items[0].origins[0].source_path == "design/wiki/policy.md"
     assert provider.queries == ["정책 원문"]
-    assert repository.calls[0][-4:] == (50, 50, 0.25, 0.5)
+    assert repository.calls[0][-5:] == (50, 50, True, 0.25, 0.5)
 
 
 def test_no_candidates_returns_successful_no_evidence_with_active_coordinate() -> None:
@@ -193,16 +220,20 @@ def test_candidates_at_or_above_either_lane_floor_are_retained(
 
 def test_calibration_pending_fails_search_and_readiness_closed() -> None:
     repository = FakeRepository()
+    settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+        keyword_similarity_floor=1.0,
+        vector_similarity_floor=1.0,
+        evidence_floor_status="calibration_pending",
+    )
     service = SearchService(
         repository=repository,
         embeddings=FakeProvider(),
-        settings=Settings(
-            environment="test",
-            embedding_dimension=2,
-            keyword_similarity_floor=1.0,
-            vector_similarity_floor=1.0,
-            evidence_floor_status="calibration_pending",
-        ),
+        settings=settings,
+        policy_manifest=_manifest(settings),
     )
 
     with pytest.raises(SearchUnavailableError):
@@ -258,3 +289,118 @@ def test_readiness_requires_database_active_index_and_model() -> None:
         _service(provider=FakeProvider(RuntimeError("down"))).is_ready(AUTHORIZED)
         is False
     )
+
+
+def test_floor_change_reuses_active_run_and_changes_only_policy_result() -> None:
+    batch = CandidateBatch(ACTIVE, (), (ScoredCandidate(CANDIDATE, 0.6),))
+    low_settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+        vector_similarity_floor=0.5,
+    )
+    high_settings = low_settings.model_copy(update={"vector_similarity_floor": 0.7})
+    repository = FakeRepository(batch)
+    low = SearchService(
+        repository=repository,
+        embeddings=FakeProvider(),
+        settings=low_settings,
+        policy_manifest=_manifest(low_settings, 11),
+    ).search(AUTHORIZED, "질문", limit=5)
+    high = SearchService(
+        repository=repository,
+        embeddings=FakeProvider(),
+        settings=high_settings,
+        policy_manifest=_manifest(high_settings, 12),
+    ).search(AUTHORIZED, "질문", limit=5)
+
+    assert (low.status, high.status) == ("ok", "no_evidence")
+    assert low.index == high.index == ACTIVE
+    assert low.search_policy.policy_id != high.search_policy.policy_id
+    assert low.search_policy.config_hash != high.search_policy.config_hash
+
+
+def test_resolved_manifest_supplies_candidates_floors_and_rrf_behavior() -> None:
+    settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+        query_instruction="A different instruction: {query}",
+        keyword_candidate_limit=40,
+        vector_candidate_limit=45,
+        rrf_k=70,
+        keyword_weight=2.0,
+        vector_weight=3.0,
+        keyword_similarity_floor=0.4,
+        vector_similarity_floor=0.8,
+    )
+    repository = FakeRepository()
+    result = SearchService(
+        repository=repository,
+        embeddings=FakeProvider(),
+        settings=settings,
+        policy_manifest=_manifest(settings),
+    ).search(AUTHORIZED, "질문", limit=5)
+
+    assert repository.calls[0][-5:] == (40, 45, True, 0.4, 0.8)
+    assert result.evidence_items[0].score == pytest.approx(2.0 / 71.0)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"query_embedding_model_name": "other"},
+        {"query_embedding_revision": "other"},
+        {"query_embedding_dimension": 3},
+    ],
+)
+def test_query_embedding_descriptor_mismatch_fails_safely(
+    change: dict[str, object],
+) -> None:
+    settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+    )
+    config = settings.search_policy_snapshot().as_config()
+    config.update(change)
+    snapshot = validated_search_policy_snapshot(config)
+    manifest = SearchPolicyManifest(UUID(int=21), snapshot.config_hash, snapshot)
+    service = SearchService(
+        repository=FakeRepository(),
+        embeddings=FakeProvider(),
+        settings=settings,
+        policy_manifest=manifest,
+    )
+
+    with pytest.raises(
+        SearchUnavailableError, match="^Search service is unavailable.$"
+    ):
+        service.search(AUTHORIZED, "질문", limit=5)
+    assert service.is_ready(AUTHORIZED) is False
+
+
+def test_runtime_settings_drift_from_resolved_manifest_fails_closed() -> None:
+    settings = Settings(
+        environment="test",
+        embedding_model_name="model",
+        embedding_model_revision="revision",
+        embedding_dimension=2,
+    )
+    configured = settings.search_policy_snapshot()
+    changed = validated_search_policy_snapshot({**configured.as_config(), "rrf_k": 61})
+    service = SearchService(
+        repository=FakeRepository(),
+        embeddings=FakeProvider(),
+        settings=settings,
+        policy_manifest=SearchPolicyManifest(
+            UUID(int=31), changed.config_hash, changed
+        ),
+    )
+
+    with pytest.raises(SearchUnavailableError):
+        service.search(AUTHORIZED, "질문", limit=5)
+    assert service.is_ready(AUTHORIZED) is False

@@ -17,17 +17,22 @@ from omf_retrieval.application.search import (
     EvidenceMatch,
     NoActiveIndexError,
     Origin,
+    SearchPolicyManifest,
     SearchResult,
     SearchUnavailableError,
 )
 from omf_retrieval.interfaces.api.app import create_app
+from omf_retrieval.settings import Settings
 
 AUTHORIZED = AuthorizedSource(
     AuthenticatedClient(UUID(int=1), "client", "0123456789abcdef"), "omf"
 )
+POLICY_SNAPSHOT = Settings(environment="test").search_policy_snapshot()
+POLICY = SearchPolicyManifest(UUID(int=4), POLICY_SNAPSHOT.config_hash, POLICY_SNAPSHOT)
 RESULT = SearchResult(
     status="ok",
     index=ActiveIndex(UUID(int=2), "a" * 40),
+    search_policy=POLICY,
     evidence_items=(
         EvidenceItem(
             rank=1,
@@ -100,11 +105,21 @@ def test_search_success_has_complete_evidence_contract_and_default_limit() -> No
     body = response.json()
     assert body["status"] == "ok"
     assert body["index"] == {"run_id": str(UUID(int=2)), "commit_sha": "a" * 40}
+    assert body["search_policy"] == {
+        "policy_id": str(UUID(int=4)),
+        "config_hash": POLICY.config_hash,
+    }
     assert body["evidence_items"][0]["matches"][0]["keyword_rank"] == 2
     assert body["evidence_items"][0]["origins"] == [
         {"source_path": "design/wiki/policy.md", "content_hash": "b" * 64}
     ]
-    assert set(body) == {"request_id", "status", "index", "evidence_items"}
+    assert set(body) == {
+        "request_id",
+        "status",
+        "index",
+        "search_policy",
+        "evidence_items",
+    }
     assert search.calls == [("정책", 5)]
 
 
@@ -172,12 +187,13 @@ def test_failures_have_stable_safe_error_bodies(
 
 
 def test_no_evidence_is_http_200_with_empty_items() -> None:
-    result = SearchResult("no_evidence", RESULT.index, ())
+    result = SearchResult("no_evidence", RESULT.index, POLICY, ())
     response = _client(search=FakeSearch(result)).post(
         "/v1/search", headers=_auth(), json={"query": "없는 질문"}
     )
     assert response.status_code == 200
     assert response.json()["status"] == "no_evidence"
+    assert response.json()["search_policy"]["config_hash"] == POLICY.config_hash
     assert response.json()["evidence_items"] == []
 
 

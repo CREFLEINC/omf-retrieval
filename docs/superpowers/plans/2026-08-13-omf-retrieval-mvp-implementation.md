@@ -5,11 +5,11 @@
 | 문서 항목 | 값 |
 |---|---|
 | 작성자 | Codex — 사용자 승인 반영 |
-| 작성일시 | 2026-08-27 15:53 KST |
-| 문서 버전 | v2.0 |
+| 작성일시 | 2026-08-29 13:56 KST |
+| 문서 버전 | v2.1 |
 | 열람 대상 | 프로젝트 관련자 |
-| 기준 설계 | `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.0 |
-| 상태 | MVP 완료 · 단위 1~4 독립 검증 PASS |
+| 기준 설계 | `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.1 |
+| 상태 | MVP 완료 · v2.1 corrective plan 승인 · 진행 중 |
 
 ## 용어
 
@@ -25,11 +25,15 @@
 | 근거 하한선 | 후보가 해당 lane의 RRF 입력이 되기 위해 충족해야 하는 원시 점수 최솟값 |
 | 분리 margin | 고정 smoke에서 정상 질의의 acceptable evidence가 문서에 없는 질의의 lane별 최고점보다 앞선 최소 여유 |
 | 수직 절편 | 검색 core부터 API·CLI까지 하나의 사용자 동작으로 연결하는 구현 단위 |
+| Index identity | 원본·parse·chunk·document embedding처럼 저장 문서나 vector를 바꾸는 설정의 재현 identity |
+| Search policy identity | query embedding·후보 수·RRF·근거 하한선처럼 질의 시점 결과를 바꾸는 설정의 재현 identity |
+| Policy manifest | 검색 정책의 canonical JSON snapshot과 SHA-256 config hash를 보존하는 immutable DB record |
 
 ## 개정 이력
 
 | 버전 | 작성일시 | 변경 | 작성자 |
 |---|---|---|---|
+| v2.1 | 2026-08-29 13:56 KST | Index identity와 search policy identity 분리, additive policy manifest·API 좌표·rollback, CUDA 보정 corrective plan과 공유 배포 상태 및 승인된 연속 진행 계약 반영 | Codex — 사용자 승인 반영 |
 | v2.0 | 2026-08-27 15:53 KST | 확정 근거 하한선·`no_evidence` 정책, 실제 색인·6개 smoke·품질 관찰과 단위 1~4 독립 검증 결과 반영 | Codex — 사용자 승인 반영 |
 | v2.0 | 2026-08-25 18:52 KST | 사용자 기능을 현재본 근거 검색으로 축소하고 남은 개발을 4개 단위로 재편; v1.2 작업 13~18 전체를 후속으로 이동 | Codex — 사용자 승인 반영 |
 | v1.3 | 2026-08-25 16:27 KST | Parse artifact manifest와 activation lifecycle의 migration 분리 계획 | Codex — 사용자 승인 반영 |
@@ -47,7 +51,8 @@ MVP 완료 조건은 다음과 같다.
 4. 로컬 PostgreSQL과 실제 Qwen 임베딩 모델로 6개 smoke 질의를 검증한다.
 5. 기존 작업 1~7과 작업 8~10 WIP는 삭제하지 않고 재사용한다.
 
-로컬 실제 기능 검증이 MVP 완료선이다. 공유 Ubuntu·Docker Compose 배포는 후속이다.
+로컬 실제 기능 검증이 v2.0 MVP 완료선이었다. 공유 Ubuntu·Docker Compose 배포는
+당시 후속으로 분리했으며 이후 별도 사용자 승인으로 착수했다.
 
 ## 2. 확정 범위와 기술 계약
 
@@ -73,10 +78,9 @@ MVP 완료 조건은 다음과 같다.
 - 두 하한선은 문서에 없는 smoke 질의에서 관찰한 lane별 최고점에
   `nextafter(+inf)`를 적용한 다음 표현 가능 부동소수점 값이다. 따라서 관찰된
   unknown 최고점은 배제되고 하한선 자체와 같은 점수는 포함된다.
-- 후보 수 `50/50`, RRF `60/1.0/1.0`, 두 하한선과
-  `evidence_floor_status: calibrated`를 index config에 byte-exact 값으로 저장한다.
-  Search와 ready는 persisted config의 missing·extra key, 타입 또는 값이 runtime과
-  다르면 안전한 503으로 실패한다.
+- v2.0은 후보 수 `50/50`, RRF `60/1.0/1.0`, 두 하한선과
+  `evidence_floor_status: calibrated`를 index config에 byte-exact 값으로 저장했다.
+  이 값과 분리 margin은 로컬 CPU 검증 provenance로 보존한다.
 - 두 lane 모두 하한선을 통과한 후보가 없으면 HTTP 200,
   `status: no_evidence`, 빈 `evidence_items`를 반환한다.
 - 고정 6개 smoke의 현재 acceptable-evidence 분리 margin은
@@ -84,6 +88,27 @@ MVP 완료 조건은 다음과 같다.
 - 작은 child chunk로 검색하고 같은 parent section의 child를 하나의 evidence item으로 묶는다.
 - evidence 순서는 그룹에서 가장 높은 child RRF 점수로 정한다.
 - 리랭커, ANN index, ParadeDB는 MVP에 추가하지 않는다.
+
+#### 2.2.1 v2.1 identity 분리
+
+- Index identity에는 source profile·commit, parser, chunker, tokenizer, document
+  embedding provider·model·revision·dimension·normalization·library behavior처럼
+  저장 문서·chunk·vector를 바꾸는 설정만 포함한다.
+- Search policy identity에는 query embedding model·revision·dimension·normalization과
+  instruction, keyword/vector candidate limits, RRF k·weights, 두 similarity floor와
+  calibration status처럼 query-time 결과를 바꾸는 설정을 포함한다.
+- Search policy는 exact-key canonical JSON의 SHA-256 `config_hash`로 식별하는
+  immutable DB manifest다. Runtime settings가 policy를 선택하며 `serve`가 readiness
+  전에 idempotent register·resolve한다.
+- 공개 policy 관리 CLI와 active-policy pointer는 추가하지 않는다. 단일 Compose API
+  replica가 MVP 전제이며 replica 간 config consistency는 후속이다.
+- Active index의 document embedding descriptor와 policy의 query
+  model·revision·dimension·normalization 호환성을 강제한다. Query instruction, RRF,
+  floor 차이는 index 불일치가 아니다.
+- Search policy 변경은 새 manifest와 API restart만 필요하다. Index run, chunk,
+  embedding pipeline을 호출해서는 안 된다.
+- 기존 `index_configs.config_hash`, query snapshot과 `rrf_config`는 v2.0 legacy
+  combined identity provenance로 그대로 보존한다.
 
 ### 2.3 인증과 공개 인터페이스
 
@@ -109,6 +134,7 @@ MVP 완료 조건은 다음과 같다.
   "request_id": "...",
   "status": "ok",
   "index": {"run_id": "...", "commit_sha": "..."},
+  "search_policy": {"policy_id": "...", "config_hash": "..."},
   "evidence_items": [{
     "rank": 1,
     "heading_path": ["...", "..."],
@@ -121,6 +147,8 @@ MVP 완료 조건은 다음과 같다.
 }
 ```
 
+- `search_policy`는 기존 응답에 추가되는 `policy_id`·`config_hash` 재현 좌표다.
+  기존 `index`와 evidence provenance는 유지한다.
 - 근거 없음: HTTP 200, `status: no_evidence`, 빈 `evidence_items`
 - 인증 실패: 401
 - source grant 실패: 403
@@ -134,13 +162,21 @@ MVP 완료 조건은 다음과 같다.
 
 현재 WIP의 `0002_index_run_activation_lifecycle.py`를 MVP migration으로 채택한다. 하나의 migration이 parse artifact manifest의 `section_count`, `chunk_count`, `artifact_hash`와 activation lifecycle의 `activated_at`, `ARCHIVED`, 활성 버전 제약을 함께 소유한다. v1.3의 8A-1 `0002` manifest / 별도 `0003` lifecycle 분리 계획은 이 v2.0이 명시적으로 대체한다.
 
+v2.1의 `0003`은 폐기한 lifecycle 분리안과 다른 새 additive migration이다. Immutable
+search policy manifest storage와 SHA-256 config hash를 추가하고, 기존 index run이
+참조하는 query·retrieval snapshot을 manifest로 backfill한다. 기존 index run,
+`index_configs` snapshot, chunk와 5,584개 embedding은 변경·삭제하지 않는다. Migration
+upgrade → downgrade → re-upgrade를 검증하되 운영 rollback은 DB downgrade보다 이전
+image와 policy 환경설정으로 되돌린 API restart를 우선한다.
+
 ## 3. 실행 원칙과 후속 범위
 
 - 모든 코드 동작 변경은 assertion 기반 RED → GREEN → REFACTOR 순서로 진행한다.
 - Unit test는 네트워크, GPU, 실제 모델, 외부 Git 저장소를 요구하지 않는다.
 - 실행 Agent는 승인 단위의 쉬운 무외부 의존 검증만 수행한다. 별도 검증 Agent가 계획된 Unit·PostgreSQL·계약·E2E 검증을 처음부터 다시 실행한다.
 - Python 3.12 기존 가상환경과 lock된 의존성을 사용한다. 현재 `uv 0.9.28`은 blocker가 아니며 `uv 0.12.3` 재현을 요구하지 않는다.
-- 새 endpoint, DB table, runtime dependency, 검색 가중치 또는 권한 정책이 필요하면 해당 단위를 멈추고 재승인받는다.
+- v2.1 corrective plan에 명시되지 않은 새 endpoint, DB table, runtime dependency,
+  검색 가중치 또는 권한 정책이 필요하면 해당 단위를 멈추고 재승인받는다.
 - 사용자 ZIP, cache와 범위 밖 WIP를 reset·stash·삭제하지 않는다.
 
 후속으로 미루는 범위:
@@ -150,7 +186,7 @@ MVP 완료 조건은 다음과 같다.
 - explicit conflict/relation 전용 API, rollback CLI와 2세대 운영 절차
 - 30개 골드셋, 정식 검색 metric, 성능 benchmark
 - 감사 HMAC, JSON audit logging, 운영 관측성
-- 운영 Docker image·Compose, Buildx push, digest 배포, 서버 E2E와 runbook
+- Buildx push, digest 배포 자동화, 정식 서버 성능 gate와 운영 runbook
 - 자동 배포·복구, MCP와 function tool
 
 v1.2 작업 13~18 전체의 번호 추적은 다음과 같다.
@@ -306,10 +342,138 @@ diagnostic target은 top 20에 없었고 프로젝트 용어 질의의 이상적
 PASS했지만, 이상적 문서의 순위 개선은 정식 평가와 리랭커 검토가 포함되는 후속
 범위다.
 
-## 5. 단계별 정지 조건
+## 5. v2.1 corrective 실행 단위
+
+v2.0 완료 구현과 로컬 검증은 유지한다. 공유 RTX 4090 배포에서 문서에 없는 질의가
+vector-only 근거를 반환했으므로 API는 중단한 상태에서 다음 네 단위를 순서대로
+진행한다. 각 단위는 실행 Agent와 별도 검증 Agent를 사용하고 결과·검증 증거와
+진척을 계속 보고한다. 승인 범위 변경·새 의사결정·검증 실패가 없으면 사용자 확인을
+기다리지 않고 다음 단위로 자동 진행한다.
+
+### Corrective 단위 1. 정본 v2.1 전환 — 진행 중
+
+**주제:** Index identity와 search policy identity의 경계를 세 정본에 고정한다.
+
+**목적:** 검색 하한선 변경이 5,584개 embedding 재생성으로 이어지는 MVP 결합을
+제거하면서 결과 재현성을 유지한다.
+
+**내용:** 시스템 설계, 이 구현 계획과 `AGENTS.md`의 버전·용어·migration·API 계약,
+rollback, 현재 배포 상태와 후속 단위 포인터를 일치시킨다. 기존 CREFLE 로컬 번들을
+보존하고 코드·DB·서버는 변경하지 않는다.
+
+**기대 결과:** 세 정본이 v2.1 목표와 identity 경계, additive `0003`, additive
+`search_policy` 응답, 기존 run 재사용, corrective 단위 2~4를 동일하게 기술한다.
+
+**검증:** 문서 전용 단위이므로 Unit test 대신 갱신 전 v2.1 계약 assertion 실패를
+RED로 확인하고 갱신 뒤 같은 assertion을 GREEN으로 확인한다. HTML parser, 정적 계약
+대조, 로컬 headless browser 렌더·육안 확인, 외부 URL·금지 style 추가 여부와
+`git diff --check`를 실행한다.
+
+### Corrective 단위 2. Search policy storage와 migration
+
+**주제:** 기존 색인과 분리된 immutable search policy manifest를 저장한다.
+
+**목적:** 정책 변경을 새 index run이 아니라 독립적인 재현 좌표로 보존한다.
+
+**내용:** Additive `0003`, policy canonicalization·SHA-256 identity, idempotent
+register/resolve repository와 legacy backfill을 구현한다. 기존 run·config·embedding은
+변경하지 않는다.
+
+**Unit test 설계:**
+
+| 사례 | RED assertion | 기대 GREEN |
+|---|---|---|
+| 정상 | 같은 exact policy snapshot을 두 번 register | 같은 policy ID와 hash를 반환하고 중복 row 없음 |
+| 경계 | similarity floor 하나만 변경 | 새 policy ID/hash가 생기고 index run·chunk·embedding 수 불변 |
+| 경계 | 기존 active/index-run의 legacy query·RRF snapshot upgrade | 동등한 immutable manifest로 backfill되고 legacy snapshot 유지 |
+| 실패 | missing·extra key, 잘못된 타입 또는 비정규 snapshot | 저장·resolve 거부, 기존 row 불변 |
+| 실패 | 저장 snapshot과 config hash 불일치 | 안전한 repository invariant error |
+
+**실행 Agent 검증:** Canonical hash·repository Unit test, migration 정적 검사, Ruff와
+`git diff --check`; PostgreSQL·Docker·GPU는 사용하지 않는다.
+
+**독립 검증:** 관련 Unit 전체, PostgreSQL upgrade → downgrade → re-upgrade, legacy
+backfill, 같은 정책 동시·반복 register, row/count 불변과 범위 밖 diff를 처음부터
+검증한다.
+
+### Corrective 단위 3. Search core·API policy 분리
+
+**주제:** Runtime이 선택한 policy로 기존 active index를 검색하고 정책 좌표를 반환한다.
+
+**목적:** 하한선·RRF·query instruction 변경 시 embedding을 다시 만들지 않고도 동일
+index에서 재현 가능한 결과를 낸다.
+
+**내용:** `serve` 시작 시 policy register·resolve, document/query descriptor
+호환성, search·ready validation과 API/CLI additive response를 연결한다. 인증·grant,
+기존 endpoint와 오류 계약은 유지한다. 공개 CLI는 추가하지 않는다.
+
+**Unit test 설계:**
+
+| 사례 | RED assertion | 기대 GREEN |
+|---|---|---|
+| 정상 | 같은 active index에 floor A와 B 적용 | A는 evidence, B는 `no_evidence`; run ID 동일, policy ID만 다름 |
+| 정상 | 같은 runtime snapshot으로 app 두 번 시작 | 같은 manifest를 resolve하고 readiness 전에 선택 완료 |
+| 경계 | 기존 API 응답 consumer | additive `search_policy` 외 기존 필드와 의미 불변 |
+| 실패 | query model·revision·dimension·normalization 비호환 | 안전한 503, 원문·host path 비노출 |
+| 실패 | policy snapshot/hash 불일치 또는 미resolve | Search·ready 안전한 503 |
+| 실패 | active index 없음 | 기존 409 계약 유지 |
+| 정상/실패 | threshold만 변경 | index·document embedding provider/pipeline 호출 0회 |
+
+**실행 Agent 검증:** Fake repository/provider 기반 policy·service·API·CLI Unit/contract,
+기존 인증·오류 회귀, Ruff와 `git diff --check`.
+
+**독립 검증:** 실행 검증 전체와 PostgreSQL에서 policy register/resolve, active index
+호환성, 권한 CTE 선적용, 기존 run·embedding count 불변과 API schema를 검증한다.
+
+### Corrective 단위 4. CUDA 하한선 보정과 공유 배포
+
+**주제:** RTX 4090 실측으로 새 search policy를 결정하고 기존 index로 API를 재가동한다.
+
+**목적:** 정상 5개 질의의 직접 근거를 유지하면서 문서에 없는 질의를
+`no_evidence`로 분리한다.
+
+**내용:** 6개 질의의 lane별 raw score를 측정한다. 정상 acceptable evidence와 unknown을
+분리하는 floor가 있을 때만 새 calibrated policy를 등록하고 production 설정에 선택한
+뒤 API image를 재빌드·재시작한다. 분리 가능한 값이 없으면 임의 보정하지 않고 검색
+전략 재검토를 위해 중단한다.
+
+**검증 사례:**
+
+| 사례 | 기대 결과 |
+|---|---|
+| 정상 5개 | 각각 top 5에 직접 근거, 모든 경로 `design/wiki/**` |
+| 문서에 없는 질의 | 200 `no_evidence`, 빈 목록 |
+| 재현 좌표 | active run `427f2c4a-ab06-486a-9801-4bde3ef17d63`와 고정 commit 유지, policy 좌표만 새 값 |
+| 데이터 불변 | 158 documents·4,202 sections·5,584 chunks·5,584 embeddings 유지 |
+| 호환성·보안 | 인증·grant·오류 비노출, 사용자 `local-agent`와 mode 0600 deployment token 보존 |
+| 재시작 | PostgreSQL·API 재시작 후 같은 run·policy와 검색 결과 유지 |
+
+실행 Agent는 외부 의존 없는 회귀만 수행한다. 독립 검증 Agent가 서버에서 raw score,
+6개 smoke, provenance, 인증·LAN·재시작, 전체 Unit·PostgreSQL integration·API contract,
+Ruff와 `git diff --check`를 다시 검증한다.
+
+### 현재 공유 배포 상태와 rollback
+
+- API와 `192.168.1.185:9090` listener는 중단했다. PostgreSQL은 healthy다.
+- Active run은 `427f2c4a-ab06-486a-9801-4bde3ef17d63`, source commit은
+  `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2`다.
+- 158개 문서, 4,202개 section, 5,584개 chunk·embedding을 보존한다.
+- CUDA 정상 5개 질의 acceptable evidence는 3·4·1·1·2위였고 unknown은
+  vector-only 근거를 반환해 FAIL했다.
+- 사용자가 만든 `local-agent`와 서버 내부 mode `0600` deployment token을 보존한다.
+  비밀값, DB URL과 host path는 기록하지 않는다.
+- Policy 실패 시 이전 policy 환경설정으로 되돌리고 API만 재시작한다. Policy manifest는
+  append-only이며 active run과 embedding을 삭제하지 않는다.
+
+## 6. 단계별 정지 조건
 
 - 각 단위는 사용자 승인 후 실행 Agent와 별도 검증 Agent가 수행한다.
 - 검증 실패는 같은 실행 Agent가 승인 범위 안에서 수정하고 같은 검증 Agent가 전체를 처음부터 재실행한다.
 - 승인 범위 밖 schema·API·dependency·검색 정책 변경이 필요하면 즉시 중단하고 재승인받는다.
 - 단위 4의 독립 검증과 6개 smoke가 모두 끝나기 전에는 MVP 완료를 주장하지 않는다.
   이 조건은 2026-08-27에 충족되었다.
+- v2.1 corrective 단위 2~4는 각각 독립 검증하며, 결과·증거를 계속 보고하고 승인된
+  전체 계획 범위 안에서는 사용자 확인 대기 없이 자동 진행한다. CUDA에서
+  정상·unknown을 분리할 하한선을 찾지 못하거나 identity 분리에 계획 밖 schema/API
+  변경이 필요하면 즉시 중단하고 재승인받는다.
+- 공유 API는 corrective 단위 4의 독립 검증 전까지 중단 상태를 유지한다.

@@ -159,6 +159,10 @@ def _success_body(request: Request, result: SearchResult) -> dict[str, object]:
             "run_id": str(result.index.run_id),
             "commit_sha": result.index.commit_sha,
         },
+        "search_policy": {
+            "policy_id": str(result.search_policy.policy_id),
+            "config_hash": result.search_policy.config_hash,
+        },
         "evidence_items": [
             {
                 "rank": item.rank,

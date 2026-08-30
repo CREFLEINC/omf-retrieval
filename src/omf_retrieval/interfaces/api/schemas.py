@@ -28,6 +28,11 @@ class IndexResponse(BaseModel):
     commit_sha: str
 
 
+class SearchPolicyResponse(BaseModel):
+    policy_id: UUID
+    config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class MatchResponse(BaseModel):
     excerpt: str
     line_start: int
@@ -53,6 +58,7 @@ class SearchResponse(BaseModel):
     request_id: str
     status: Literal["ok", "no_evidence"]
     index: IndexResponse
+    search_policy: SearchPolicyResponse
     evidence_items: list[EvidenceResponse]
 
 

@@ -6,9 +6,14 @@ from omf_retrieval.application.search.evidence import (
     group_evidence,
 )
 from omf_retrieval.application.search.policy import (
+    SearchPolicyManifest,
+    SearchPolicyRepository,
+    SearchPolicySnapshot,
+    SearchPolicyValidationError,
     require_calibrated_evidence_floors,
     retain_at_or_above,
     retrieval_config_snapshot,
+    validated_search_policy_snapshot,
 )
 from omf_retrieval.application.search.ports import (
     ActiveIndex,
@@ -38,9 +43,14 @@ __all__ = [
     "SearchResult",
     "SearchService",
     "SearchUnavailableError",
+    "SearchPolicyManifest",
+    "SearchPolicyRepository",
+    "SearchPolicySnapshot",
+    "SearchPolicyValidationError",
     "group_evidence",
     "require_calibrated_evidence_floors",
     "retain_at_or_above",
     "reciprocal_rank_fusion",
     "retrieval_config_snapshot",
+    "validated_search_policy_snapshot",
 ]

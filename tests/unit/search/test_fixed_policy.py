@@ -48,28 +48,39 @@ class _MappingResult:
 
 
 class _ActiveSession:
-    def __init__(self, rrf_config: dict[str, object]) -> None:
+    def __init__(
+        self,
+        rrf_config: dict[str, object],
+        document_changes: dict[str, object] | None = None,
+    ) -> None:
         self._rrf_config = rrf_config
+        self._document_changes = document_changes or {}
 
     def scalar(self, _statement: object) -> bool:
         return True
 
     def execute(self, _statement: object) -> _MappingResult:
-        return _MappingResult(
-            {
-                "run_id": UUID(int=2),
-                "commit_sha": "a" * 40,
-                "model_name": DESCRIPTOR.model_name,
-                "model_revision": DESCRIPTOR.revision,
-                "dimension": DESCRIPTOR.dimension,
-                "rrf_config": self._rrf_config,
-            }
-        )
+        row: dict[str, object] = {
+            "run_id": UUID(int=2),
+            "commit_sha": "a" * 40,
+            "model_name": DESCRIPTOR.model_name,
+            "model_revision": DESCRIPTOR.revision,
+            "dimension": DESCRIPTOR.dimension,
+            "provider": "sentence-transformers",
+            "normalize_embeddings": True,
+            "rrf_config": self._rrf_config,
+        }
+        row.update(self._document_changes)
+        return _MappingResult(row)
 
 
 class _Transactions:
-    def __init__(self, rrf_config: dict[str, object]) -> None:
-        self._session = _ActiveSession(rrf_config)
+    def __init__(
+        self,
+        rrf_config: dict[str, object],
+        document_changes: dict[str, object] | None = None,
+    ) -> None:
+        self._session = _ActiveSession(rrf_config, document_changes)
 
     @contextmanager
     def begin(self) -> object:
@@ -78,13 +89,12 @@ class _Transactions:
 
 def _repository(
     rrf_config: dict[str, object],
-    *,
-    configured: dict[str, object] | None = None,
+    document_changes: dict[str, object] | None = None,
 ) -> postgres_search.PostgresHybridSearchRepository:
     return postgres_search.PostgresHybridSearchRepository(
-        _Transactions(rrf_config),  # type: ignore[arg-type]
+        _Transactions(rrf_config, document_changes),  # type: ignore[arg-type]
         embedding_config_hash="a" * 64,
-        retrieval_config=configured or _retrieval_config(),
+        embedding_provider="sentence-transformers",
     )
 
 
@@ -98,14 +108,18 @@ def _repository(
         ("vector_weight", 2.0),
     ],
 )
-def test_settings_reject_nonapproved_search_policy(field: str, value: object) -> None:
-    with pytest.raises(ValidationError):
-        Settings(environment="test", **{field: value})
+def test_settings_accepts_valid_identity_bearing_search_policy(
+    field: str, value: object
+) -> None:
+    settings = Settings(environment="test", **{field: value})
+
+    assert settings.search_policy_snapshot().as_config()[field] == value
 
 
-def test_active_index_query_loads_persisted_rrf_config_for_fail_closed_check() -> None:
+def test_active_index_query_loads_only_document_embedding_compatibility() -> None:
     sql = " ".join(str(postgres_search._ACTIVE_INDEX_SQL).lower().split())
-    assert "rrf_config" in sql
+    assert "rrf_config" not in sql
+    assert "provider" in sql and "normalize_embeddings" in sql
 
 
 def test_approved_search_policy_defaults_are_accepted() -> None:
@@ -174,15 +188,16 @@ def test_settings_reject_invalid_evidence_floor(field: str, value: object) -> No
         ("OMF_RETRIEVAL_VECTOR_WEIGHT", "2.0"),
     ],
 )
-def test_environment_cannot_override_approved_search_policy(
+def test_environment_can_select_a_distinct_valid_search_policy(
     monkeypatch: pytest.MonkeyPatch,
     environment_name: str,
     value: str,
 ) -> None:
     monkeypatch.setenv("OMF_RETRIEVAL_ENVIRONMENT", "test")
     monkeypatch.setenv(environment_name, value)
-    with pytest.raises(ValidationError):
-        Settings()
+    settings = Settings()
+    field = environment_name.removeprefix("OMF_RETRIEVAL_").lower()
+    assert str(settings.search_policy_snapshot().as_config()[field]) == value
 
 
 @pytest.mark.parametrize(
@@ -231,8 +246,12 @@ def test_pending_policy_is_accepted_only_by_internal_calibration_path() -> None:
 
 def test_matching_active_persisted_policy_allows_search_and_readiness() -> None:
     repository = _repository(_retrieval_config())
-    assert repository.active_index(AUTHORIZED, DESCRIPTOR).run_id == UUID(int=2)
-    assert repository.is_ready(AUTHORIZED, DESCRIPTOR) is True
+    assert repository.active_index(
+        AUTHORIZED, DESCRIPTOR, normalize_embeddings=True
+    ).run_id == UUID(int=2)
+    assert (
+        repository.is_ready(AUTHORIZED, DESCRIPTOR, normalize_embeddings=True) is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -245,10 +264,35 @@ def test_matching_active_persisted_policy_allows_search_and_readiness() -> None:
         _retrieval_config(evidence_floor_status="calibration_pending"),
     ],
 )
-def test_active_persisted_policy_mismatch_blocks_search_and_readiness(
+def test_legacy_retrieval_snapshot_difference_does_not_block_active_index(
     persisted: dict[str, object],
 ) -> None:
     repository = _repository(persisted)
+    assert repository.active_index(
+        AUTHORIZED, DESCRIPTOR, normalize_embeddings=True
+    ).run_id == UUID(int=2)
+    assert (
+        repository.is_ready(AUTHORIZED, DESCRIPTOR, normalize_embeddings=True) is True
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"provider": "other"},
+        {"model_name": "other"},
+        {"model_revision": "other"},
+        {"dimension": 3},
+        {"normalize_embeddings": False},
+    ],
+)
+def test_active_document_embedding_incompatibility_fails_closed(
+    change: dict[str, object],
+) -> None:
+    repository = _repository(_retrieval_config(), change)
+
     with pytest.raises(postgres_search.SearchUnavailableError):
-        repository.active_index(AUTHORIZED, DESCRIPTOR)
-    assert repository.is_ready(AUTHORIZED, DESCRIPTOR) is False
+        repository.active_index(AUTHORIZED, DESCRIPTOR, normalize_embeddings=True)
+    assert (
+        repository.is_ready(AUTHORIZED, DESCRIPTOR, normalize_embeddings=True) is False
+    )
