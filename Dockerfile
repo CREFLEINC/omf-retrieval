@@ -27,7 +27,11 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
 COPY config/source_profiles/omf.json ./config/source_profiles/omf.json
+COPY scripts/calibrate_search.py ./scripts/calibrate_search.py
+COPY config/smoke/omf_mvp_v2.json ./config/smoke/omf_mvp_v2.json
 RUN test -r config/source_profiles/omf.json \
+    && test -r scripts/calibrate_search.py \
+    && test -r config/smoke/omf_mvp_v2.json \
     && uv sync --frozen --no-dev --no-editable \
     && chown -R omf-retrieval:omf-retrieval /app
 

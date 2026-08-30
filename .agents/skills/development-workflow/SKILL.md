@@ -83,6 +83,14 @@ code를 증거로 남긴다. 실패, 미실행, 환경 차이와 범위 누출�
 동일한 검증 Agent 인스턴스가 계획된 모든 검증을 처음부터 재실행한다. 계획 밖
 수정이 필요하면 재승인 전까지 루프를 멈춘다.
 
+## 배포 조건부 reference
+
+배포, 재배포, 복구, 보정 같은 외부 환경 실행형 요청이면 작업을 위임하거나 명령을
+실행하기 전에 반드시 `references/deployment-harness.md`를 처음부터 끝까지 읽는다.
+단순 상태 확인, 개념 설명과 선택지 요청은 실행형 요청이 아니므로 이 조건만으로
+배포 절차를 시작하지 않는다. Reference는 승인이나 서버 변경 권한을 대신하지 않으며,
+`AGENTS.md`와 사용자가 승인한 현재 작업 단위가 언제나 우선한다.
+
 ## 예외와 오류 처리
 
 - 승인 뒤 전제가 달라지면 변경을 멈추고 원래 계획과 차이를 설명한다.
@@ -98,3 +106,4 @@ code를 증거로 남긴다. 실패, 미실행, 환경 차이와 범위 누출�
 - 독립 검증 결과를 작성할 때: `references/verification-report-template.md`
 - 트리거 표현을 변경할 때: `references/trigger-evaluation.md`
 - 흐름이나 오류 처리를 변경할 때: `references/dry-run-scenarios.md`
+- 배포·재배포·복구·보정을 실행할 때: `references/deployment-harness.md`

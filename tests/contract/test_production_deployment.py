@@ -22,6 +22,14 @@ REQUIRED_ENVIRONMENT = {
     "POSTGRES_DB",
     "POSTGRES_USER",
     "OMF_RETRIEVAL_DATABASE_URL",
+    "OMF_RETRIEVAL_KEYWORD_SIMILARITY_FLOOR",
+    "OMF_RETRIEVAL_VECTOR_SIMILARITY_FLOOR",
+    "OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS",
+}
+CALIBRATED_SEARCH_POLICY = {
+    "OMF_RETRIEVAL_KEYWORD_SIMILARITY_FLOOR": "0.012345678901234567",
+    "OMF_RETRIEVAL_VECTOR_SIMILARITY_FLOOR": "0.567890123456789",
+    "OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS": "calibrated",
 }
 
 
@@ -55,6 +63,7 @@ def _write_render_environment(tmp_path: Path) -> Path:
             "postgresql+psycopg://omf_retrieval:fixture-value@postgres:5432/"
             "omf_retrieval"
         ),
+        **CALIBRATED_SEARCH_POLICY,
     }
     env_file.write_text(
         "".join(f"{key}={value}\n" for key, value in values.items()),
@@ -126,6 +135,8 @@ def test_production_compose_renders_the_approved_runtime(tmp_path: Path) -> None
     assert api["depends_on"]["postgres"]["condition"] == "service_healthy"
     assert api["environment"]["OMF_RETRIEVAL_ENVIRONMENT"] == "production"
     assert api["environment"]["OMF_RETRIEVAL_EMBEDDING_DEVICE"] == "cuda:0"
+    for name, value in CALIBRATED_SEARCH_POLICY.items():
+        assert api["environment"][name] == value
     assert api["command"] == [
         "omf-retrieval",
         "serve",
@@ -175,6 +186,24 @@ def test_production_compose_requires_every_host_value_and_fails_safely(
     assert result.returncode != 0
     assert "required" in result.stderr.lower()
     assert "fixture-value" not in result.stderr
+
+
+def test_production_search_policy_is_explicit_and_pending_until_cuda_calibration() -> (
+    None
+):
+    """Never start production with hidden CPU floors or an unmarked policy."""
+    compose = COMPOSE.read_text(encoding="utf-8")
+    for name in CALIBRATED_SEARCH_POLICY:
+        required_interpolation = f"${{{name}:?{name} is required}}"
+        assert compose.count(required_interpolation) == 1
+
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    example_lines = set(example.splitlines())
+    assert "CUDA raw calibration" in example
+    assert "OMF_RETRIEVAL_KEYWORD_SIMILARITY_FLOOR=0.0" in example_lines
+    assert "OMF_RETRIEVAL_VECTOR_SIMILARITY_FLOOR=0.0" in example_lines
+    assert "OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS=calibration_pending" in example_lines
+    assert "set OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS=calibrated" in example
 
 
 def test_dockerfile_uses_locked_python_runtime_with_git_and_non_root_user() -> None:
@@ -248,6 +277,28 @@ def test_dockerfile_packages_and_checks_the_omf_source_profile() -> None:
     )
 
 
+def test_dockerfile_packages_the_cuda_calibration_entrypoint_and_smoke_fixture() -> (
+    None
+):
+    """The production image carries only the inputs needed for raw calibration."""
+    dockerfile_lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    required_copies = {
+        "scripts/calibrate_search.py": (
+            "COPY scripts/calibrate_search.py ./scripts/calibrate_search.py"
+        ),
+        "config/smoke/omf_mvp_v2.json": (
+            "COPY config/smoke/omf_mvp_v2.json ./config/smoke/omf_mvp_v2.json"
+        ),
+    }
+
+    for source_path, copy_command in required_copies.items():
+        assert (ROOT / source_path).is_file()
+        assert dockerfile_lines.count(copy_command) == 1
+        assert dockerfile_lines.index(copy_command) < dockerfile_lines.index(
+            "USER omf-retrieval"
+        )
+
+
 def test_repository_and_image_context_exclude_private_runtime_material() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
@@ -290,41 +341,67 @@ def test_new_deployment_assets_have_no_forbidden_host_or_gpu_shortcuts() -> None
 def test_readme_records_metadata_and_the_approved_server_sequence() -> None:
     source = (ROOT / "README.md").read_text(encoding="utf-8")
     deployment = source.split("## Production Docker Compose", maxsplit=1)[1]
-    prerequisite_heading = "### 소스 사전 준비"
-    runtime_heading = "### 런타임 초기화 및 기동"
-    assert deployment.find(prerequisite_heading) < deployment.find(runtime_heading)
-    prerequisite, runtime = deployment.split(runtime_heading, maxsplit=1)
-    prerequisite_commands = (
-        "git clone '<OMF_PRIVATE_GIT_URL>'",
-        "checkout --detach a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2",
-        "status --porcelain",
+    harness_path = Path(
+        ".agents/skills/development-workflow/references/deployment-harness.md"
     )
-    runtime_commands = (
-        "up -d postgres",
-        "alembic upgrade head",
-        "omf-retrieval model prepare",
+    assert f"[공유 배포 하네스]({harness_path.as_posix()})" in deployment
+    assert (ROOT / harness_path).is_file()
+    redeploy_heading = "### 기존 공유 환경 재배포"
+    bootstrap_heading = "### 최초 bootstrap"
+    assert redeploy_heading in deployment
+    assert bootstrap_heading in deployment
+    assert deployment.find(redeploy_heading) < deployment.find(bootstrap_heading)
+    redeploy, bootstrap = deployment.split(redeploy_heading, maxsplit=1)[1].split(
+        bootstrap_heading, maxsplit=1
+    )
+
+    for forbidden_redeploy_command in (
         "omf-retrieval index",
         "omf-retrieval client create",
-        "up -d api",
-        "omf-retrieval search",
-    )
-    prerequisite_positions = [
-        prerequisite.find(command) for command in prerequisite_commands
-    ]
-    runtime_positions = [runtime.find(command) for command in runtime_commands]
+    ):
+        assert forbidden_redeploy_command not in redeploy
+        assert forbidden_redeploy_command in bootstrap
 
-    assert -1 not in prerequisite_positions
-    assert prerequisite_positions == sorted(prerequisite_positions)
-    assert -1 not in runtime_positions
-    assert runtime_positions == sorted(runtime_positions)
-    assert "git clone" not in runtime
+    redeploy_sequence = (
+        "alembic upgrade head",
+        "scripts/calibrate_search.py",
+        "OMF_RETRIEVAL_KEYWORD_SIMILARITY_FLOOR",
+        "OMF_RETRIEVAL_VECTOR_SIMILARITY_FLOOR",
+        "OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS",
+        "내부 readiness",
+        "6개 smoke",
+        "publish",
+    )
+    positions = [redeploy.find(term) for term in redeploy_sequence]
+    assert -1 not in positions
+    assert positions == sorted(positions)
+
+    for preserved in (
+        "427f2c4a-ab06-486a-9801-4bde3ef17d63",
+        "5,584",
+        "기존 deployment token",
+        "기존 model cache",
+    ):
+        assert preserved in redeploy
+    assert "별도 승인" in bootstrap
+    assert "기존 model cache" in bootstrap
+    assert "기존 deployment token" in bootstrap
     assert "Codex — 사용자 승인 반영" in source
-    assert "v2.0" in source
+    assert "v2.1" in deployment
     assert "프로젝트 관련자" in source
     assert "/opt/omf-retrieval" in source
     assert "/home/storage_disk3/omf-retrieval-disk" in source
-    assert 'test -z "$(git -C "$OMF_SOURCE_REPO_DIR" status --porcelain)"' in source
     assert "chmod 600 .env" in source
     assert "secrets/postgres_password" in source
     assert "secrets/audit_hmac_key" in source
-    assert "같아야" in source
+    assert "server preflight/build/migration/CUDA calibration/smoke" in deployment
+    assert "NOT RUN" in deployment
+    assert "외부 listener와 API는 중단" in deployment
+    assert "publish 금지" in deployment
+
+    for secret_value_shape in (
+        "omfr_",
+        "Bearer ",
+        "postgresql+psycopg://",
+    ):
+        assert secret_value_shape not in deployment
