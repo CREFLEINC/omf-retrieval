@@ -70,7 +70,7 @@ def test_reference_metadata_and_fixed_coordinates_are_explicit() -> None:
     metadata = _frontmatter(reference)
 
     assert metadata["author"] == "Codex — 사용자 승인 반영"
-    assert metadata["version"] == "v1.1"
+    assert metadata["version"] == "v1.2"
     assert metadata["audience"] == "프로젝트 관련자"
     assert re.fullmatch(
         r"2026-08-30 [0-2][0-9]:[0-5][0-9] KST", metadata["modified_at"]
@@ -232,6 +232,34 @@ def test_secret_values_are_never_canonicalized_or_logged() -> None:
     assert "DB URL" in reference
     assert "값" in reference
     assert "출력하지 않는다" in reference
+
+
+def test_command_scoped_credentials_cannot_remain_in_the_parent_environment() -> None:
+    reference = _read(REFERENCE)
+    boundary = _section(reference, "비밀정보 경계")
+
+    for contract_term in (
+        "command-scoped subshell",
+        "set +x",
+        "set -u",
+        "set -e",
+        "명시적",
+        "|| exit 64",
+        "fail-closed",
+        "nonzero",
+        "parent shell",
+        "정상 종료",
+        "명령 실패",
+        "interrupt",
+        "command environment",
+    ):
+        assert contract_term in boundary
+    assert re.search(
+        r"token.*command-scoped subshell.*parent shell",
+        boundary,
+        re.DOTALL,
+    )
+    assert "실제 경로" not in boundary
 
 
 def test_claude_pointer_stays_thin_and_no_commands_are_created() -> None:

@@ -76,7 +76,7 @@
 ## Production Docker Compose
 
 > 문서 정보: 작성자 `Codex — 사용자 승인 반영` · 수정일시
-> `2026-08-30 19:11 KST` · 버전 `v2.1` · 열람 대상 `프로젝트 관련자`
+> `2026-08-30 20:50 KST` · 버전 `v2.1` · 열람 대상 `프로젝트 관련자`
 
 Ubuntu 22.04 서버의 `/opt/omf-retrieval`에서 이미 clone한 이 저장소를 서버에서
 직접 빌드합니다. PostgreSQL, 기존 model cache와 OMF 원본은
@@ -125,13 +125,42 @@ embedding 각 5,584개, `local-agent`, 기존 deployment token과 기존 model c
      alembic upgrade head
    ```
 
-4. 기존 deployment token을 명령 인자가 아닌 환경변수로 전달하여 보존 embedding의
-   CUDA raw score를 측정합니다. 다음 명령은 host port를 열지 않습니다.
+4. Preflight에서 확인한 기존 deployment token 파일의 절대경로와 owner UID를 아래
+   placeholder에 넣습니다. Token 파일이 regular file이고 symlink가 아니며 mode와
+   owner가 preflight 결과와 일치하는지 먼저 검사한 뒤, command-scoped subshell
+   안에서만 token을 읽어 보존 embedding의 CUDA raw score를 측정합니다. 다음 명령은
+   host port를 열지 않습니다.
 
    ```bash
-   docker compose --env-file .env -f compose.production.yaml run --rm --no-deps \
-     -e OMF_RETRIEVAL_API_TOKEN api python scripts/calibrate_search.py
+   (
+     set +x
+     set -u
+     DEPLOYMENT_TOKEN_FILE='<preflight-confirmed-token-file>'
+     DEPLOYMENT_TOKEN_OWNER_UID='<preflight-confirmed-owner-uid>'
+     test -n "${DEPLOYMENT_TOKEN_FILE-}" || exit 64
+     test -n "${DEPLOYMENT_TOKEN_OWNER_UID-}" || exit 64
+     test -f "$DEPLOYMENT_TOKEN_FILE" || exit 64
+     test ! -L "$DEPLOYMENT_TOKEN_FILE" || exit 64
+     test "$(stat -c '%a' -- "$DEPLOYMENT_TOKEN_FILE")" = '600' || exit 64
+     test "$(stat -c '%u' -- "$DEPLOYMENT_TOKEN_FILE")" = "$DEPLOYMENT_TOKEN_OWNER_UID" || exit 64
+     OMF_RETRIEVAL_API_TOKEN="$(<"$DEPLOYMENT_TOKEN_FILE")" || exit 64
+     test -n "$OMF_RETRIEVAL_API_TOKEN" || exit 64
+     export OMF_RETRIEVAL_API_TOKEN
+     exec docker compose --env-file .env -f compose.production.yaml run --rm --no-deps \
+       -e OMF_RETRIEVAL_API_TOKEN api python scripts/calibrate_search.py
+   )
    ```
+
+   Bash의 `set -e` 동작을 보안 보장으로 신뢰하지 않습니다. 각 검사는 명시적
+   `|| exit 64` guard를 사용하므로 token 파일 변수가 없거나
+   regular-file·symlink·mode·owner·read·빈 값 검사 중 하나라도 실패하면, 호출 문맥과
+   무관하게 subshell은 nonzero로 즉시 끝나고 Docker를 호출하지 않습니다. Token 값은
+   명령 인자나 parent shell에 들어가지 않습니다. Subshell의 마지막 `exec`가
+   `docker compose`이므로 compose exit status가 그대로 반환되며, 정상 종료, 명령 실패
+   또는 interrupt 어느 경우에도 token 환경은 subshell 종료와 함께 사라집니다. 이후
+   policy 기록·후속 readiness·smoke가 이 token을 암묵적으로 상속하지 않게 하며,
+   인증이 필요한 각 호출도 같은 command-scoped subshell 원칙으로 파일을 다시 읽어
+   해당 명령에만 전달합니다.
 
 5. Calibration 결과의 byte-exact 값을 `/opt/omf-retrieval/.env`에 기록하고 mode
    `0600`을 유지합니다. 값은 로그나 README에 복사하지 않습니다.

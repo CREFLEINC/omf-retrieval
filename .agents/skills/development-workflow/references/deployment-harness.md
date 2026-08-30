@@ -1,8 +1,8 @@
 ---
 title: OMF Retrieval 공유 배포 하네스
 author: Codex — 사용자 승인 반영
-modified_at: 2026-08-30 19:11 KST
-version: v1.1
+modified_at: 2026-08-30 20:50 KST
+version: v1.2
 audience: 프로젝트 관련자
 ---
 
@@ -61,9 +61,21 @@ audience: 프로젝트 관련자
 - 기존 deployment token 파일: 배포 전 서버에서 승인된 절대경로를 확인하고 mode
   `0600`을 검증한다. 현재 문서에 경로를 추측해 추가하지 않는다.
 
-비밀 파일은 존재 여부, regular file 여부, owner와 mode만 검사한다. 어떤 비밀도
-값을 읽거나 출력하지 않는다. 로그에는 token, password, HMAC key, 전체 DB URL,
-`.env` 내용과 command environment를 남기지 않는다.
+Preflight와 snapshot에서는 비밀 파일의 존재 여부, regular file 여부, owner와 mode만
+검사하며 어떤 비밀도 값을 읽거나 출력하지 않는다. 실행에 필요한 deployment token은 승인된
+절대경로와 owner·mode를 다시 검증한 뒤 `set +x`인 command-scoped subshell 안에서만
+읽어 export하고, 해당 인증 명령에 환경변수 이름으로 전달한다. `set -e`는 호출 문맥에
+따라 무시될 수 있으므로 보안 보장으로 신뢰하지 않는다. Subshell은 `set -u`를 유지하되
+unset path, regular file, non-symlink, mode, owner, token read와 nonempty 검사를 각각
+명시적 `|| exit 64` guard로 fail-closed 처리해야 한다. 이 경우 인증 명령을 호출하지 않고
+nonzero로 끝나야 한다. Token 값은 명령 인자에 넣지 않으며 마지막 명령을 `exec`해 원래
+exit status를 보존한다. 정상 종료, 명령 실패 또는 interrupt 어느 경우에도 token과 그
+command environment는 subshell 종료와 함께 사라져 parent shell에 남지 않아야 한다.
+후속 단계가 token 환경을 암묵적으로 상속하면 안 되며, 인증이 필요한 각 호출은 같은
+command-scoped loading 경계를 새로 사용한다.
+
+로그에는 token, password, HMAC key, 전체 DB URL, `.env` 내용과 command environment
+dump를 남기지 않는다.
 검색 검증에서는 인증 성공 여부와 안전한 HTTP status·code만 증거로 남긴다.
 
 ## 정상 실행 순서

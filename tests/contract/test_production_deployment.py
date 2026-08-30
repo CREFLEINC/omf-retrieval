@@ -2,6 +2,9 @@
 
 import json
 import os
+import re
+import shlex
+import signal
 import subprocess
 from pathlib import Path
 
@@ -31,6 +34,9 @@ CALIBRATED_SEARCH_POLICY = {
     "OMF_RETRIEVAL_VECTOR_SIMILARITY_FLOOR": "0.567890123456789",
     "OMF_RETRIEVAL_EVIDENCE_FLOOR_STATUS": "calibrated",
 }
+
+TOKEN_FILE_PLACEHOLDER = "DEPLOYMENT_TOKEN_FILE='<preflight-confirmed-token-file>'"
+TOKEN_OWNER_PLACEHOLDER = "DEPLOYMENT_TOKEN_OWNER_UID='<preflight-confirmed-owner-uid>'"
 
 
 def test_production_deployment_assets_exist() -> None:
@@ -405,3 +411,240 @@ def test_readme_records_metadata_and_the_approved_server_sequence() -> None:
         "postgresql+psycopg://",
     ):
         assert secret_value_shape not in deployment
+
+
+def _readme_calibration_shell() -> tuple[str, str]:
+    source = (ROOT / "README.md").read_text(encoding="utf-8")
+    production = source.split("## Production Docker Compose", maxsplit=1)[1]
+    redeploy = production.split("### 기존 공유 환경 재배포", maxsplit=1)[1].split(
+        "### 최초 bootstrap", maxsplit=1
+    )[0]
+    match = re.search(
+        r"4\. .*?deployment token.*?```bash\n(?P<shell>.*?)\n\s*```",
+        redeploy,
+        re.DOTALL,
+    )
+    assert match is not None
+    return redeploy, match.group("shell")
+
+
+def test_readme_bounds_calibration_token_to_the_compose_command() -> None:
+    """A deployment token must never enter the parent host-shell environment."""
+    redeploy, shell = _readme_calibration_shell()
+
+    assert TOKEN_FILE_PLACEHOLDER in shell
+    assert TOKEN_OWNER_PLACEHOLDER in shell
+    assert "stat -c '%a' -- \"$DEPLOYMENT_TOKEN_FILE\"" in shell
+    assert "stat -c '%u' -- \"$DEPLOYMENT_TOKEN_FILE\"" in shell
+    for explicit_guard in (
+        'test -n "${DEPLOYMENT_TOKEN_FILE-}" || exit 64',
+        'test -n "${DEPLOYMENT_TOKEN_OWNER_UID-}" || exit 64',
+        'test -f "$DEPLOYMENT_TOKEN_FILE" || exit 64',
+        'test ! -L "$DEPLOYMENT_TOKEN_FILE" || exit 64',
+        "test \"$(stat -c '%a' -- \"$DEPLOYMENT_TOKEN_FILE\")\" = '600' || exit 64",
+        'test "$(stat -c \'%u\' -- "$DEPLOYMENT_TOKEN_FILE")" = '
+        '"$DEPLOYMENT_TOKEN_OWNER_UID" || exit 64',
+        'OMF_RETRIEVAL_API_TOKEN="$(<"$DEPLOYMENT_TOKEN_FILE")" || exit 64',
+        'test -n "$OMF_RETRIEVAL_API_TOKEN" || exit 64',
+    ):
+        assert explicit_guard in shell
+
+    subshell_match = re.fullmatch(r"\s*\(\n(?P<body>.*)\n\s*\)\s*", shell, re.DOTALL)
+    assert subshell_match is not None
+    body = subshell_match.group("body")
+    assert "set -u" in body
+    assert "set -e" not in body
+    assert "set +x" in body
+    assert "|| exit 64" in body
+    assert 'OMF_RETRIEVAL_API_TOKEN="$(<"$DEPLOYMENT_TOKEN_FILE")"' in body
+    assert "export OMF_RETRIEVAL_API_TOKEN" in body
+    assert "exec docker compose" in body
+    assert "-e OMF_RETRIEVAL_API_TOKEN" in body
+    assert "-e OMF_RETRIEVAL_API_TOKEN=" not in body
+    assert body.rstrip().endswith("api python scripts/calibrate_search.py")
+
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=shell,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    for bounded_lifetime in ("정상 종료", "명령 실패", "interrupt", "parent shell"):
+        assert bounded_lifetime in redeploy
+    assert "compose exit status" in redeploy
+    assert "암묵적으로 상속하지" in " ".join(redeploy.split())
+
+
+def _write_fake_command(path: Path, source: str) -> None:
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _render_calibration_shell(
+    shell: str,
+    *,
+    token_file: Path | None,
+    owner_uid: str,
+) -> str:
+    if token_file is None:
+        rendered = shell.replace(f"     {TOKEN_FILE_PLACEHOLDER}\n", "")
+    else:
+        rendered = shell.replace(
+            TOKEN_FILE_PLACEHOLDER,
+            f"DEPLOYMENT_TOKEN_FILE={shlex.quote(str(token_file))}",
+        )
+    return rendered.replace(
+        TOKEN_OWNER_PLACEHOLDER,
+        f"DEPLOYMENT_TOKEN_OWNER_UID={shlex.quote(owner_uid)}",
+    )
+
+
+def test_calibration_shell_fails_closed_without_a_docker_daemon(tmp_path: Path) -> None:
+    """Exercise the Ubuntu/GNU-stat contract with portable fake commands."""
+    _, shell = _readme_calibration_shell()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_command(
+        fake_bin / "stat",
+        """#!/usr/bin/env bash
+if [[ "$#" -ne 4 || "$1" != '-c' || "$3" != '--' ]]; then
+  exit 64
+fi
+case "$2" in
+  '%a') printf '%s\\n' "${FAKE_TOKEN_MODE:?}" ;;
+  '%u') printf '%s\\n' "${FAKE_TOKEN_OWNER_UID:?}" ;;
+  *) exit 64 ;;
+esac
+""",
+    )
+    _write_fake_command(
+        fake_bin / "docker",
+        """#!/usr/bin/env bash
+: > "${FAKE_DOCKER_MARKER:?}"
+if [[ -n "${FAKE_DOCKER_SIGNAL:-}" ]]; then
+  kill "-${FAKE_DOCKER_SIGNAL}" "$$"
+fi
+exit "${FAKE_DOCKER_EXIT:-0}"
+""",
+    )
+
+    token_file = tmp_path / "deployment-token"
+    token_file.write_text("ephemeral-fixture-token", encoding="utf-8")
+    empty_token_file = tmp_path / "empty-token"
+    empty_token_file.write_text("", encoding="utf-8")
+    symlink_token_file = tmp_path / "symlink-token"
+    symlink_token_file.symlink_to(token_file)
+    directory_token_file = tmp_path / "token-directory"
+    directory_token_file.mkdir()
+    missing_token_file = tmp_path / "missing-token"
+
+    def run_case(
+        name: str,
+        *,
+        path: Path | None,
+        mode: str = "600",
+        actual_owner_uid: str = "1000",
+        expected_owner_uid: str = "1000",
+        docker_exit: int = 0,
+        docker_signal: str = "",
+        context: str = "top-level",
+    ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+        docker_marker = tmp_path / f"docker-called-{name}"
+        success_marker = tmp_path / f"calibration-succeeded-{name}"
+        handler_marker = tmp_path / f"failure-handler-called-{name}"
+        environment = {
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_TOKEN_MODE": mode,
+            "FAKE_TOKEN_OWNER_UID": actual_owner_uid,
+            "FAKE_DOCKER_MARKER": str(docker_marker),
+            "FAKE_DOCKER_EXIT": str(docker_exit),
+            "FAKE_DOCKER_SIGNAL": docker_signal,
+        }
+        rendered = _render_calibration_shell(
+            shell,
+            token_file=path,
+            owner_uid=expected_owner_uid,
+        )
+        if context == "or-handler":
+            command = f"""(
+{rendered}
+) || {{
+  : > {shlex.quote(str(handler_marker))}
+  exit 0
+}}
+: > {shlex.quote(str(success_marker))}
+"""
+        elif context == "if-condition":
+            command = f"""if (
+{rendered}
+); then
+  : > {shlex.quote(str(success_marker))}
+else
+  : > {shlex.quote(str(handler_marker))}
+fi
+"""
+        else:
+            assert context == "top-level"
+            command = rendered
+        result = subprocess.run(
+            ["bash", "-c", command],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result, docker_marker, success_marker, handler_marker
+
+    success, success_marker, _, _ = run_case("success", path=token_file)
+    assert success.returncode == 0, success.stderr
+    assert success_marker.is_file()
+
+    invalid_cases = (
+        ("wrong-mode", token_file, {"mode": "644"}),
+        (
+            "owner-mismatch",
+            token_file,
+            {"actual_owner_uid": "2000"},
+        ),
+        ("symlink", symlink_token_file, {}),
+        ("empty", empty_token_file, {}),
+        ("missing", missing_token_file, {}),
+        ("unset-path", None, {}),
+        ("not-regular", directory_token_file, {}),
+    )
+    for name, path, overrides in invalid_cases:
+        result, marker, _, _ = run_case(name, path=path, **overrides)
+        assert result.returncode != 0, name
+        assert not marker.exists(), name
+
+    for context in ("or-handler", "if-condition"):
+        for name, path, overrides in invalid_cases:
+            result, docker_marker, success_marker, handler_marker = run_case(
+                f"{context}-{name}",
+                path=path,
+                context=context,
+                **overrides,
+            )
+            assert result.returncode == 0, (context, name, result.stderr)
+            assert not docker_marker.exists(), (context, name)
+            assert not success_marker.exists(), (context, name)
+            assert handler_marker.is_file(), (context, name)
+
+    compose_failure, compose_failure_marker, _, _ = run_case(
+        "compose-failure",
+        path=token_file,
+        docker_exit=37,
+    )
+    assert compose_failure.returncode == 37
+    assert compose_failure_marker.is_file()
+
+    compose_interrupt, compose_interrupt_marker, _, _ = run_case(
+        "compose-interrupt",
+        path=token_file,
+        docker_signal="TERM",
+    )
+    assert compose_interrupt.returncode == 128 + signal.SIGTERM
+    assert compose_interrupt_marker.is_file()
