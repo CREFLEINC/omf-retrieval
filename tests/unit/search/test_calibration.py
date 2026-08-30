@@ -3,19 +3,121 @@
 import json
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
+from omf_retrieval.application.indexing.config_identity import (
+    document_embedding_config_hash,
+)
 from omf_retrieval.application.search.calibration import (
     KnownEvidenceScores,
     assess_calibration,
 )
 from omf_retrieval.application.search.ports import Candidate, Origin, ScoredCandidate
+from omf_retrieval.settings import Settings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = REPOSITORY_ROOT / "config/smoke/omf_mvp_v2.json"
 HARNESS = runpy.run_path(str(REPOSITORY_ROOT / "scripts/calibrate_search.py"))
+
+
+def _collect_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    repository_error: Exception | None = None,
+) -> tuple[dict[str, object], object]:
+    collect = HARNESS["_collect"]
+    assert callable(collect)
+    globals_ = collect.__globals__
+    captured: dict[str, object] = {}
+    embedding_config = {
+        "document": {
+            "provider": "sentence-transformers",
+            "model_name": "fixture/model",
+            "revision": "a" * 40,
+            "dimension": 1,
+            "normalize_embeddings": True,
+            "library_name": "sentence-transformers",
+            "library_version": "5.1.0",
+        },
+        "query": {"instruction": "Query: {query}"},
+    }
+    settings = Settings(environment="test", api_token="fixture-token")
+
+    class FakeEngine:
+        def dispose(self) -> None:
+            captured["disposed"] = True
+
+    class FakeEmbeddings:
+        def __init__(self, actual_settings: Settings) -> None:
+            assert actual_settings is settings
+            self.embedding_config_snapshot = SimpleNamespace(
+                as_config=lambda: embedding_config
+            )
+            self.descriptor = SimpleNamespace()
+
+        def embed_query(self, _query: str) -> tuple[float, ...]:
+            return (1.0,)
+
+    class FakeRepository:
+        def __init__(self, transactions: object, **kwargs: object) -> None:
+            if repository_error is not None:
+                raise repository_error
+            captured["transactions"] = transactions
+            captured["repository_kwargs"] = kwargs
+
+        def retrieve_for_calibration(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return SimpleNamespace(keyword=(), vector=())
+
+    class FakeAccess:
+        def __init__(self, _repository: object) -> None:
+            pass
+
+        def execute_authorized(
+            self, token: str, source_key: str, operation: object
+        ) -> object:
+            captured["credential"] = (token, source_key)
+            return operation(SimpleNamespace())  # type: ignore[operator]
+
+    transactions = object()
+    monkeypatch.setitem(globals_, "Settings", lambda: settings)
+    monkeypatch.setitem(globals_, "create_database_engine", lambda _url: FakeEngine())
+    monkeypatch.setitem(
+        globals_, "create_session_factory", lambda _engine: transactions
+    )
+    monkeypatch.setitem(globals_, "database_url_from_environment", lambda: "fixture")
+    monkeypatch.setitem(
+        globals_, "SentenceTransformerEmbeddingProvider", FakeEmbeddings
+    )
+    monkeypatch.setitem(globals_, "PostgresHybridSearchRepository", FakeRepository)
+    monkeypatch.setitem(globals_, "PostgresClientRepository", lambda _value: object())
+    monkeypatch.setitem(globals_, "ClientAccessService", FakeAccess)
+    monkeypatch.setitem(
+        globals_,
+        "_load_cases",
+        lambda: [
+            {
+                "id": "known",
+                "category": "known",
+                "query": "known query",
+                "expected_status": "ok",
+                "acceptable_evidence": [],
+            },
+            {
+                "id": "unknown",
+                "category": "unknown",
+                "query": "unknown query",
+                "expected_status": "no_evidence",
+            },
+        ],
+    )
+    captured["expected_embedding_hash"] = document_embedding_config_hash(
+        embedding_config
+    )
+    return captured, collect
 
 
 def test_positive_margin_is_calibratable() -> None:
@@ -182,6 +284,22 @@ def test_calibrated_floor_is_the_next_representable_float_above_unknown() -> Non
     assert strict_floor_above(0.4834405039715637) == 0.48344050397156374
 
 
+def test_collect_uses_the_document_embedding_identity_for_current_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured, collect = _collect_fakes(monkeypatch)
+
+    report = collect()
+
+    assert report["status"] == "blocked"
+    assert captured["repository_kwargs"] == {
+        "embedding_config_hash": captured["expected_embedding_hash"],
+        "embedding_provider": "sentence-transformers",
+    }
+    assert captured["credential"] == ("fixture-token", "omf")
+    assert captured["disposed"] is True
+
+
 def test_calibration_output_contains_minimal_raw_provenance_without_excerpt() -> None:
     candidate = ScoredCandidate(
         Candidate(
@@ -225,6 +343,21 @@ def test_calibration_failure_output_does_not_echo_private_exception(
     monkeypatch.setitem(main.__globals__, "_collect", fail)
 
     assert main() == 2
+    assert capsys.readouterr().out == (
+        '{"code":"calibration_unavailable","status":"unavailable"}\n'
+    )
+
+
+def test_repository_assembly_failure_remains_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _captured, _collect = _collect_fakes(
+        monkeypatch,
+        repository_error=RuntimeError("secret-token private-host /private/source"),
+    )
+
+    assert HARNESS["main"]() == 2
     assert capsys.readouterr().out == (
         '{"code":"calibration_unavailable","status":"unavailable"}\n'
     )

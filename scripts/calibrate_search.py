@@ -10,12 +10,12 @@ from typing import Any
 from omf_retrieval.application.admin.service import ClientAccessService
 from omf_retrieval.application.indexing.config_identity import (
     document_embedding_config_hash,
+    validated_embedding_config,
 )
 from omf_retrieval.application.search.calibration import (
     KnownEvidenceScores,
     assess_calibration,
 )
-from omf_retrieval.application.search.policy import retrieval_config_snapshot
 from omf_retrieval.application.search.ports import CandidateBatch, ScoredCandidate
 from omf_retrieval.infrastructure.database.repository_auth import (
     PostgresClientRepository,
@@ -130,14 +130,12 @@ def _collect() -> dict[str, object]:
     try:
         transactions = create_session_factory(engine)
         embeddings = SentenceTransformerEmbeddingProvider(settings)
+        embedding_config = embeddings.embedding_config_snapshot.as_config()
+        document_config, _query_config = validated_embedding_config(embedding_config)
         repository = PostgresHybridSearchRepository(
             transactions,
-            embedding_config_hash=(
-                document_embedding_config_hash(
-                    embeddings.embedding_config_snapshot.as_config()
-                )
-            ),
-            retrieval_config=retrieval_config_snapshot(settings),
+            embedding_config_hash=document_embedding_config_hash(embedding_config),
+            embedding_provider=document_config["provider"],  # type: ignore[arg-type]
         )
         access = ClientAccessService(PostgresClientRepository(transactions))
         cases = _load_cases()
