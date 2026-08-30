@@ -107,7 +107,9 @@ _ACTIVE_INDEX_SQL = text(
         ic.embedding_config -> 'document' ->> 'model_name' AS model_name,
         ic.embedding_config -> 'document' ->> 'revision' AS model_revision,
         (ic.embedding_config -> 'document' ->> 'dimension')::integer AS dimension,
-        ic.rrf_config
+        ic.embedding_config -> 'document' ->> 'provider' AS provider,
+        (ic.embedding_config -> 'document' ->> 'normalize_embeddings')::boolean
+            AS normalize_embeddings
     FROM source_profiles AS sp
     JOIN index_runs AS ir ON ir.id = sp.active_index_run_id
         AND ir.source_profile_id = sp.id
@@ -252,7 +254,7 @@ class PostgresHybridSearchRepository:
         transactions: sessionmaker[Session],
         *,
         embedding_config_hash: str,
-        retrieval_config: dict[str, object],
+        embedding_provider: str,
     ) -> None:
         if (
             type(embedding_config_hash) is not str
@@ -261,22 +263,28 @@ class PostgresHybridSearchRepository:
             raise ValueError("Invalid embedding config hash")
         self._transactions = transactions
         self._embedding_config_hash = embedding_config_hash
-        try:
-            self._retrieval_config = dict(validated_retrieval_config(retrieval_config))
-        except (IndexConfigValidationError, TypeError, ValueError):
-            raise ValueError("Invalid retrieval config") from None
+        if type(embedding_provider) is not str or not embedding_provider.strip():
+            raise ValueError("Invalid embedding provider")
+        self._embedding_provider = embedding_provider
 
     def active_index(
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> ActiveIndex:
         """Resolve the locked active coordinate before model inference."""
         _validate_authorized(authorized)
         try:
             with self._transactions.begin() as database_session:
                 self._require_grant(database_session, authorized)
-                return self._active_index(database_session, authorized, descriptor)
+                return self._active_index(
+                    database_session,
+                    authorized,
+                    descriptor,
+                    normalize_embeddings=normalize_embeddings,
+                )
         except (SourceAccessError, NoActiveIndexError, SearchUnavailableError):
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -293,6 +301,7 @@ class PostgresHybridSearchRepository:
         *,
         keyword_limit: int,
         vector_limit: int,
+        normalize_embeddings: bool,
         keyword_similarity_floor: float,
         vector_similarity_floor: float,
     ) -> CandidateBatch:
@@ -301,7 +310,12 @@ class PostgresHybridSearchRepository:
         try:
             with self._transactions.begin() as database_session:
                 self._require_grant(database_session, authorized)
-                active = self._active_index(database_session, authorized, descriptor)
+                active = self._active_index(
+                    database_session,
+                    authorized,
+                    descriptor,
+                    normalize_embeddings=normalize_embeddings,
+                )
                 keyword_rows = database_session.execute(
                     keyword_candidate_statement(
                         authorized.client.client_id,
@@ -341,6 +355,7 @@ class PostgresHybridSearchRepository:
         *,
         keyword_limit: int,
         vector_limit: int,
+        normalize_embeddings: bool = True,
     ) -> CandidateBatch:
         """Return nonnegative raw-score candidates without enabling public search."""
         _validate_authorized(authorized)
@@ -351,7 +366,7 @@ class PostgresHybridSearchRepository:
                     database_session,
                     authorized,
                     descriptor,
-                    require_calibrated=False,
+                    normalize_embeddings=normalize_embeddings,
                 )
                 keyword_rows = database_session.execute(
                     keyword_candidate_statement(
@@ -387,13 +402,20 @@ class PostgresHybridSearchRepository:
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> bool:
         """Check DB, transactional grant, active run, and model identity."""
         try:
             _validate_authorized(authorized)
             with self._transactions.begin() as database_session:
                 self._require_grant(database_session, authorized)
-                self._active_index(database_session, authorized, descriptor)
+                self._active_index(
+                    database_session,
+                    authorized,
+                    descriptor,
+                    normalize_embeddings=normalize_embeddings,
+                )
             return True
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -418,7 +440,7 @@ class PostgresHybridSearchRepository:
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
         *,
-        require_calibrated: bool = True,
+        normalize_embeddings: bool,
     ) -> ActiveIndex:
         row = (
             database_session.execute(
@@ -432,15 +454,13 @@ class PostgresHybridSearchRepository:
         )
         if row is None:
             raise NoActiveIndexError
-        validate_persisted_retrieval_config(
-            row["rrf_config"],
-            expected=self._retrieval_config,
-            require_calibrated=require_calibrated,
-        )
         if (
-            row["model_name"] != descriptor.model_name
+            row["provider"] != self._embedding_provider
+            or row["model_name"] != descriptor.model_name
             or row["model_revision"] != descriptor.revision
             or row["dimension"] != descriptor.dimension
+            or type(normalize_embeddings) is not bool
+            or row["normalize_embeddings"] is not normalize_embeddings
         ):
             raise SearchUnavailableError
         try:
@@ -524,7 +544,7 @@ def _validate_identity(client_id: object, source_key: object, limit: object) -> 
         or type(source_key) is not str
         or source_key != "omf"
         or type(limit) is not int
-        or limit != 50
+        or limit <= 0
     ):
         raise ValueError("Invalid candidate policy")
 

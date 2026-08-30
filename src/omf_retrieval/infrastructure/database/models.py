@@ -55,6 +55,34 @@ class SourceProfile(Base):
     active_index_run_id: Mapped[UUID | None] = mapped_column(postgresql.UUID())
 
 
+class SearchPolicyManifest(Base):
+    """An immutable canonical query-time search policy snapshot."""
+
+    __tablename__ = "search_policy_manifests"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "config_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_search_policy_manifests_config_hash_sha256",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(snapshot) = 'object'",
+            name="ck_search_policy_manifests_snapshot_object",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_search_policy_manifests"),
+        sa.UniqueConstraint(
+            "config_hash",
+            name="uq_search_policy_manifests_config_hash",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(postgresql.UUID(), default=uuid.uuid4)
+    config_hash: Mapped[str] = mapped_column(sa.String(64))
+    snapshot: Mapped[dict[str, Any]] = mapped_column(postgresql.JSONB())
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.text("now()")
+    )
+
+
 class IndexConfig(Base):
     """An immutable parser, chunking, embedding, and ranking configuration."""
 
@@ -704,6 +732,7 @@ __all__ = [
     "IndexConfig",
     "IndexRun",
     "SearchAuditEvent",
+    "SearchPolicyManifest",
     "Section",
     "SourceProfile",
 ]

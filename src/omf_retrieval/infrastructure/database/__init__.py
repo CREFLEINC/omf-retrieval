@@ -13,6 +13,7 @@ from omf_retrieval.infrastructure.database.models import (
     IndexConfig,
     IndexRun,
     SearchAuditEvent,
+    SearchPolicyManifest,
     Section,
     SourceProfile,
 )
@@ -23,6 +24,9 @@ from omf_retrieval.infrastructure.database.repository_auth import (
 from omf_retrieval.infrastructure.database.repository_config import (
     IndexConfigurationBinding,
     PostgresIndexConfigurationRepository,
+)
+from omf_retrieval.infrastructure.database.repository_policy import (
+    PostgresSearchPolicyRepository,
 )
 from omf_retrieval.infrastructure.database.search import (
     PostgresHybridSearchRepository,
@@ -48,7 +52,9 @@ __all__ = [
     "PostgresClientRepository",
     "PostgresHybridSearchRepository",
     "PostgresIndexConfigurationRepository",
+    "PostgresSearchPolicyRepository",
     "SearchAuditEvent",
+    "SearchPolicyManifest",
     "Section",
     "SourceProfile",
     "create_database_engine",

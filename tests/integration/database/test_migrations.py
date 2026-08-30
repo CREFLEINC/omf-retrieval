@@ -53,6 +53,7 @@ APPLICATION_TABLES = {
     "index_configs",
     "index_runs",
     "search_audit_events",
+    "search_policy_manifests",
     "sections",
     "source_profiles",
 }
@@ -186,6 +187,33 @@ EXPECTED_COLUMNS = {
         "rrf_ms integer required",
         "total_ms integer required",
     },
+    "search_policy_manifests": {
+        "id uuid required",
+        "config_hash character varying(64) required",
+        "snapshot jsonb required",
+        "created_at timestamp with time zone required",
+    },
+}
+
+LEGACY_EMBEDDING_CONFIG = {
+    "document": {
+        "provider": "sentence-transformers",
+        "model_name": "Qwen/Qwen3-Embedding-0.6B",
+        "revision": "revision-1",
+        "dimension": 1024,
+        "normalize_embeddings": True,
+        "library_name": "sentence-transformers",
+        "library_version": "5.7.0",
+    },
+    "query": {"instruction": "Instruct: {query}"},
+}
+LEGACY_RETRIEVAL_CONFIG = {
+    "k": 60,
+    "keyword_weight": 1.0,
+    "vector_weight": 1.0,
+    "keyword_similarity_floor": 0.03658536400000001,
+    "vector_similarity_floor": 0.48344050397156374,
+    "evidence_floor_status": "calibrated",
 }
 
 
@@ -275,6 +303,32 @@ def activation_parent_revision(
         command.upgrade(alembic_config, "head")
 
 
+@pytest.fixture
+def policy_parent_revision(
+    database_connection: Connection,
+    alembic_config: Config,
+) -> Iterator[None]:
+    """Start at 0002 and restore an empty head schema after a policy test."""
+    database_connection.rollback()
+    command.downgrade(alembic_config, "0002_index_run_lifecycle")
+    try:
+        yield
+    finally:
+        database_connection.rollback()
+        command.downgrade(alembic_config, "0002_index_run_lifecycle")
+        database_connection.execute(
+            text("UPDATE source_profiles SET active_index_run_id = NULL")
+        )
+        database_connection.execute(text("DELETE FROM client_source_grants"))
+        database_connection.execute(text("DELETE FROM api_clients"))
+        database_connection.execute(text("DELETE FROM index_runs"))
+        database_connection.execute(text("DELETE FROM source_profiles"))
+        database_connection.execute(text("DELETE FROM index_configs"))
+        database_connection.execute(text("DELETE FROM document_contents"))
+        database_connection.commit()
+        command.upgrade(alembic_config, "head")
+
+
 def _seed_parent_lifecycle_rows(
     connection: Connection,
     *,
@@ -292,9 +346,15 @@ def _seed_parent_lifecycle_rows(
             "INSERT INTO index_configs "
             "(id, config_hash, parser_config, chunk_config, tokenizer_config, "
             "embedding_config, rrf_config) VALUES "
-            "(:id, :hash, '{}', '{}', '{}', '{}', '{}')"
+            "(:id, :hash, '{}', '{}', '{}', CAST(:embedding AS jsonb), "
+            "CAST(:retrieval AS jsonb))"
         ),
-        {"id": config_id, "hash": "a" * 64},
+        {
+            "id": config_id,
+            "hash": "a" * 64,
+            "embedding": json.dumps(LEGACY_EMBEDDING_CONFIG),
+            "retrieval": json.dumps(LEGACY_RETRIEVAL_CONFIG),
+        },
     )
     for ordinal, (run_id, status) in enumerate(zip(run_ids, statuses, strict=True)):
         connection.execute(
@@ -1038,6 +1098,273 @@ def test_activation_migration_refuses_lossy_archived_downgrade(
 
     with pytest.raises(DBAPIError, match="cannot downgrade with archived index runs"):
         command.downgrade(alembic_config, "0001_initial_schema")
+
+
+def test_policy_migration_backfills_deduplicates_and_preserves_legacy_rows(
+    database_connection: Connection,
+    alembic_config: Config,
+    policy_parent_revision: None,
+) -> None:
+    """Two legacy runs sharing a policy produce one reversible manifest."""
+    source_id = uuid4()
+    config_ids = (uuid4(), uuid4())
+    run_ids = (uuid4(), uuid4())
+    artifact_ids = {
+        name: uuid4()
+        for name in (
+            "content",
+            "occurrence",
+            "parse",
+            "section",
+            "chunk",
+            "embedding",
+            "client",
+        )
+    }
+    database_connection.execute(
+        text("INSERT INTO source_profiles (id, source_key) VALUES (:id, 'omf')"),
+        {"id": source_id},
+    )
+    for ordinal, (config_id, run_id) in enumerate(
+        zip(config_ids, run_ids, strict=True)
+    ):
+        database_connection.execute(
+            text(
+                "INSERT INTO index_configs "
+                "(id, config_hash, parser_config, chunk_config, tokenizer_config, "
+                "embedding_config, rrf_config) VALUES "
+                "(:id, :hash, '{}', '{}', '{}', CAST(:embedding AS jsonb), "
+                "CAST(:retrieval AS jsonb))"
+            ),
+            {
+                "id": config_id,
+                "hash": str(ordinal + 1) * 64,
+                "embedding": json.dumps(LEGACY_EMBEDDING_CONFIG),
+                "retrieval": json.dumps(LEGACY_RETRIEVAL_CONFIG),
+            },
+        )
+        database_connection.execute(
+            text(
+                "INSERT INTO index_runs "
+                "(id, source_profile_id, index_config_id, commit_sha, status, "
+                "activated_at) VALUES "
+                "(:id, :source, :config, :commit, :status, now())"
+            ),
+            {
+                "id": run_id,
+                "source": source_id,
+                "config": config_id,
+                "commit": str(ordinal + 1) * 40,
+                "status": "active" if ordinal == 0 else "previous",
+            },
+        )
+    database_connection.execute(
+        text(
+            "UPDATE source_profiles SET active_index_run_id = :run WHERE id = :source"
+        ),
+        {"run": run_ids[0], "source": source_id},
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO document_contents (id, content_hash, content, byte_size) "
+            "VALUES (:id, :hash, 'body', 4)"
+        ),
+        {"id": artifact_ids["content"], "hash": "c" * 64},
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO document_occurrences "
+            "(id, run_id, content_id, source_path, version_scope, decision_state, "
+            "owner_domain) VALUES "
+            "(:id, :run, :content, 'design/wiki/a.md', 'current', 'confirmed', "
+            "'docs')"
+        ),
+        {
+            "id": artifact_ids["occurrence"],
+            "run": run_ids[0],
+            "content": artifact_ids["content"],
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO document_parses "
+            "(id, content_id, parser_version, chunk_config_hash, section_count, "
+            "chunk_count, artifact_hash) VALUES "
+            "(:id, :content, 'parser-v1', :chunk_hash, 1, 1, :artifact_hash)"
+        ),
+        {
+            "id": artifact_ids["parse"],
+            "content": artifact_ids["content"],
+            "chunk_hash": "d" * 64,
+            "artifact_hash": "e" * 64,
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO sections "
+            "(id, parse_id, ordinal, level, heading, heading_path, body, "
+            "line_start, line_end) VALUES "
+            "(:id, :parse, 0, 1, 'A', ARRAY['A'], 'body', 1, 1)"
+        ),
+        {"id": artifact_ids["section"], "parse": artifact_ids["parse"]},
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO chunks "
+            "(id, section_id, ordinal, raw_text, search_text, token_count, "
+            "line_start, line_end, chunk_hash) VALUES "
+            "(:id, :section, 0, 'body', '# A body', 2, 1, 1, :hash)"
+        ),
+        {
+            "id": artifact_ids["chunk"],
+            "section": artifact_ids["section"],
+            "hash": "f" * 64,
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO chunk_embeddings "
+            "(id, chunk_id, embedding_config_hash, model_name, model_revision, "
+            "dimension, embedding) VALUES "
+            "(:id, :chunk, :hash, 'model', 'revision', 3, '[0.1,0.2,0.3]')"
+        ),
+        {
+            "id": artifact_ids["embedding"],
+            "chunk": artifact_ids["chunk"],
+            "hash": "a" * 64,
+        },
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO api_clients (id, name, key_id, token_hash) VALUES "
+            "(:id, 'agent', '1234567890abcdef', :token_hash)"
+        ),
+        {"id": artifact_ids["client"], "token_hash": b"t" * 32},
+    )
+    database_connection.execute(
+        text(
+            "INSERT INTO client_source_grants (client_id, source_profile_id) "
+            "VALUES (:client, :source)"
+        ),
+        {"client": artifact_ids["client"], "source": source_id},
+    )
+    database_connection.commit()
+    preserved_tables = (
+        "source_profiles",
+        "index_runs",
+        "index_configs",
+        "document_contents",
+        "document_occurrences",
+        "document_parses",
+        "sections",
+        "chunks",
+        "chunk_embeddings",
+        "api_clients",
+        "client_source_grants",
+    )
+    before = {
+        table: database_connection.execute(
+            text(f"SELECT count(*) FROM {table}")
+        ).scalar_one()
+        for table in preserved_tables
+    }
+    active_pointer_before = database_connection.execute(
+        text("SELECT active_index_run_id FROM source_profiles WHERE id = :id"),
+        {"id": source_id},
+    ).scalar_one()
+    identity_tables = tuple(
+        table for table in preserved_tables if table != "client_source_grants"
+    )
+    identities_before = {
+        table: tuple(
+            database_connection.execute(
+                text(f"SELECT id FROM {table} ORDER BY id")
+            ).scalars()
+        )
+        for table in identity_tables
+    }
+    grants_before = database_connection.execute(
+        text(
+            "SELECT client_id, source_profile_id FROM client_source_grants "
+            "ORDER BY client_id, source_profile_id"
+        )
+    ).all()
+    legacy_before = database_connection.execute(
+        text(
+            "SELECT id, embedding_config, rrf_config FROM index_configs "
+            "WHERE id = ANY(CAST(:ids AS uuid[])) ORDER BY id"
+        ),
+        {"ids": list(config_ids)},
+    ).all()
+
+    command.upgrade(alembic_config, "head")
+
+    row = database_connection.execute(
+        text("SELECT id, config_hash, snapshot FROM search_policy_manifests")
+    ).one()
+    assert row.snapshot["keyword_candidate_limit"] == 50
+    assert row.snapshot["vector_candidate_limit"] == 50
+    assert row.snapshot["calibration_status"] == "calibrated"
+    first_policy_id = row.id
+    assert before == {
+        table: database_connection.execute(
+            text(f"SELECT count(*) FROM {table}")
+        ).scalar_one()
+        for table in preserved_tables
+    }
+    assert (
+        active_pointer_before
+        == database_connection.execute(
+            text("SELECT active_index_run_id FROM source_profiles WHERE id = :id"),
+            {"id": source_id},
+        ).scalar_one()
+    )
+    assert identities_before == {
+        table: tuple(
+            database_connection.execute(
+                text(f"SELECT id FROM {table} ORDER BY id")
+            ).scalars()
+        )
+        for table in identity_tables
+    }
+    assert (
+        grants_before
+        == database_connection.execute(
+            text(
+                "SELECT client_id, source_profile_id FROM client_source_grants "
+                "ORDER BY client_id, source_profile_id"
+            )
+        ).all()
+    )
+    assert (
+        legacy_before
+        == database_connection.execute(
+            text(
+                "SELECT id, embedding_config, rrf_config FROM index_configs "
+                "WHERE id = ANY(CAST(:ids AS uuid[])) ORDER BY id"
+            ),
+            {"ids": list(config_ids)},
+        ).all()
+    )
+
+    database_connection.commit()
+    command.downgrade(alembic_config, "0002_index_run_lifecycle")
+    assert "search_policy_manifests" not in _application_tables(database_connection)
+    assert before == {
+        table: database_connection.execute(
+            text(f"SELECT count(*) FROM {table}")
+        ).scalar_one()
+        for table in preserved_tables
+    }
+
+    database_connection.commit()
+    command.upgrade(alembic_config, "head")
+    assert (
+        database_connection.execute(
+            text("SELECT id FROM search_policy_manifests")
+        ).scalar_one()
+        == first_policy_id
+    )
 
 
 def test_application_table_set_is_exact(database_connection: Connection) -> None:

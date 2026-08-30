@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import (
     Field,
@@ -22,6 +22,9 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+if TYPE_CHECKING:
+    from omf_retrieval.application.search.policy import SearchPolicySnapshot
 
 _SettingsSource = PydanticBaseSettingsSource | Callable[[], dict[str, Any]]
 _AUDIT_KEY_READ_CHUNK_BYTES = 64 * 1024
@@ -234,24 +237,12 @@ class Settings(BaseSettings):
             ValueError: If a bound, device, or required secret path is invalid.
         """
         self._require_positive_limits()
-        self._require_fixed_mvp_search_policy()
         self._require_valid_evidence_floors()
         if self.search_default_limit > self.search_max_limit:
             raise ValueError("search_default_limit must not exceed search_max_limit")
         if self.environment == "production":
             self._require_production_safeguards()
         return self
-
-    def _require_fixed_mvp_search_policy(self) -> None:
-        """Reject configuration that would silently change approved retrieval."""
-        if (
-            self.keyword_candidate_limit != MVP_KEYWORD_CANDIDATE_LIMIT
-            or self.vector_candidate_limit != MVP_VECTOR_CANDIDATE_LIMIT
-            or self.rrf_k != MVP_RRF_K
-            or self.keyword_weight != MVP_KEYWORD_WEIGHT
-            or self.vector_weight != MVP_VECTOR_WEIGHT
-        ):
-            raise ValueError("MVP search policy is fixed")
 
     def _require_positive_limits(self) -> None:
         """Require every approved dimension and limit to be positive."""
@@ -322,6 +313,30 @@ class Settings(BaseSettings):
         self._audit_hmac_key = loaded.key
         self._audit_hmac_key_path = loaded.path
         self._audit_hmac_key_identity = loaded.identity
+
+    def search_policy_snapshot(self) -> "SearchPolicySnapshot":
+        """Build the exact immutable query-time policy selected by this runtime."""
+        from omf_retrieval.application.search.policy import (
+            validated_search_policy_snapshot,
+        )
+
+        return validated_search_policy_snapshot(
+            {
+                "query_embedding_model_name": self.embedding_model_name,
+                "query_embedding_revision": self.embedding_model_revision,
+                "query_embedding_dimension": self.embedding_dimension,
+                "query_embedding_normalize_embeddings": True,
+                "query_instruction": self.query_instruction,
+                "keyword_candidate_limit": self.keyword_candidate_limit,
+                "vector_candidate_limit": self.vector_candidate_limit,
+                "rrf_k": self.rrf_k,
+                "keyword_weight": self.keyword_weight,
+                "vector_weight": self.vector_weight,
+                "keyword_similarity_floor": self.keyword_similarity_floor,
+                "vector_similarity_floor": self.vector_similarity_floor,
+                "calibration_status": self.evidence_floor_status,
+            }
+        )
 
 
 def _canonical_audit_key_path(path: object) -> Path:

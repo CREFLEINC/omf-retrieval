@@ -154,6 +154,8 @@ class SearchRepository(Protocol):
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> ActiveIndex:
         """Resolve the active authorized run before query-model inference."""
 
@@ -166,6 +168,7 @@ class SearchRepository(Protocol):
         *,
         keyword_limit: int,
         vector_limit: int,
+        normalize_embeddings: bool,
         keyword_similarity_floor: float,
         vector_similarity_floor: float,
     ) -> CandidateBatch:
@@ -175,6 +178,8 @@ class SearchRepository(Protocol):
         self,
         authorized: AuthorizedSource,
         descriptor: EmbeddingDescriptor,
+        *,
+        normalize_embeddings: bool,
     ) -> bool:
         """Return exact DB, grant, active-index, and model-config readiness."""
 

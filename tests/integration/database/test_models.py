@@ -25,6 +25,7 @@ EXPECTED_TABLE_NAMES = {
     "index_configs",
     "index_runs",
     "search_audit_events",
+    "search_policy_manifests",
     "sections",
     "source_profiles",
 }
@@ -63,6 +64,7 @@ def test_mapper_registry_has_exact_model_class_set() -> None:
         "IndexConfig",
         "IndexRun",
         "SearchAuditEvent",
+        "SearchPolicyManifest",
         "Section",
         "SourceProfile",
     }

@@ -39,10 +39,10 @@ REQUIRED_FILES = (
 
 PRESERVED_AGENTS_SECTION_HASHES = {
     "프로젝트 목표와 경계": (
-        "62ba720e25d07aa9e08d3764f7c7ea0ca0e119904ae344fa491c5da942043410"
+        "caab8c44198fb61bd5fbf4c997a7429a572060a583ef74bea4e4e957896871de"
     ),
     "단계별 공동 진행": (
-        "fc386a5312a7842a2c52e97ef655ba08c622e8e2fbf917284426065ed32f932b"
+        "4215e312744358d6f377e880c7185bb241c7e87f5c40bf87408b8f894d6ca1ae"
     ),
     "사용자 승인 필수 의사결정": (
         "84e3565fb83eb843777eea3410a5018f512512dc0cf0a04ec8cb9ab94887aae1"
@@ -52,7 +52,7 @@ PRESERVED_AGENTS_SECTION_HASHES = {
         "1d6dd71cd362f9989e0a88b2d9ed1d1e9b729c72562c64df802f617f58636618"
     ),
     "확정된 MVP 설계 결정": (
-        "3b9eaa8da5f09d8594de54f4a495b30fbe613ad328dae90ed8b5a7e11d46e2e7"
+        "19c7123445c5ab65ac07278a80a9e009daafee19e9467c22ff4da249b2a68fe6"
     ),
     "내부 모델 서버 현황": (
         "588b399157714c854352e4ec617fec4757452e52353e61f6d764aadb5882318a"
