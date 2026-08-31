@@ -69,8 +69,9 @@ class _UnavailableSearchService:
         _query: str,
         *,
         limit: int,
+        relevance_level: str = "default",
     ) -> SearchResult:
-        del limit
+        del limit, relevance_level
         raise SearchUnavailableError
 
     def is_ready(self, _authorized: AuthorizedSource) -> bool:

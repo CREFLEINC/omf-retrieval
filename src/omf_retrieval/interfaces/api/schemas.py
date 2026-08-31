@@ -13,6 +13,7 @@ class SearchRequest(BaseModel):
 
     query: StrictStr
     limit: StrictInt = Field(default=5, ge=1, le=20)
+    relevance_level: Literal["default", "strict"] = "default"
 
     @field_validator("query")
     @classmethod

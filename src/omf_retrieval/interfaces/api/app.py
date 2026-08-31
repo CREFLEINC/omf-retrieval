@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.responses import Response
 
 from omf_retrieval.application.admin.tokens import (
     AuthenticationError,
@@ -38,6 +40,7 @@ class _SearchService(Protocol):
         query: str,
         *,
         limit: int,
+        relevance_level: str = "default",
     ) -> SearchResult: ...
 
     def is_ready(self, authorized: AuthorizedSource) -> bool: ...
@@ -47,8 +50,10 @@ def create_app(
     *,
     access_service: _AccessService | None = None,
     search_service: _SearchService | None = None,
+    web_dist: Path | None = None,
 ) -> FastAPI:
     """Create a side-effect-free app whose runtime services are injectable."""
+    resolved_web_dist = (web_dist or Path.cwd() / "web" / "dist").resolve()
     application = FastAPI(
         title="OMF Retrieval",
         docs_url=None,
@@ -59,6 +64,9 @@ def create_app(
     @application.middleware("http")
     async def request_identity(request: Request, call_next: object) -> object:
         request.state.request_id = str(uuid4())
+        web_response = _web_response(request, resolved_web_dist)
+        if web_response is not None:
+            return web_response
         return await call_next(request)  # type: ignore[operator]
 
     @application.exception_handler(RequestValidationError)
@@ -85,6 +93,7 @@ def create_app(
                     authorized,
                     payload.query,
                     limit=payload.limit,
+                    relevance_level=payload.relevance_level,
                 ),
             )
             if type(result) is not SearchResult:
@@ -133,6 +142,30 @@ def create_app(
             return _known_error(request, SearchUnavailableError())
 
     return application
+
+
+def _web_response(request: Request, web_dist: Path) -> Response | None:
+    """Return a built web file without intercepting API and health namespaces."""
+    if request.method not in {"GET", "HEAD"} or _is_service_path(request.url.path):
+        return None
+
+    index_file = web_dist / "index.html"
+    if not index_file.is_file():
+        return None
+
+    requested_path = request.url.path.lstrip("/")
+    if requested_path:
+        requested_file = (web_dist / requested_path).resolve()
+        if requested_file.is_relative_to(web_dist) and requested_file.is_file():
+            return FileResponse(requested_file)
+        if requested_path.startswith("assets/"):
+            return None
+
+    return FileResponse(index_file)
+
+
+def _is_service_path(path: str) -> bool:
+    return path in {"/v1", "/health"} or path.startswith(("/v1/", "/health/"))
 
 
 def _bearer_token(request: Request) -> str:

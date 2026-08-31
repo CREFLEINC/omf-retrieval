@@ -1,6 +1,7 @@
 """Application search service contracts with deterministic fakes."""
 
 import inspect
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -17,6 +18,7 @@ from omf_retrieval.application.search import (
     Origin,
     ScoredCandidate,
     SearchPolicyManifest,
+    SearchResult,
     SearchService,
     SearchUnavailableError,
     validated_search_policy_snapshot,
@@ -38,6 +40,18 @@ CANDIDATE = Candidate(
     origins=(Origin("design/wiki/policy.md", "b" * 64),),
 )
 DEFAULT_BATCH = CandidateBatch(ACTIVE, (ScoredCandidate(CANDIDATE, 0.5),), ())
+
+
+def _candidate(identity: int, parent_identity: int) -> Candidate:
+    return Candidate(
+        chunk_id=UUID(int=identity),
+        parent_id=UUID(int=parent_identity),
+        heading_path=(f"정책 {parent_identity}",),
+        excerpt=f"근거 {identity}",
+        line_start=identity,
+        line_end=identity,
+        origins=(Origin(f"design/wiki/policy-{identity}.md", f"{identity:064x}"),),
+    )
 
 
 def _manifest(settings: Settings, policy_id: int = 7) -> SearchPolicyManifest:
@@ -149,6 +163,20 @@ def _service(
     )
 
 
+def _search_with_relevance(
+    service: SearchService,
+    relevance_level: Literal["default", "strict"],
+    *,
+    limit: int,
+) -> SearchResult:
+    return service.search(
+        AUTHORIZED,
+        "관련 질문",
+        limit=limit,
+        relevance_level=relevance_level,
+    )
+
+
 def test_search_service_requires_one_startup_resolved_policy_manifest() -> None:
     parameters = inspect.signature(SearchService).parameters
 
@@ -216,6 +244,102 @@ def test_candidates_at_or_above_either_lane_floor_are_retained(
 
     assert result.status == "ok"
     assert len(result.evidence_items) == 1
+
+
+def test_default_relevance_matches_omitted_union_behavior() -> None:
+    keyword_only = _candidate(3, 30)
+    vector_only = _candidate(4, 40)
+    batch = CandidateBatch(
+        ACTIVE,
+        (ScoredCandidate(keyword_only, 0.75),),
+        (ScoredCandidate(vector_only, 0.75),),
+    )
+    service = _service(FakeRepository(batch))
+
+    omitted = service.search(AUTHORIZED, "관련 질문", limit=5)
+    explicit = _search_with_relevance(service, "default", limit=5)
+
+    parameter = inspect.signature(service.search).parameters.get("relevance_level")
+    assert parameter is not None and parameter.default == "default"
+    assert explicit == omitted
+    assert len(explicit.evidence_items) == 2
+
+
+def test_strict_relevance_retains_only_candidates_present_in_both_lanes() -> None:
+    shared = _candidate(3, 30)
+    keyword_only = _candidate(4, 40)
+    vector_only = _candidate(5, 50)
+    batch = CandidateBatch(
+        ACTIVE,
+        (
+            ScoredCandidate(keyword_only, 0.9),
+            ScoredCandidate(shared, 0.8),
+        ),
+        (
+            ScoredCandidate(vector_only, 0.9),
+            ScoredCandidate(shared, 0.8),
+        ),
+    )
+
+    result = _search_with_relevance(_service(FakeRepository(batch)), "strict", limit=5)
+
+    assert result.status == "ok"
+    assert len(result.evidence_items) == 1
+    assert result.evidence_items[0].parent_id == shared.parent_id
+    assert result.evidence_items[0].matches[0].keyword_rank == 1
+    assert result.evidence_items[0].matches[0].vector_rank == 1
+
+
+def test_strict_relevance_applies_limit_after_intersection_filter() -> None:
+    first_shared = _candidate(3, 30)
+    second_shared = _candidate(4, 40)
+    keyword_only = _candidate(5, 50)
+    batch = CandidateBatch(
+        ACTIVE,
+        (
+            ScoredCandidate(keyword_only, 0.95),
+            ScoredCandidate(first_shared, 0.9),
+            ScoredCandidate(second_shared, 0.8),
+        ),
+        (
+            ScoredCandidate(first_shared, 0.9),
+            ScoredCandidate(second_shared, 0.8),
+        ),
+    )
+
+    result = _search_with_relevance(_service(FakeRepository(batch)), "strict", limit=1)
+
+    assert len(result.evidence_items) == 1
+    assert result.evidence_items[0].parent_id == first_shared.parent_id
+
+
+def test_strict_relevance_without_shared_candidates_returns_no_evidence() -> None:
+    keyword_only = _candidate(3, 30)
+    vector_only = _candidate(4, 40)
+    batch = CandidateBatch(
+        ACTIVE,
+        (ScoredCandidate(keyword_only, 0.75),),
+        (ScoredCandidate(vector_only, 0.75),),
+    )
+
+    result = _search_with_relevance(_service(FakeRepository(batch)), "strict", limit=5)
+
+    assert result.status == "no_evidence"
+    assert result.evidence_items == ()
+
+
+def test_strict_relevance_intersects_candidates_after_lane_floors() -> None:
+    shared_before_floors = _candidate(3, 30)
+    batch = CandidateBatch(
+        ACTIVE,
+        (ScoredCandidate(shared_before_floors, 0.249999),),
+        (ScoredCandidate(shared_before_floors, 0.75),),
+    )
+
+    result = _search_with_relevance(_service(FakeRepository(batch)), "strict", limit=5)
+
+    assert result.status == "no_evidence"
+    assert result.evidence_items == ()
 
 
 def test_calibration_pending_fails_search_and_readiness_closed() -> None:
