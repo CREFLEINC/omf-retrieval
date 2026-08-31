@@ -5,11 +5,11 @@
 | 문서 항목 | 값 |
 |---|---|
 | 작성자 | Codex — 사용자 승인 반영 |
-| 작성일시 | 2026-08-29 13:56 KST |
+| 작성일시 | 2026-08-31 07:51 KST |
 | 문서 버전 | v2.1 |
 | 열람 대상 | 프로젝트 관련자 |
 | 기준 설계 | `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.1 |
-| 상태 | MVP 완료 · v2.1 corrective plan 승인 · 진행 중 |
+| 상태 | MVP 완료 · v2.1 corrective 완료 · 공유 배포 완료 |
 
 ## 용어
 
@@ -33,6 +33,7 @@
 
 | 버전 | 작성일시 | 변경 | 작성자 |
 |---|---|---|---|
+| v2.1 | 2026-08-31 07:51 KST | Corrective 단위 1~4 완료, CUDA policy·보존 run·image·rollback 좌표, 최종 smoke·보안·재시작과 공유 API 공개 상태 반영 | Codex — 사용자 승인 반영 |
 | v2.1 | 2026-08-29 13:56 KST | Index identity와 search policy identity 분리, additive policy manifest·API 좌표·rollback, CUDA 보정 corrective plan과 공유 배포 상태 및 승인된 연속 진행 계약 반영 | Codex — 사용자 승인 반영 |
 | v2.0 | 2026-08-27 15:53 KST | 확정 근거 하한선·`no_evidence` 정책, 실제 색인·6개 smoke·품질 관찰과 단위 1~4 독립 검증 결과 반영 | Codex — 사용자 승인 반영 |
 | v2.0 | 2026-08-25 18:52 KST | 사용자 기능을 현재본 근거 검색으로 축소하고 남은 개발을 4개 단위로 재편; v1.2 작업 13~18 전체를 후속으로 이동 | Codex — 사용자 승인 반영 |
@@ -344,13 +345,11 @@ PASS했지만, 이상적 문서의 순위 개선은 정식 평가와 리랭커 �
 
 ## 5. v2.1 corrective 실행 단위
 
-v2.0 완료 구현과 로컬 검증은 유지한다. 공유 RTX 4090 배포에서 문서에 없는 질의가
-vector-only 근거를 반환했으므로 API는 중단한 상태에서 다음 네 단위를 순서대로
-진행한다. 각 단위는 실행 Agent와 별도 검증 Agent를 사용하고 결과·검증 증거와
-진척을 계속 보고한다. 승인 범위 변경·새 의사결정·검증 실패가 없으면 사용자 확인을
-기다리지 않고 다음 단위로 자동 진행한다.
+v2.0 완료 구현과 로컬 검증을 유지했다. 최초 공유 RTX 4090 배포에서 문서에 없는
+질의가 vector-only 근거를 반환해 API를 중단한 뒤 다음 네 단위를 순서대로 수행했다.
+각 단위는 실행 Agent와 별도 검증 Agent를 사용했고 모두 독립 검증 PASS했다.
 
-### Corrective 단위 1. 정본 v2.1 전환 — 진행 중
+### Corrective 단위 1. 정본 v2.1 전환 — 완료 · 독립 검증 PASS
 
 **주제:** Index identity와 search policy identity의 경계를 세 정본에 고정한다.
 
@@ -369,7 +368,7 @@ RED로 확인하고 갱신 뒤 같은 assertion을 GREEN으로 확인한다. HTM
 대조, 로컬 headless browser 렌더·육안 확인, 외부 URL·금지 style 추가 여부와
 `git diff --check`를 실행한다.
 
-### Corrective 단위 2. Search policy storage와 migration
+### Corrective 단위 2. Search policy storage와 migration — 완료 · 독립 검증 PASS
 
 **주제:** 기존 색인과 분리된 immutable search policy manifest를 저장한다.
 
@@ -396,7 +395,7 @@ register/resolve repository와 legacy backfill을 구현한다. 기존 run·conf
 backfill, 같은 정책 동시·반복 register, row/count 불변과 범위 밖 diff를 처음부터
 검증한다.
 
-### Corrective 단위 3. Search core·API policy 분리
+### Corrective 단위 3. Search core·API policy 분리 — 완료 · 독립 검증 PASS
 
 **주제:** Runtime이 선택한 policy로 기존 active index를 검색하고 정책 좌표를 반환한다.
 
@@ -425,7 +424,7 @@ index에서 재현 가능한 결과를 낸다.
 **독립 검증:** 실행 검증 전체와 PostgreSQL에서 policy register/resolve, active index
 호환성, 권한 CTE 선적용, 기존 run·embedding count 불변과 API schema를 검증한다.
 
-### Corrective 단위 4. CUDA 하한선 보정과 공유 배포
+### Corrective 단위 4. CUDA 하한선 보정과 공유 배포 — 완료 · 독립 검증 PASS
 
 **주제:** RTX 4090 실측으로 새 search policy를 결정하고 기존 index로 API를 재가동한다.
 
@@ -454,16 +453,33 @@ Ruff와 `git diff --check`를 다시 검증한다.
 
 ### 현재 공유 배포 상태와 rollback
 
-- API와 `192.168.1.185:9090` listener는 중단했다. PostgreSQL은 healthy다.
+- 최초 CUDA smoke에서 정상 5개는 3·4·1·1·2위였지만 unknown이 vector-only 근거를
+  반환해 FAIL했고 API와 listener를 중단했다. 이는 corrective 전의 역사적 checkpoint다.
+- 2026-08-31 07:43 KST 최종 독립 검증 뒤 API를
+  `http://192.168.1.185:9090`에 공개했다. Container는 running/healthy다.
+- 배포 code commit은 `6a211448d156bf5381277cf6f183ac19ccc94b0f`, image는
+  `sha256:8a8e684aabb28e43ca3b599fa8c6780a6f7c2350ce2bc91ad31976b2267041e6`다.
+- PostgreSQL은 healthy, Alembic은 `0003_search_policy_manifest`, immutable policy
+  row는 2개다.
+- 활성 CUDA policy의 안정 identity인 `config_hash`는
+  `b1758182ed1bef3f87017cd5db45aa0e9829e785004545ddf48a9bc2be4b21bb`다. DB가 resolve한
+  `policy_id` `10e86bbd-55b9-457c-9f73-0ca29d09625b`는 opaque row ID이며 deterministic
+  identity로 사용하지 않는다.
 - Active run은 `427f2c4a-ab06-486a-9801-4bde3ef17d63`, source commit은
   `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2`다.
 - 158개 문서, 4,202개 section, 5,584개 chunk·embedding을 보존한다.
-- CUDA 정상 5개 질의 acceptable evidence는 3·4·1·1·2위였고 unknown은
-  vector-only 근거를 반환해 FAIL했다.
+- 최종 6 smoke는 정상 5개 3·4·1·1·2위, unknown `no_evidence`로 PASS했다. 모든 origin은
+  `design/wiki/**`였고 25개 origin hash와 42개 line coordinate를 대조했다.
+- 보안·로그와 API 재시작 검증은 PASS했다. Mac live는 200, server 공개 URL의 인증된
+  ready는 200이었다. Mac authenticated ready/search는 token boundary 때문에 실행하지 않았다.
 - 사용자가 만든 `local-agent`와 서버 내부 mode `0600` deployment token을 보존한다.
   비밀값, DB URL과 host path는 기록하지 않는다.
+- 재색인, embedding 재생성, client 재발급은 수행하지 않았다.
 - Policy 실패 시 이전 policy 환경설정으로 되돌리고 API만 재시작한다. Policy manifest는
   append-only이며 active run과 embedding을 삭제하지 않는다.
+- Rollback image
+  `sha256:b7a1d0e678c783ffc3e9b0cd663435f7a7b0348739f249109f341863aaf1971e`와
+  Compose-valid legacy policy 환경설정을 보존한다.
 
 ## 6. 단계별 정지 조건
 
@@ -472,8 +488,7 @@ Ruff와 `git diff --check`를 다시 검증한다.
 - 승인 범위 밖 schema·API·dependency·검색 정책 변경이 필요하면 즉시 중단하고 재승인받는다.
 - 단위 4의 독립 검증과 6개 smoke가 모두 끝나기 전에는 MVP 완료를 주장하지 않는다.
   이 조건은 2026-08-27에 충족되었다.
-- v2.1 corrective 단위 2~4는 각각 독립 검증하며, 결과·증거를 계속 보고하고 승인된
-  전체 계획 범위 안에서는 사용자 확인 대기 없이 자동 진행한다. CUDA에서
-  정상·unknown을 분리할 하한선을 찾지 못하거나 identity 분리에 계획 밖 schema/API
-  변경이 필요하면 즉시 중단하고 재승인받는다.
-- 공유 API는 corrective 단위 4의 독립 검증 전까지 중단 상태를 유지한다.
+- v2.1 corrective 단위 2~4는 각각 독립 검증 PASS했다. CUDA에서 정상·unknown을
+  분리할 하한선을 확인했고 계획 밖 schema/API 변경은 없었다.
+- 공유 API 중단 조건은 corrective 단위 4의 독립 검증 완료로 해제되었고 현재 공개
+  상태다. 후속 재배포에서도 같은 gate와 중단 조건을 다시 적용한다.

@@ -70,10 +70,10 @@ def test_reference_metadata_and_fixed_coordinates_are_explicit() -> None:
     metadata = _frontmatter(reference)
 
     assert metadata["author"] == "Codex — 사용자 승인 반영"
-    assert metadata["version"] == "v1.2"
+    assert metadata["version"] == "v1.3"
     assert metadata["audience"] == "프로젝트 관련자"
     assert re.fullmatch(
-        r"2026-08-30 [0-2][0-9]:[0-5][0-9] KST", metadata["modified_at"]
+        r"2026-08-31 [0-2][0-9]:[0-5][0-9] KST", metadata["modified_at"]
     )
     for coordinate in (
         "phoebe-onpremise-test",
@@ -188,28 +188,42 @@ def test_rollback_is_api_only_and_preserves_index_data() -> None:
     assert "DB downgrade" in reference
 
 
-def test_reference_records_local_pass_and_server_not_run_without_publishing() -> None:
+def test_reference_records_independently_verified_shared_deployment() -> None:
     reference = _read(REFERENCE)
 
-    for local_result in (
+    for completed_gate in (
         "calibration code/image packaging",
         "Compose policy injection",
-        "로컬 독립 검증",
-        "PASS",
-    ):
-        assert local_result in reference
-    for pending_server_gate in (
         "server preflight",
         "server build",
         "server migration",
         "server CUDA calibration",
         "server smoke",
-        "NOT RUN",
+        "security/restart",
+        "publish",
+        "PASS",
     ):
-        assert pending_server_gate in reference
-    assert "API 중단" in reference
-    assert "외부 listener 중단" in reference
-    assert "publish 금지" in reference
+        assert completed_gate in reference
+    for deployed_coordinate in (
+        "6a211448d156bf5381277cf6f183ac19ccc94b0f",
+        "sha256:8a8e684aabb28e43ca3b599fa8c6780a6f7c2350ce2bc91ad31976b2267041e6",
+        "0003_search_policy_manifest",
+        "10e86bbd-55b9-457c-9f73-0ca29d09625b",
+        "b1758182ed1bef3f87017cd5db45aa0e9829e785004545ddf48a9bc2be4b21bb",
+        "3·4·1·1·2",
+        "no_evidence",
+        "25",
+        "42",
+        "running/healthy",
+    ):
+        assert deployed_coordinate in reference
+    current_gate = _section(reference, "현재 corrective gate 상태")
+    current_gate_table = current_gate.split("\n\n", maxsplit=1)[0]
+    assert "NOT RUN" not in current_gate_table
+    assert "API 중단" not in current_gate_table
+    assert "publish 금지" not in current_gate_table
+    assert "독립 검증" in current_gate
+    assert "공개 유지 가능" in current_gate
     assert "constructor mismatch 상태" not in reference
 
 

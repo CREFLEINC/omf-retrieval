@@ -246,7 +246,7 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
   `docs/design/2026-08-13-omf-retrieval-mvp-system-design.html` v2.1이다.
 - 상세 구현 계획 정본은
   `docs/superpowers/plans/2026-08-13-omf-retrieval-mvp-implementation.md` v2.1이며,
-  상태는 **MVP 완료 · v2.1 corrective plan 승인 · 진행 중**이다.
+  상태는 **MVP 완료 · v2.1 corrective 완료 · 공유 배포 완료**다.
 - 작업 1~7의 완료 구현과 작업 8~10에서 시작한 구현을 보존·재사용했다.
 - 기존 통합 `0002` manifest·lifecycle migration을 MVP 기준으로 채택한다. v1.3의
   8A-1 분리 및 별도 `0003` migration 계획은 v2.0이 명시적으로 대체한다.
@@ -268,16 +268,28 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
   이상적 target은 8위였다. 직접 acceptable evidence는 두 질의 모두 top 5에 있어
   MVP gate는 통과했지만, 정식 평가와 리랭커 검토는 후속 범위로 유지한다.
 - 인증·오류 정보 비노출, 원문 provenance와 전체 회귀 검증은 PASS했다.
-- 공유 RTX 4090 배포의 정상 5개 질의 acceptable evidence는 3·4·1·1·2위였지만,
-  문서에 없는 질의가 vector-only 근거를 반환해 gate는 FAIL했다. API와
-  `192.168.1.185:9090` listener는 중단했고 PostgreSQL은 healthy다.
-- 공유 환경의 active run은 `427f2c4a-ab06-486a-9801-4bde3ef17d63`이며 고정 commit,
-  158개 문서·4,202개 section·5,584개 chunk·embedding을 보존한다. 사용자가 생성한
-  `local-agent`와 서버 내부 mode `0600` deployment token도 보존하며 비밀값은
-  기록하지 않는다.
-- v2.1 corrective 작업은 정본 전환, policy storage·migration, search core·API 분리,
-  CUDA calibration·deploy의 네 단위다. Corrective 단위 2~4는 각각 독립 검증하며,
-  승인된 전체 계획 범위 안에서 연속 진행하고 완료 전까지 공유 API를 재가동하지 않는다.
+- 최초 공유 RTX 4090 smoke에서는 정상 5개 질의가 3·4·1·1·2위였지만 문서에 없는
+  질의가 vector-only 근거를 반환해 gate가 FAIL했다. 이는 corrective 착수 전의
+  역사적 중단 기록이며 당시 API와 listener를 안전하게 중단했다.
+- v2.1 corrective 네 단위인 정본 전환, policy storage·migration, search core·API
+  분리, CUDA calibration·deploy는 모두 완료했고 각각 독립 검증 PASS했다.
+- 공유 API는 2026-08-31 07:43 KST에 `http://192.168.1.185:9090`으로 공개했고
+  container는 running/healthy다. 배포 code commit은
+  `6a211448d156bf5381277cf6f183ac19ccc94b0f`, image는
+  `sha256:8a8e684aabb28e43ca3b599fa8c6780a6f7c2350ce2bc91ad31976b2267041e6`다.
+- PostgreSQL은 healthy이고 Alembic revision은 `0003_search_policy_manifest`다.
+  Immutable policy row는 2개이며 활성 CUDA 정책의 안정 identity인 `config_hash`는
+  `b1758182ed1bef3f87017cd5db45aa0e9829e785004545ddf48a9bc2be4b21bb`다. DB가 resolve한
+  opaque `policy_id`는 `10e86bbd-55b9-457c-9f73-0ca29d09625b`이며 deterministic
+  identity로 간주하지 않는다.
+- 공유 환경의 active run은 `427f2c4a-ab06-486a-9801-4bde3ef17d63`이며 고정 commit과
+  158개 문서·4,202개 section·5,584개 chunk·embedding을 보존한다. 최종 smoke는
+  정상 5개 3·4·1·1·2위, unknown `no_evidence`로 PASS했고 25개 origin hash와 42개
+  line coordinate를 대조했다. 재색인, embedding 재생성, client 재발급은 없었다.
+- 보안·로그와 재시작 검증은 PASS했다. 사용자가 생성한 `local-agent`와 서버 내부
+  mode `0600` deployment token, 이전 Compose-valid policy 설정과 rollback image
+  `sha256:b7a1d0e678c783ffc3e9b0cd663435f7a7b0348739f249109f341863aaf1971e`를 보존하며
+  비밀값은 기록하지 않는다.
 - 생성형 답변, 과거본·상세 filter, 정식 평가·감사, Buildx·digest 배포 자동화,
   정식 서버 성능 gate와 운영 runbook은 후속 범위다. 기존 구현이 있으면 삭제하지
   않고 비노출 상태로 보존한다.
@@ -286,7 +298,7 @@ UI 작업은 레이아웃 구조의 컴포넌트 단위로 나눈다. 페이지�
   작업 17 server E2E·performance, 작업 18 operations handoff.
 - 이전 세션의 미확정 목록과 설계 재개 절차는 더 이상 현재 상태가 아니다. 구현 시
   위 두 정본의 범위, 정지 조건, 단계별 진척 보고·독립 검증 지점과 테스트 설계를 따른다.
-- 운영 배포 전 입력값과 외부 변경은 설계서와 구현 계획에 적힌 checkpoint에서
+- 후속 재배포 전 입력값과 외부 변경은 설계서와 구현 계획에 적힌 checkpoint에서
   별도 확인한다.
 - 제품 범위나 승인된 설계를 바꿀 필요가 생기면 구현을 멈추고 사용자 승인을 다시
   받는다.

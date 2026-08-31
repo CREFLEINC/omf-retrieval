@@ -1,8 +1,8 @@
 ---
 title: OMF Retrieval 공유 배포 하네스
 author: Codex — 사용자 승인 반영
-modified_at: 2026-08-30 20:50 KST
-version: v1.2
+modified_at: 2026-08-31 07:51 KST
+version: v1.3
 audience: 프로젝트 관련자
 ---
 
@@ -43,11 +43,15 @@ audience: 프로젝트 관련자
 | 공유 endpoint | `192.168.1.185:9090` |
 | 호스트·GPU | Ubuntu 22.04 · NVIDIA GeForce RTX 4090 · `cuda:0` |
 | 영구 보관 root | `/home/storage_disk3/omf-retrieval-disk` |
+| 배포 code | commit `6a211448d156bf5381277cf6f183ac19ccc94b0f` |
+| 실행 image | `sha256:8a8e684aabb28e43ca3b599fa8c6780a6f7c2350ce2bc91ad31976b2267041e6` |
 | OMF source | 서버 clone · commit `a8f46f23cd3fb9c5f7042e987dff8103d23f0fa2` |
 | embedding model | `Qwen/Qwen3-Embedding-0.6B` · revision `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` · 1024차원 |
 | 보존 active run | `427f2c4a-ab06-486a-9801-4bde3ef17d63` |
 | 보존 counts | 문서 158 · section 4,202 · chunk 5,584 · embedding 5,584 |
-| 공개 상태 | API 중단 · 외부 listener 중단 · publish 금지 |
+| DB 상태 | PostgreSQL healthy · Alembic `0003_search_policy_manifest` · policy row 2개 |
+| 활성 search policy | stable `config_hash` `b1758182ed1bef3f87017cd5db45aa0e9829e785004545ddf48a9bc2be4b21bb` · opaque DB `policy_id` `10e86bbd-55b9-457c-9f73-0ca29d09625b` |
+| 공개 상태 | API running/healthy · `http://192.168.1.185:9090` 공개 · 독립 검증 PASS |
 
 위 값은 기대값이지 현재 사실을 대신하지 않는다. 매번 preflight로 다시 측정한다.
 
@@ -154,18 +158,20 @@ Bootstrap에서도 기존 model cache가 있으면 `model prepare`를 다시 실
 |---|---|---|
 | calibration code/image packaging | PASS | 로컬 독립 검증 |
 | Compose policy injection | PASS | 로컬 독립 검증 |
-| server preflight | NOT RUN | 실제 서버 미접속 |
-| server build | NOT RUN | 실제 서버 image 미생성 |
-| server migration | NOT RUN | 실제 DB 미변경 |
-| server CUDA calibration | NOT RUN | 실제 GPU 미실행 |
-| server smoke | NOT RUN | 실제 API 미실행 |
-| 공유 API | API 중단 | 기존 중단 상태 보존 |
-| 공유 listener | 외부 listener 중단 | `192.168.1.185:9090` 미공개 |
-| publish | publish 금지 | 모든 server gate 검증 전 |
+| server preflight | PASS | 서버·GPU·secret metadata·DB·보존 좌표 독립 검증 |
+| server build | PASS | 배포 image digest와 비노출 probe 독립 검증 |
+| server migration | PASS | backup·additive `0003`·legacy backfill 독립 검증 |
+| server CUDA calibration | PASS | GPU 0 raw score 재실행과 byte-exact 결과 독립 검증 |
+| server smoke | PASS | 정상 5개 3·4·1·1·2위 · unknown `no_evidence` |
+| security/restart | PASS | 오류·로그 비노출과 같은 run·policy 재시작 검증 |
+| 공유 API | PASS | container running/healthy · server ready 200 |
+| 공유 listener | PASS | `192.168.1.185:9090` 공개 · Mac live 200 |
+| publish | PASS | 2026-08-31 07:43 KST 최종 독립 검증 · 공개 유지 가능 |
 
-두 로컬 PASS는 구현과 packaging의 정적·무외부 계약만 확인한 결과다. 실제 서버의
-preflight, build, migration, CUDA calibration 또는 smoke를 수행했다는 뜻이 아니다.
-서버 gate가 모두 실행·독립 검증되기 전까지 API와 listener 중단을 유지한다.
+Corrective 단위 1~4와 모든 server gate는 완료되어 각각 독립 검증 PASS했다. Mac의
+authenticated ready/search는 token boundary를 지키기 위해 실행하지 않았고(NOT RUN),
+서버의 공개 URL에서 인증된 ready 200과 smoke를 검증했다. 이 제한은 공개 liveness와
+서버 측 인증 검색 검증 결과를 바꾸지 않는다.
 
 ## 단계 증거
 
@@ -173,3 +179,18 @@ preflight, build, migration, CUDA calibration 또는 smoke를 수행했다는 �
 secret-safe 관찰값, 기대값 비교, 실행 Agent와 검증 Agent 결과를 남긴다. 실패나
 미실행은 PASS로 축약하지 않는다. 최종 보고에는 보존 active run과 네 count,
 search policy ID·config hash, 6개 smoke 순위와 외부 endpoint 결과를 포함한다.
+
+## 최종 인계
+
+- 배포 완료 시각은 2026-08-31 07:43 KST이며 공유 API는 공개 유지할 수 있다.
+- 최종 smoke는 정상 5개가 3·4·1·1·2위, 문서에 없는 질의는 `no_evidence`였다.
+  모든 origin은 `design/wiki/**`였고 25개 origin hash와 42개 line coordinate를
+  고정 source 원문과 대조했다.
+- `config_hash`가 search policy의 안정 identity다. 현재 `policy_id`는 DB가 같은
+  manifest를 resolve하며 반환한 opaque row ID이므로 deterministic 값으로 가정하지 않는다.
+- 보안 응답·로그 비노출, API restart 뒤 같은 run·policy 유지와 PostgreSQL health를
+  확인했다. 재색인, embedding 재생성, client 재발급은 수행하지 않았다.
+- Rollback image
+  `sha256:b7a1d0e678c783ffc3e9b0cd663435f7a7b0348739f249109f341863aaf1971e`와
+  Compose-valid legacy policy 환경설정을 보존한다. 실패 시 이 문서의 API-only 복구
+  경계를 따르며 DB downgrade나 index·embedding 삭제를 수행하지 않는다.
