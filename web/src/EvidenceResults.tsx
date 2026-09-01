@@ -1,9 +1,6 @@
-import type { RefObject } from 'react'
-
 import type { SearchResponse } from './searchTypes'
 
 interface EvidenceResultsProps {
-  headingRef: RefObject<HTMLHeadingElement | null>
   response: SearchResponse
 }
 
@@ -11,15 +8,12 @@ const formatRank = (rank: number | null, label: string): string =>
   rank === null ? `${label} 없음` : `${label} ${rank}위`
 
 export const EvidenceResults = ({
-  headingRef,
   response,
 }: EvidenceResultsProps): React.JSX.Element => (
   <section className="results-panel" aria-labelledby="results-title">
     <div className="results-heading">
       <p className="result-kicker">조회 완료</p>
-      <h2 id="results-title" ref={headingRef} tabIndex={-1}>
-        검색 결과 {response.evidence_items.length}건
-      </h2>
+      <h2 id="results-title">검색 결과 {response.evidence_items.length}건</h2>
     </div>
 
     <div className="evidence-list">

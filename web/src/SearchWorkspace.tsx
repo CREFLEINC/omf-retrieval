@@ -49,7 +49,6 @@ export const SearchWorkspace = ({
   const requestControllerRef = useRef<AbortController | null>(null)
   const isMountedRef = useRef(true)
   const queryInputRef = useRef<HTMLInputElement>(null)
-  const resultHeadingRef = useRef<HTMLHeadingElement>(null)
   const isPending = view.kind === 'pending'
 
   useEffect(() => {
@@ -294,9 +293,7 @@ export const SearchWorkspace = ({
             className="empty-results"
             aria-labelledby="empty-results-title"
           >
-            <h2 id="empty-results-title" ref={resultHeadingRef} tabIndex={-1}>
-              근거를 찾지 못했습니다
-            </h2>
+            <h2 id="empty-results-title">근거를 찾지 못했습니다</h2>
             <p>
               관련성 수준을 기본으로 바꾸거나 검색어를 더 구체적으로 작성한 뒤
               다시 검색해 주세요.
@@ -304,10 +301,7 @@ export const SearchWorkspace = ({
           </section>
         ) : null}
         {view.kind === 'ok' ? (
-          <EvidenceResults
-            headingRef={resultHeadingRef}
-            response={view.response}
-          />
+          <EvidenceResults response={view.response} />
         ) : null}
       </div>
     </section>

@@ -546,6 +546,7 @@ describe('App token gate', () => {
       name: '검색 결과 1건',
     })
     expect(resultHeading).not.toHaveFocus()
+    expect(resultHeading).not.toHaveAttribute('tabindex')
     expect(screen.getByText('근거 순위 1위')).toBeInTheDocument()
     expect(screen.getByText('OMF 설계 / 검색 정책')).toBeInTheDocument()
     expect(screen.getByText('첫 번째 근거 발췌문입니다.')).toBeInTheDocument()
@@ -592,9 +593,11 @@ describe('App token gate', () => {
     await user.click(screen.getByRole('radio', { name: /엄격/ }))
     await user.click(screen.getByRole('button', { name: '검색' }))
 
-    expect(
-      await screen.findByRole('heading', { name: '근거를 찾지 못했습니다' }),
-    ).not.toHaveFocus()
+    const emptyResultHeading = await screen.findByRole('heading', {
+      name: '근거를 찾지 못했습니다',
+    })
+    expect(emptyResultHeading).not.toHaveFocus()
+    expect(emptyResultHeading).not.toHaveAttribute('tabindex')
     expect(screen.getByText(/관련성 수준을 기본으로/)).toBeInTheDocument()
     expect(screen.getByText(/검색어를 더 구체적으로/)).toBeInTheDocument()
     expect(
