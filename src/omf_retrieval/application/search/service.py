@@ -123,20 +123,6 @@ class SearchService:
         try:
             keyword = retain_at_or_above(batch.keyword, policy.keyword_similarity_floor)
             vector = retain_at_or_above(batch.vector, policy.vector_similarity_floor)
-            if relevance_level == "strict":
-                shared_chunk_ids = {item.candidate.chunk_id for item in keyword} & {
-                    item.candidate.chunk_id for item in vector
-                }
-                keyword = tuple(
-                    item
-                    for item in keyword
-                    if item.candidate.chunk_id in shared_chunk_ids
-                )
-                vector = tuple(
-                    item
-                    for item in vector
-                    if item.candidate.chunk_id in shared_chunk_ids
-                )
             fused = reciprocal_rank_fusion(
                 keyword=tuple(item.candidate for item in keyword),
                 vector=tuple(item.candidate for item in vector),
@@ -144,6 +130,12 @@ class SearchService:
                 keyword_weight=policy.keyword_weight,
                 vector_weight=policy.vector_weight,
             )
+            if relevance_level == "strict":
+                fused = tuple(
+                    item
+                    for item in fused
+                    if item.keyword_rank is not None and item.vector_rank is not None
+                )
             evidence = group_evidence(fused, limit=limit)
         except (KeyboardInterrupt, SystemExit):
             raise

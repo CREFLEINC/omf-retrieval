@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -6,11 +7,14 @@ import {
   waitFor,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+import { isSearchResponse } from './searchTypes'
 
 const TOKEN = 'unit-test-secret-token'
+const REQUEST_TIMEOUT_MS = 10_000
 
 const createResponse = (status: number): Response =>
   ({
@@ -86,9 +90,19 @@ const submitToken = async (token = TOKEN): Promise<void> => {
   await user.click(screen.getByRole('button', { name: '연결' }))
 }
 
+const createAbortablePendingResponse = (
+  signal: AbortSignal | undefined,
+): Promise<Response> =>
+  new Promise<Response>((_resolve, reject) => {
+    signal?.addEventListener('abort', () => {
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    })
+  })
+
 describe('App token gate', () => {
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -136,6 +150,7 @@ describe('App token gate', () => {
     expect(fetchMock).toHaveBeenCalledWith('/health/ready', {
       method: 'GET',
       headers: { Authorization: `Bearer ${TOKEN}` },
+      signal: expect.any(AbortSignal),
     })
     expect(fetchMock.mock.calls[0]?.[0]).not.toContain(TOKEN)
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('body')
@@ -165,6 +180,80 @@ describe('App token gate', () => {
 
     resolveRequest?.(createResponse(200))
     await screen.findByText('연결됨')
+  })
+
+  it('times out a stalled readiness request and permits retry', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) =>
+        createAbortablePendingResponse(init?.signal ?? undefined),
+      )
+      .mockResolvedValueOnce(createResponse(200))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    fireEvent.change(screen.getByLabelText('접근 토큰'), {
+      target: { value: TOKEN },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '연결' }).closest('form')!,
+    )
+
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS))
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '연결 확인 시간이 초과되었습니다. 다시 시도해 주세요.',
+    )
+    expect(screen.getByRole('button', { name: '연결' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '연결' }))
+    await act(async () => undefined)
+
+    expect(screen.getByText('연결됨')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers from a readiness failure when mounted in React Strict Mode', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    )
+
+    await submitToken()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '서비스에 연결할 수 없습니다.',
+    )
+    expect(screen.getByRole('button', { name: '연결' })).toBeEnabled()
+  })
+
+  it('aborts a stalled readiness request when the token gate unmounts', () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((_input: RequestInfo | URL, init?: RequestInit) =>
+        createAbortablePendingResponse(init?.signal ?? undefined),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const mounted = render(<App />)
+
+    fireEvent.change(screen.getByLabelText('접근 토큰'), {
+      target: { value: TOKEN },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '연결' }).closest('form')!,
+    )
+    const requestSignal = fetchMock.mock.calls[0]?.[1]?.signal as
+      AbortSignal | undefined
+
+    expect(requestSignal).toBeDefined()
+    expect(requestSignal?.aborted).toBe(false)
+
+    mounted.unmount()
+
+    expect(requestSignal?.aborted).toBe(true)
   })
 
   it('removes the form after success, shows only connected status, and leaves Web Storage untouched', async () => {
@@ -236,6 +325,7 @@ describe('App token gate', () => {
           limit: Number(limit),
           relevance_level: relevanceLevel,
         }),
+        signal: expect.any(AbortSignal),
       })
       expect(fetchMock.mock.calls[1]?.[0]).not.toContain(TOKEN)
       expect(fetchMock.mock.calls[1]?.[1]?.body).not.toContain(TOKEN)
@@ -296,6 +386,78 @@ describe('App token gate', () => {
     expect(
       await screen.findByText(/관련성 수준을 기본으로/),
     ).toBeInTheDocument()
+  })
+
+  it('times out a stalled search and permits retry without losing the query', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createResponse(200))
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) =>
+        createAbortablePendingResponse(init?.signal ?? undefined),
+      )
+      .mockResolvedValueOnce(createJsonResponse(NO_EVIDENCE_RESPONSE))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    fireEvent.change(screen.getByLabelText('접근 토큰'), {
+      target: { value: TOKEN },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '연결' }).closest('form')!,
+    )
+    expect(await screen.findByText('연결됨')).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    fireEvent.change(screen.getByLabelText('검색어'), {
+      target: { value: '검색 정책' },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '검색' }).closest('form')!,
+    )
+
+    expect(screen.getByRole('button', { name: '토큰 변경' })).toBeEnabled()
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS))
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '검색 요청 시간이 초과되었습니다. 다시 시도해 주세요.',
+    )
+    expect(screen.getByLabelText('검색어')).toHaveValue('검색 정책')
+    expect(screen.getByRole('button', { name: '검색' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '검색' }))
+    await act(async () => undefined)
+
+    expect(
+      screen.getByRole('heading', { name: '근거를 찾지 못했습니다' }),
+    ).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps token change available and aborts a pending search on disconnect', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createResponse(200))
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) =>
+        createAbortablePendingResponse(init?.signal ?? undefined),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    render(<App />)
+
+    await submitToken()
+    await user.type(await screen.findByLabelText('검색어'), '검색 정책')
+    await user.click(screen.getByRole('button', { name: '검색' }))
+    const requestSignal = fetchMock.mock.calls[1]?.[1]?.signal as
+      AbortSignal | undefined
+
+    expect(requestSignal).toBeDefined()
+    expect(screen.getByRole('button', { name: '토큰 변경' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: '토큰 변경' }))
+
+    expect(requestSignal?.aborted).toBe(true)
+    expect(screen.getByLabelText('접근 토큰')).toHaveValue('')
+    expect(screen.queryByLabelText('검색어')).not.toBeInTheDocument()
   })
 
   it('renders every evidence match, origin, rank, and reproducibility coordinate', async () => {
@@ -366,6 +528,9 @@ describe('App token gate', () => {
     ).toHaveFocus()
     expect(screen.getByText(/관련성 수준을 기본으로/)).toBeInTheDocument()
     expect(screen.getByText(/검색어를 더 구체적으로/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('status', { name: '검색 완료, 결과 0건' }),
+    ).toHaveTextContent('검색 완료, 결과 0건')
     expect(screen.queryByText('근거 순위 1위')).not.toBeInTheDocument()
   })
 
@@ -487,6 +652,48 @@ describe('App token gate', () => {
     expect(consoleError).not.toHaveBeenCalled()
   })
 
+  it('rejects both directions of the status and evidence invariant', () => {
+    expect(
+      isSearchResponse({
+        ...OK_RESPONSE,
+        evidence_items: [],
+      }),
+    ).toBe(false)
+    expect(
+      isSearchResponse({
+        ...OK_RESPONSE,
+        status: 'no_evidence',
+      }),
+    ).toBe(false)
+  })
+
+  it('announces only a short completion status outside the result tree', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createResponse(200))
+      .mockResolvedValueOnce(createJsonResponse(OK_RESPONSE))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    render(<App />)
+
+    await submitToken()
+    await user.type(await screen.findByLabelText('검색어'), '검색 정책')
+    await user.click(screen.getByRole('button', { name: '검색' }))
+
+    const resultHeading = await screen.findByRole('heading', {
+      name: '검색 결과 1건',
+    })
+    const completionStatus = screen.getByRole('status', {
+      name: '검색 완료, 결과 1건',
+    })
+
+    expect(completionStatus).toHaveTextContent('검색 완료, 결과 1건')
+    expect(resultHeading.closest('[aria-live]')).toBeNull()
+    expect(
+      screen.getByText('첫 번째 근거 발췌문입니다.').closest('[aria-live]'),
+    ).toBeNull()
+  })
+
   it('replaces completed results on repeated search and never persists the token', async () => {
     const storageSet = vi.spyOn(Storage.prototype, 'setItem')
     const storageGet = vi.spyOn(Storage.prototype, 'getItem')
@@ -541,6 +748,7 @@ describe('App token gate', () => {
     expect(fetchMock).toHaveBeenLastCalledWith('/health/ready', {
       method: 'GET',
       headers: { Authorization: `Bearer ${replacementToken}` },
+      signal: expect.any(AbortSignal),
     })
     expect(fetchMock.mock.calls.at(-1)?.[1]).not.toEqual(
       expect.objectContaining({

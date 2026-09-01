@@ -104,6 +104,7 @@ export const isSearchResponse = (value: unknown): value is SearchResponse => {
     typeof value.index.commit_sha === 'string' &&
     typeof value.search_policy.policy_id === 'string' &&
     typeof value.search_policy.config_hash === 'string' &&
-    (value.status !== 'no_evidence' || evidenceItems.length === 0)
+    ((value.status === 'ok' && evidenceItems.length > 0) ||
+      (value.status === 'no_evidence' && evidenceItems.length === 0))
   )
 }

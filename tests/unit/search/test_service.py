@@ -286,8 +286,47 @@ def test_strict_relevance_retains_only_candidates_present_in_both_lanes() -> Non
     assert result.status == "ok"
     assert len(result.evidence_items) == 1
     assert result.evidence_items[0].parent_id == shared.parent_id
-    assert result.evidence_items[0].matches[0].keyword_rank == 1
-    assert result.evidence_items[0].matches[0].vector_rank == 1
+    assert result.evidence_items[0].matches[0].keyword_rank == 2
+    assert result.evidence_items[0].matches[0].vector_rank == 2
+
+
+def test_strict_relevance_preserves_original_lane_ranks_and_rrf_order() -> None:
+    keyword_first = _candidate(3, 30)
+    vector_first = _candidate(4, 40)
+    keyword_only = tuple(
+        _candidate(identity, identity * 10) for identity in range(5, 29)
+    )
+    vector_only = tuple(
+        _candidate(identity, identity * 10) for identity in range(29, 77)
+    )
+    batch = CandidateBatch(
+        ACTIVE,
+        tuple(
+            ScoredCandidate(candidate, 0.9)
+            for candidate in (keyword_first, *keyword_only, vector_first)
+        ),
+        tuple(
+            ScoredCandidate(candidate, 0.9)
+            for candidate in (vector_first, *vector_only, keyword_first)
+        ),
+    )
+
+    result = _search_with_relevance(_service(FakeRepository(batch)), "strict", limit=5)
+
+    assert tuple(item.parent_id for item in result.evidence_items) == (
+        vector_first.parent_id,
+        keyword_first.parent_id,
+    )
+    assert (
+        result.evidence_items[0].matches[0].keyword_rank,
+        result.evidence_items[0].matches[0].vector_rank,
+        result.evidence_items[0].matches[0].rrf_score,
+    ) == (26, 1, pytest.approx(1.0 / 86.0 + 1.0 / 61.0))
+    assert (
+        result.evidence_items[1].matches[0].keyword_rank,
+        result.evidence_items[1].matches[0].vector_rank,
+        result.evidence_items[1].matches[0].rrf_score,
+    ) == (1, 50, pytest.approx(1.0 / 61.0 + 1.0 / 110.0))
 
 
 def test_strict_relevance_applies_limit_after_intersection_filter() -> None:

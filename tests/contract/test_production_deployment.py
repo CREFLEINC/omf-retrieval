@@ -326,6 +326,70 @@ def test_repository_and_image_context_exclude_private_runtime_material() -> None
         assert pattern in dockerignore
 
 
+def test_docker_context_excludes_web_artifacts_but_keeps_frontend_sources() -> None:
+    """Keep local web build artifacts out without excluding build inputs."""
+    dockerignore_patterns = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert {
+        "/web/node_modules/",
+        "/web/dist/",
+        "/web/.cache/",
+        "/.pnpm-store/",
+    } <= dockerignore_patterns
+    frontend_sources = (
+        "web/package.json",
+        "web/pnpm-lock.yaml",
+        "web/pnpm-workspace.yaml",
+        "web/index.html",
+        "web/tsconfig.json",
+        "web/tsconfig.app.json",
+        "web/tsconfig.node.json",
+        "web/vite.config.ts",
+        "web/src",
+    )
+    ignored_frontend_sources = {
+        pattern
+        for source_path in frontend_sources
+        for pattern in (source_path, f"/{source_path}")
+    }
+    ignored_frontend_sources.update(
+        {
+            "web",
+            "web/",
+            "web/*",
+            "web/**",
+            "/web",
+            "/web/",
+            "/web/*",
+            "/web/**",
+            "web/src/",
+            "web/src/**",
+            "/web/src/",
+            "/web/src/**",
+        }
+    )
+    assert dockerignore_patterns.isdisjoint(ignored_frontend_sources)
+
+    for source_path in frontend_sources:
+        assert (ROOT / source_path).exists()
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for copy_command in (
+        "COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./",
+        (
+            "COPY web/index.html web/tsconfig.json web/tsconfig.app.json "
+            "web/tsconfig.node.json ./"
+        ),
+        "COPY web/vite.config.ts ./",
+        "COPY web/src ./src",
+    ):
+        assert copy_command in dockerfile
+
+
 def test_new_deployment_assets_have_no_forbidden_host_or_gpu_shortcuts() -> None:
     source = "\n".join(
         (ROOT / path).read_text(encoding="utf-8")

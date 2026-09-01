@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { EvidenceResults } from './EvidenceResults'
+import { createTimedRequest } from './requestTimeout'
 import {
   isSearchResponse,
   type RelevanceLevel,
@@ -32,6 +33,7 @@ const NETWORK_ERROR =
   '검색 서비스에 연결할 수 없습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.'
 const MALFORMED_RESPONSE_ERROR =
   '검색 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.'
+const TIMEOUT_ERROR = '검색 요청 시간이 초과되었습니다. 다시 시도해 주세요.'
 
 export const SearchWorkspace = ({
   accessToken,
@@ -44,6 +46,8 @@ export const SearchWorkspace = ({
   const [queryError, setQueryError] = useState<string | null>(null)
   const [view, setView] = useState<SearchView>({ kind: 'idle' })
   const isRequestPending = useRef(false)
+  const requestControllerRef = useRef<AbortController | null>(null)
+  const isMountedRef = useRef(true)
   const queryInputRef = useRef<HTMLInputElement>(null)
   const resultHeadingRef = useRef<HTMLHeadingElement>(null)
   const isPending = view.kind === 'pending'
@@ -54,9 +58,23 @@ export const SearchWorkspace = ({
     }
   }, [view])
 
+  useEffect(() => {
+    isMountedRef.current = true
+
+    return () => {
+      isMountedRef.current = false
+      requestControllerRef.current?.abort()
+    }
+  }, [])
+
   const finishWithError = (message: string): void => {
     setView({ kind: 'error', message })
+  }
+
+  const handleDisconnect = (): void => {
+    requestControllerRef.current?.abort()
     isRequestPending.current = false
+    onDisconnect()
   }
 
   const handleSubmit = async (
@@ -78,10 +96,11 @@ export const SearchWorkspace = ({
     setQueryError(null)
     setView({ kind: 'pending' })
     isRequestPending.current = true
+    const timedRequest = createTimedRequest()
+    requestControllerRef.current = timedRequest.controller
 
-    let response: Response
     try {
-      response = await fetch('/v1/search', {
+      const response = await fetch('/v1/search', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -92,44 +111,54 @@ export const SearchWorkspace = ({
           limit,
           relevance_level: relevanceLevel,
         }),
+        signal: timedRequest.controller.signal,
       })
+
+      if (response.status === 401) {
+        onDisconnect()
+        return
+      }
+
+      if (!response.ok) {
+        finishWithError(
+          SEARCH_ERROR_MESSAGES[response.status] ?? DEFAULT_SEARCH_ERROR,
+        )
+        return
+      }
+
+      let responseBody: unknown
+      try {
+        responseBody = await response.json()
+      } catch {
+        finishWithError(MALFORMED_RESPONSE_ERROR)
+        return
+      }
+
+      if (!isSearchResponse(responseBody)) {
+        finishWithError(MALFORMED_RESPONSE_ERROR)
+        return
+      }
+
+      if (responseBody.status === 'no_evidence') {
+        setView({ kind: 'no_evidence' })
+      } else {
+        setView({ kind: 'ok', response: responseBody })
+      }
     } catch {
+      if (!isMountedRef.current || timedRequest.controller.signal.aborted) {
+        if (timedRequest.didTimeout() && isMountedRef.current) {
+          finishWithError(TIMEOUT_ERROR)
+        }
+        return
+      }
       finishWithError(NETWORK_ERROR)
-      return
+    } finally {
+      timedRequest.clear()
+      if (requestControllerRef.current === timedRequest.controller) {
+        requestControllerRef.current = null
+        isRequestPending.current = false
+      }
     }
-
-    if (response.status === 401) {
-      isRequestPending.current = false
-      onDisconnect()
-      return
-    }
-
-    if (!response.ok) {
-      finishWithError(
-        SEARCH_ERROR_MESSAGES[response.status] ?? DEFAULT_SEARCH_ERROR,
-      )
-      return
-    }
-
-    let responseBody: unknown
-    try {
-      responseBody = await response.json()
-    } catch {
-      finishWithError(MALFORMED_RESPONSE_ERROR)
-      return
-    }
-
-    if (!isSearchResponse(responseBody)) {
-      finishWithError(MALFORMED_RESPONSE_ERROR)
-      return
-    }
-
-    if (responseBody.status === 'no_evidence') {
-      setView({ kind: 'no_evidence' })
-    } else {
-      setView({ kind: 'ok', response: responseBody })
-    }
-    isRequestPending.current = false
   }
 
   const queryDescriptionIds = [
@@ -154,8 +183,7 @@ export const SearchWorkspace = ({
         <button
           className="secondary-button compact-button"
           type="button"
-          disabled={isPending}
-          onClick={onDisconnect}
+          onClick={handleDisconnect}
         >
           토큰 변경
         </button>
@@ -238,7 +266,7 @@ export const SearchWorkspace = ({
         </button>
       </form>
 
-      <div className="search-feedback" aria-live="polite">
+      <div className="search-feedback">
         {view.kind === 'pending' ? (
           <section
             className="loading-panel"
@@ -248,6 +276,16 @@ export const SearchWorkspace = ({
             <p>근거를 검색하고 있습니다.</p>
             <div className="loading-placeholder" aria-hidden="true" />
           </section>
+        ) : null}
+        {view.kind === 'ok' || view.kind === 'no_evidence' ? (
+          <p
+            role="status"
+            aria-label={`검색 완료, 결과 ${view.kind === 'ok' ? view.response.evidence_items.length : 0}건`}
+            aria-live="polite"
+          >
+            검색 완료, 결과{' '}
+            {view.kind === 'ok' ? view.response.evidence_items.length : 0}건
+          </p>
         ) : null}
         {view.kind === 'error' ? (
           <p className="search-error" role="alert">

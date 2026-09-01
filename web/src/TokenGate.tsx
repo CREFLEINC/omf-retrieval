@@ -1,4 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+
+import { createTimedRequest } from './requestTimeout'
 
 interface TokenGateProps {
   onConnected: (token: string) => void
@@ -14,6 +16,7 @@ const DEFAULT_SERVICE_ERROR =
   '서비스를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.'
 const NETWORK_ERROR =
   '서비스에 연결할 수 없습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.'
+const TIMEOUT_ERROR = '연결 확인 시간이 초과되었습니다. 다시 시도해 주세요.'
 
 export const TokenGate = ({
   onConnected,
@@ -22,7 +25,18 @@ export const TokenGate = ({
   const [isPending, setIsPending] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const isRequestPending = useRef(false)
+  const requestControllerRef = useRef<AbortController | null>(null)
+  const isMountedRef = useRef(true)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    isMountedRef.current = true
+
+    return () => {
+      isMountedRef.current = false
+      requestControllerRef.current?.abort()
+    }
+  }, [])
 
   const handleSubmit = async (
     event: React.FormEvent<HTMLFormElement>,
@@ -36,11 +50,14 @@ export const TokenGate = ({
     isRequestPending.current = true
     setIsPending(true)
     setErrorMessage(null)
+    const timedRequest = createTimedRequest()
+    requestControllerRef.current = timedRequest.controller
 
     try {
       const response = await fetch('/health/ready', {
         method: 'GET',
         headers: { Authorization: `Bearer ${tokenInput}` },
+        signal: timedRequest.controller.signal,
       })
 
       if (response.status === 200) {
@@ -55,12 +72,21 @@ export const TokenGate = ({
       )
       inputRef.current?.focus()
     } catch {
-      setErrorMessage(NETWORK_ERROR)
+      if (!isMountedRef.current) {
+        return
+      }
+      setErrorMessage(timedRequest.didTimeout() ? TIMEOUT_ERROR : NETWORK_ERROR)
       inputRef.current?.focus()
+    } finally {
+      timedRequest.clear()
+      if (requestControllerRef.current === timedRequest.controller) {
+        requestControllerRef.current = null
+        isRequestPending.current = false
+        if (isMountedRef.current) {
+          setIsPending(false)
+        }
+      }
     }
-
-    isRequestPending.current = false
-    setIsPending(false)
   }
 
   const errorDescriptionId = errorMessage === null ? '' : 'token-error'
