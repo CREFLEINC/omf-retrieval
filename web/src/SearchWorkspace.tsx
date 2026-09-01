@@ -53,12 +53,6 @@ export const SearchWorkspace = ({
   const isPending = view.kind === 'pending'
 
   useEffect(() => {
-    if (view.kind === 'ok' || view.kind === 'no_evidence') {
-      resultHeadingRef.current?.focus()
-    }
-  }, [view])
-
-  useEffect(() => {
     isMountedRef.current = true
 
     return () => {
@@ -129,7 +123,10 @@ export const SearchWorkspace = ({
       let responseBody: unknown
       try {
         responseBody = await response.json()
-      } catch {
+      } catch (error) {
+        if (timedRequest.controller.signal.aborted) {
+          throw error
+        }
         finishWithError(MALFORMED_RESPONSE_ERROR)
         return
       }

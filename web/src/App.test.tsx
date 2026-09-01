@@ -29,6 +29,13 @@ const createJsonResponse = (body: unknown, status = 200): Response =>
     json: vi.fn().mockResolvedValue(body),
   }) as unknown as Response
 
+const createRejectedJsonResponse = (error: unknown): Response =>
+  ({
+    ok: true,
+    status: 200,
+    json: vi.fn().mockRejectedValue(error),
+  }) as unknown as Response
+
 const OK_RESPONSE = {
   request_id: 'request-1',
   status: 'ok',
@@ -98,6 +105,22 @@ const createAbortablePendingResponse = (
       reject(new DOMException('The operation was aborted.', 'AbortError'))
     })
   })
+
+const createResponseWithAbortablePendingBody = (
+  signal: AbortSignal | undefined,
+): Response =>
+  ({
+    ok: true,
+    status: 200,
+    json: vi.fn().mockImplementation(
+      () =>
+        new Promise<unknown>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+    ),
+  }) as unknown as Response
 
 describe('App token gate', () => {
   afterEach(() => {
@@ -433,6 +456,52 @@ describe('App token gate', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('times out while reading a stalled response body and permits retry without losing the query', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createResponse(200))
+      .mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) =>
+        Promise.resolve(
+          createResponseWithAbortablePendingBody(init?.signal ?? undefined),
+        ),
+      )
+      .mockResolvedValueOnce(createJsonResponse(NO_EVIDENCE_RESPONSE))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    fireEvent.change(screen.getByLabelText('접근 토큰'), {
+      target: { value: TOKEN },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '연결' }).closest('form')!,
+    )
+    expect(await screen.findByText('연결됨')).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    fireEvent.change(screen.getByLabelText('검색어'), {
+      target: { value: '검색 정책' },
+    })
+    fireEvent.submit(
+      screen.getByRole('button', { name: '검색' }).closest('form')!,
+    )
+
+    await act(() => vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS))
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '검색 요청 시간이 초과되었습니다. 다시 시도해 주세요.',
+    )
+    expect(screen.getByLabelText('검색어')).toHaveValue('검색 정책')
+    expect(screen.getByRole('button', { name: '검색' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '검색' }))
+    await act(async () => undefined)
+
+    expect(
+      screen.getByRole('heading', { name: '근거를 찾지 못했습니다' }),
+    ).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps token change available and aborts a pending search on disconnect', async () => {
     const fetchMock = vi
       .fn()
@@ -476,7 +545,7 @@ describe('App token gate', () => {
     const resultHeading = await screen.findByRole('heading', {
       name: '검색 결과 1건',
     })
-    expect(resultHeading).toHaveFocus()
+    expect(resultHeading).not.toHaveFocus()
     expect(screen.getByText('근거 순위 1위')).toBeInTheDocument()
     expect(screen.getByText('OMF 설계 / 검색 정책')).toBeInTheDocument()
     expect(screen.getByText('첫 번째 근거 발췌문입니다.')).toBeInTheDocument()
@@ -525,7 +594,7 @@ describe('App token gate', () => {
 
     expect(
       await screen.findByRole('heading', { name: '근거를 찾지 못했습니다' }),
-    ).toHaveFocus()
+    ).not.toHaveFocus()
     expect(screen.getByText(/관련성 수준을 기본으로/)).toBeInTheDocument()
     expect(screen.getByText(/검색어를 더 구체적으로/)).toBeInTheDocument()
     expect(
@@ -652,6 +721,29 @@ describe('App token gate', () => {
     expect(consoleError).not.toHaveBeenCalled()
   })
 
+  it('keeps an invalid JSON body classified as a generic safe failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(createResponse(200))
+        .mockResolvedValueOnce(
+          createRejectedJsonResponse(new SyntaxError('Unexpected token')),
+        ),
+    )
+    const user = userEvent.setup()
+    render(<App />)
+
+    await submitToken()
+    await user.type(await screen.findByLabelText('검색어'), '검색 정책')
+    await user.click(screen.getByRole('button', { name: '검색' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '검색 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+    )
+    expect(screen.getByRole('button', { name: '검색' })).toBeEnabled()
+  })
+
   it('rejects both directions of the status and evidence invariant', () => {
     expect(
       isSearchResponse({
@@ -688,6 +780,7 @@ describe('App token gate', () => {
     })
 
     expect(completionStatus).toHaveTextContent('검색 완료, 결과 1건')
+    expect(resultHeading).not.toHaveFocus()
     expect(resultHeading.closest('[aria-live]')).toBeNull()
     expect(
       screen.getByText('첫 번째 근거 발췌문입니다.').closest('[aria-live]'),
