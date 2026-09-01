@@ -1,5 +1,18 @@
 FROM ghcr.io/astral-sh/uv:0.9.28 AS uv
 
+FROM node:24.13.0-bookworm-slim AS web-build
+
+RUN corepack enable
+
+WORKDIR /build/web
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY web/index.html web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json ./
+COPY web/vite.config.ts ./
+COPY web/src ./src
+RUN pnpm build
+
 FROM python:3.12.12-slim-bookworm
 
 ARG APP_UID=10001
@@ -26,10 +39,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
+COPY --from=web-build /build/web/dist ./web/dist
 COPY config/source_profiles/omf.json ./config/source_profiles/omf.json
 COPY scripts/calibrate_search.py ./scripts/calibrate_search.py
 COPY config/smoke/omf_mvp_v2.json ./config/smoke/omf_mvp_v2.json
 RUN test -r config/source_profiles/omf.json \
+    && test -r web/dist/index.html \
     && test -r scripts/calibrate_search.py \
     && test -r config/smoke/omf_mvp_v2.json \
     && uv sync --frozen --no-dev --no-editable \

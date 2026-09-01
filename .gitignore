@@ -7,3 +7,8 @@
 /postgres/
 /model-cache/
 /source/
+/.pnpm-store/
+/web/node_modules/
+/web/dist/
+/web/node_modules/.cache/
+/web/.cache/

@@ -4,6 +4,10 @@
 .codex
 .superpowers
 .venv
+/web/node_modules/
+/web/dist/
+/web/.cache/
+/.pnpm-store/
 .env
 .env.*
 secrets/

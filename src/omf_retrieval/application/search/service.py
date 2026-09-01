@@ -1,6 +1,7 @@
 """Authenticated hybrid-search application service."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 from omf_retrieval.application.admin.tokens import AuthorizedSource, SourceAccessError
 from omf_retrieval.application.search.evidence import EvidenceItem, group_evidence
@@ -18,6 +19,8 @@ from omf_retrieval.application.search.ports import (
 )
 from omf_retrieval.application.search.rrf import reciprocal_rank_fusion
 from omf_retrieval.settings import Settings
+
+RelevanceLevel = Literal["default", "strict"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,7 @@ class SearchService:
         query: str,
         *,
         limit: int,
+        relevance_level: RelevanceLevel = "default",
     ) -> SearchResult:
         """Return ranked evidence for the fixed active OMF generation."""
         if type(authorized) is not AuthorizedSource or authorized.source_key != "omf":
@@ -76,6 +80,11 @@ class SearchService:
             or limit > self._settings.search_max_limit
         ):
             raise ValueError("limit is outside the approved range")
+        if type(relevance_level) is not str or relevance_level not in {
+            "default",
+            "strict",
+        }:
+            raise ValueError("relevance_level is outside the approved values")
         try:
             policy = self._resolved_policy()
         except SearchUnavailableError:
@@ -121,6 +130,12 @@ class SearchService:
                 keyword_weight=policy.keyword_weight,
                 vector_weight=policy.vector_weight,
             )
+            if relevance_level == "strict":
+                fused = tuple(
+                    item
+                    for item in fused
+                    if item.keyword_rank is not None and item.vector_rank is not None
+                )
             evidence = group_evidence(fused, limit=limit)
         except (KeyboardInterrupt, SystemExit):
             raise

@@ -66,12 +66,18 @@ class FakeSearch:
         self.result = result
         self.ready = ready
         self.calls: list[tuple[str, int]] = []
+        self.relevance_levels: list[str] = []
 
     def search(
-        self, authorized: AuthorizedSource, query: str, limit: int
+        self,
+        authorized: AuthorizedSource,
+        query: str,
+        limit: int,
+        relevance_level: str = "default",
     ) -> SearchResult:
         assert authorized == AUTHORIZED
         self.calls.append((query, limit))
+        self.relevance_levels.append(relevance_level)
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -121,6 +127,21 @@ def test_search_success_has_complete_evidence_contract_and_default_limit() -> No
         "evidence_items",
     }
     assert search.calls == [("정책", 5)]
+    assert search.relevance_levels == ["default"]
+
+
+def test_search_accepts_strict_relevance_level() -> None:
+    search = FakeSearch()
+
+    response = _client(search=search).post(
+        "/v1/search",
+        headers=_auth(),
+        json={"query": "질문", "relevance_level": "strict"},
+    )
+
+    assert response.status_code == 200
+    assert search.calls == [("질문", 5)]
+    assert search.relevance_levels == ["strict"]
 
 
 @pytest.mark.parametrize("limit", [1, 20])
@@ -140,6 +161,7 @@ def test_search_accepts_limit_boundaries(limit: int) -> None:
         {"query": "   "},
         {"query": "질문", "limit": 0},
         {"query": "질문", "limit": 21},
+        {"query": "질문", "relevance_level": "unknown"},
         {"query": "질문", "source": "omf"},
     ],
 )
