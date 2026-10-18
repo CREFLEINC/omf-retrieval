@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OMF 답변서 홈 시안</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gothic+A1:wght@400;600;700&family=Hahmlet:wght@500;700&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<style>
+/* Layout: 질문 입력 → 진행 단계 띠 → [답변서 + 근거 인덱스 | 고정된 근거 상세 패널] 2단 */
+:root {
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #edf1f7;
+  --ink: #162030;
+  --ink-2: #445063;
+  --ink-3: #687486;
+  --line: #dbe2ec;
+  --accent: #2457d6;
+  --accent-ink: #ffffff;
+  --accent-soft: #e5ecfc;
+  --hit: #fff4cf;
+  --hit-edge: #d99a00;
+  --warn-bg: #fff6e0;
+  --warn-ink: #7a4b00;
+  --ok: #0b7a4b;
+  --canvas: #fbfcfe;
+  --n-equip: #2a78d6;
+  --n-repair: #eb6834;
+  --n-line: #1baf7a;
+  --n-maker: #eda100;
+  --n-state: #e87ba4;
+  --shadow: 0 1px 2px rgba(22, 32, 48, .06), 0 8px 24px rgba(22, 32, 48, .06);
+  --font: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --radius: 14px;
+  --radius-s: 10px;
+  --dot-radius: 50%;
+  --display: var(--font);
+  --grid: transparent;
+  --label-font: var(--font);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1218; --surface: #161b23; --surface-2: #1e2530; --ink: #e9edf4; --ink-2: #b5bfce;
+    --ink-3: #8a95a7; --line: #2a3442; --accent: #7aa2ff; --accent-ink: #0b1220; --accent-soft: #1b294a;
+    --hit: #3b3214; --hit-edge: #e0a81f; --warn-bg: #33290f; --warn-ink: #f2cf7d; --ok: #4fd09a;
+    --canvas: #11161d; --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500;
+    --n-state: #d55181; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1218; --surface: #161b23; --surface-2: #1e2530; --ink: #e9edf4; --ink-2: #b5bfce;
+  --ink-3: #8a95a7; --line: #2a3442; --accent: #7aa2ff; --accent-ink: #0b1220; --accent-soft: #1b294a;
+  --hit: #3b3214; --hit-edge: #e0a81f; --warn-bg: #33290f; --warn-ink: #f2cf7d; --ok: #4fd09a;
+  --canvas: #11161d; --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500;
+  --n-state: #d55181; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.65 var(--font); -webkit-font-smoothing: antialiased;
+  word-break: keep-all; overflow-wrap: anywhere;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+button, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2, h3, p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); }
+
+.page { max-width: 1320px; margin: 0 auto; padding-inline: 20px; padding-block: 20px 56px; display: grid; gap: 18px; }
+
+/* 상단 */
+.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 16px; }
+.eyebrow { font-size: 11px; letter-spacing: .14em; color: var(--ink-3); font-weight: 600; }
+.top h1 { font-size: 22px; letter-spacing: -.01em; }
+.mock-badge { font-size: 12px; color: var(--ink-2); background: var(--surface-2); border: 1px dashed var(--line); border-radius: 999px; padding: 3px 12px; }
+.top-right { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+
+/* 질문 입력 */
+.ask { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; display: grid; gap: 10px; }
+.ask-row { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
+.ask textarea {
+  flex: 1 1 320px; min-width: 0; resize: vertical; min-height: 56px; border: 1px solid var(--line); border-radius: var(--radius-s);
+  background: var(--bg); padding: 12px 14px; line-height: 1.5;
+}
+.ask textarea:focus-visible { outline-offset: 0; border-color: var(--accent); }
+.go {
+  flex: 0 0 auto; border: 0; border-radius: var(--radius-s); background: var(--accent); color: var(--accent-ink);
+  font-weight: 700; padding: 0 22px; min-height: 48px; display: inline-flex; align-items: center; gap: 8px;
+}
+.go[disabled] { opacity: .6; cursor: progress; }
+.go svg { width: 16px; height: 16px; }
+.examples { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; color: var(--ink-3); }
+.examples button { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 3px 12px; color: var(--ink-2); text-align: left; }
+.examples button:hover { border-color: var(--accent); color: var(--accent); }
+.field-error { color: #c2331f; font-size: 13px; }
+
+/* 진행 단계 */
+.stages { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; }
+.stage { position: relative; padding: 0 10px 0 0; display: grid; grid-template-columns: 26px minmax(0, 1fr); column-gap: 10px; align-items: start; }
+.stage::before { content: ''; position: absolute; left: 30px; right: 4px; top: 12px; height: 2px; background: var(--line); border-radius: 2px; }
+.stage::after { content: ''; position: absolute; left: 30px; top: 12px; height: 2px; width: 0; background: var(--accent); border-radius: 2px; transition: width .5s ease; max-width: calc(100% - 34px); }
+.stage.done::after { width: calc(100% - 34px); }
+.stage:last-child::before, .stage:last-child::after { display: none; }
+.dot { width: 26px; height: 26px; border-radius: var(--dot-radius); border: 2px solid var(--line); background: var(--bg); display: grid; place-items: center; position: relative; z-index: 1; color: var(--ink-3); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stage.active .dot { border-color: var(--accent); color: var(--accent); }
+.stage.active .dot::after { content: ''; position: absolute; inset: -6px; border-radius: var(--dot-radius); border: 2px solid var(--accent); border-right-color: transparent; border-bottom-color: transparent; animation: spin .9s linear infinite; }
+.stage.done .dot { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.stage-text { padding-top: 8px; grid-column: 1 / -1; min-width: 0; }
+.stage-title { font-size: 13.5px; font-weight: 650; color: var(--ink-3); }
+.stage.active .stage-title { color: var(--ink); }
+.stage.done .stage-title { color: var(--ink); }
+.stage-note { font-size: 12.5px; color: var(--ink-3); min-height: 1.5em; }
+.stage.active .stage-note { color: var(--accent); }
+.dots i { display: inline-block; animation: blink 1.2s infinite both; font-style: normal; }
+.dots i:nth-child(2) { animation-delay: .2s; } .dots i:nth-child(3) { animation-delay: .4s; }
+.stage-dot-wrap { grid-row: 1; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+
+/* 작업 영역 */
+.work { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+
+/* 답변서 */
+.answer { padding: 26px 28px 22px; display: grid; gap: 18px; min-width: 0; }
+.answer-head { display: grid; gap: 6px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.kicker { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .06em; }
+.answer h2 { font-size: 21px; line-height: 1.4; letter-spacing: -.01em; text-wrap: balance; }
+.answer-meta { font-size: 12.5px; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.answer h3 { font-size: 15.5px; margin-bottom: 8px; }
+.lead { font-size: 16px; line-height: 1.75; }
+.blk { min-width: 0; }
+.answer ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-s); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 12px; color: var(--ink-3); font-weight: 650; background: var(--surface-2); white-space: nowrap; }
+td.num, td.date { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.unknown { background: var(--surface-2); border-radius: var(--radius-s); padding: 12px 14px; color: var(--ink-2); font-size: 14px; }
+.unknown strong { color: var(--ink); }
+.inline-warn { font-size: 13px; color: var(--warn-ink); background: var(--warn-bg); border-radius: 8px; padding: 6px 10px; margin-top: 8px; display: inline-block; }
+
+.cite {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 6px; font-size: 11.5px; font-weight: 700;
+  min-width: 20px; height: 20px; padding: 0 5px; line-height: 18px; margin: 0 1px; vertical-align: 2px; font-variant-numeric: tabular-nums;
+}
+.cite.kg { border-radius: 999px; border-color: var(--accent); color: var(--accent); }
+.cite:hover, .cite.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* 답변서 상태 */
+.skeleton, .writing { display: none; }
+.answer[data-state="working"] .skeleton { display: grid; gap: 12px; }
+.answer[data-state="working"] .answer-body, .answer[data-state="working"] .index { display: none; }
+.answer[data-state="streaming"] .blk:not(.in), .answer[data-state="streaming"] .index { display: none; }
+.answer[data-state="streaming"] .writing { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--accent); }
+.writing::before { content: ''; width: 8px; height: 16px; background: var(--accent); border-radius: 2px; animation: blink 1s infinite; }
+.blk.in { animation: rise .45s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.sk { height: 14px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-2) 25%, var(--line) 37%, var(--surface-2) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; }
+.sk.w60 { width: 60%; } .sk.w85 { width: 85%; } .sk.w40 { width: 40%; } .sk.tall { height: 22px; width: 70%; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.answer-body { display: grid; gap: 20px; }
+
+/* 근거 인덱스 */
+.index { border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 10px; }
+.index-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 12px; }
+.index-head h3 { margin: 0; }
+.index-head span { font-size: 12.5px; color: var(--ink-3); }
+.ev-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ev {
+  width: 100%; text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius-s); padding: 10px 12px;
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 2px 12px; align-items: center;
+}
+.ev:hover { border-color: var(--accent); }
+.ev[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.ev-no { grid-row: 1 / 3; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; border: 1px solid var(--line); font-weight: 700; font-size: 13px; background: var(--surface); font-variant-numeric: tabular-nums; }
+.ev.kg .ev-no { border-radius: 50%; border-color: var(--accent); color: var(--accent); }
+.ev-title { font-weight: 650; font-size: 14.5px; min-width: 0; overflow-wrap: anywhere; }
+.ev-sub { grid-column: 2; font-size: 12.5px; color: var(--ink-3); min-width: 0; overflow-wrap: anywhere; }
+.ev-kind { grid-row: 1 / 3; grid-column: 3; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 10px; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+.ev.kg .ev-kind { background: var(--accent-soft); color: var(--accent); }
+
+/* 근거 상세 */
+.detail { position: sticky; top: 16px; min-width: 0; display: grid; overflow: hidden; }
+.detail-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--line); display: grid; gap: 4px; }
+.detail-kicker { font-size: 12px; color: var(--ink-3); font-weight: 650; display: flex; gap: 8px; align-items: center; }
+.detail-kicker b { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.detail h3 { font-size: 16.5px; line-height: 1.4; }
+.crumbs { font-size: 12.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+.crumbs code { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.empty { padding: 56px 24px; text-align: center; color: var(--ink-3); display: grid; gap: 6px; }
+.empty strong { color: var(--ink-2); font-size: 15px; }
+
+.doc-view { max-height: min(66vh, 620px); overflow: auto; font-family: var(--mono); font-size: 12.8px; line-height: 1.75; padding: 10px 0; }
+.ln { display: grid; grid-template-columns: 52px minmax(0, 1fr); }
+.ln .no { text-align: right; padding-right: 14px; color: var(--ink-3); user-select: none; font-variant-numeric: tabular-nums; }
+.ln .tx { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 18px; min-height: 1.75em; }
+.ln.hit { background: var(--hit); box-shadow: inset 3px 0 0 var(--hit-edge); }
+.doc-foot { border-top: 1px solid var(--line); padding: 10px 18px; font-size: 12.5px; color: var(--ink-3); display: flex; gap: 8px; align-items: center; }
+.doc-foot i { width: 14px; height: 10px; background: var(--hit); box-shadow: inset 3px 0 0 var(--hit-edge); display: inline-block; }
+
+.kg-stage { position: relative; background: var(--canvas); border-bottom: 1px solid var(--line); }
+.kg-stage canvas { display: block; width: 100%; height: 400px; touch-action: pan-y; cursor: grab; }
+.kg-stage canvas.grabbing { cursor: grabbing; }
+.kg-tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.kg-tools button, .mini { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; color: var(--ink-2); }
+.kg-tools button:hover, .mini:hover { border-color: var(--accent); color: var(--accent); }
+.kg-hint { position: absolute; left: 12px; bottom: 8px; font-size: 11.5px; color: var(--ink-3); pointer-events: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 18px; font-size: 12.5px; color: var(--ink-2); border-bottom: 1px solid var(--line); align-items: center; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg, .node-card svg { width: 14px; height: 14px; flex: none; }
+.legend .used-key { margin-left: auto; color: var(--ink-3); }
+.legend .ring { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--ink-2); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--ink-3); }
+.kg-info { padding: 12px 18px; display: grid; gap: 8px; }
+.node-card { display: grid; gap: 6px; }
+.node-card .nm { font-weight: 700; font-size: 15px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.node-card .tp { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 1px 9px; background: var(--surface-2); color: var(--ink-2); }
+.node-card dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; font-size: 13.5px; }
+.node-card dt { color: var(--ink-3); } .node-card dd { margin: 0; overflow-wrap: anywhere; }
+.node-hint { color: var(--ink-3); font-size: 13px; }
+.kg-warn { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+details.sparql { border-top: 1px solid var(--line); padding: 10px 18px 14px; }
+details.sparql summary { cursor: pointer; font-size: 13px; color: var(--ink-2); font-weight: 650; }
+details.sparql pre { margin: 10px 0 0; background: var(--surface-2); border-radius: 8px; padding: 12px; overflow-x: auto; font: 12.5px/1.6 var(--mono); }
+.kg-table { max-height: 400px; overflow: auto; border-bottom: 1px solid var(--line); }
+.kg-table table { font-size: 13.5px; }
+
+/* ───── 테마 전환 ───── */
+.skin-switch { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: calc(var(--radius-s) + 4px); background: var(--surface); }
+.skin-switch button { border: 0; background: transparent; border-radius: var(--radius-s); padding: 4px 12px; font-size: 13px; color: var(--ink-2); }
+.skin-switch button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.eyebrow, .kicker, .detail-kicker, .ev-kind, th, .stage-note { font-family: var(--label-font); }
+
+/* 테마 1 · 관제실: 어두운 단일 테마, 신호 앰버, 각진 모서리 */
+:root[data-skin="control"] {
+  --bg: #0b0f0e; --surface: #121816; --surface-2: #1a221f; --ink: #e4ece8; --ink-2: #a9b8b1; --ink-3: #7c8c85;
+  --line: #26322e; --accent: #ffb020; --accent-ink: #1a1203; --accent-soft: #2e2410; --hit: #2f2a12; --hit-edge: #ffb020;
+  --warn-bg: #321d12; --warn-ink: #ffb38a; --ok: #3ddc97; --canvas: #0d1311;
+  --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500; --n-state: #d55181;
+  --shadow: none; --radius: 4px; --radius-s: 3px; --dot-radius: 3px;
+  --font: 'IBM Plex Sans KR', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  --display: 'IBM Plex Sans KR', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace; --label-font: 'IBM Plex Mono', 'IBM Plex Sans KR', ui-monospace, monospace;
+  --grid: rgba(120, 160, 145, .05);
+  color-scheme: dark;
+}
+:root[data-skin="control"] .card, :root[data-skin="control"] .ask { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03); }
+:root[data-skin="control"] .stage.active .dot { box-shadow: 0 0 14px var(--accent); }
+:root[data-skin="control"] .stage.done .dot { box-shadow: 0 0 8px rgba(255, 176, 32, .35); }
+:root[data-skin="control"] .kicker, :root[data-skin="control"] .eyebrow, :root[data-skin="control"] .detail-kicker { letter-spacing: .12em; }
+:root[data-skin="control"] .answer-head { border-bottom-style: dashed; }
+:root[data-skin="control"] .ln.hit { box-shadow: inset 3px 0 0 var(--hit-edge), inset 0 0 0 1px rgba(255, 176, 32, .12); }
+
+/* 테마 2 · 설계 도면: 모눈 바탕, 남색 잉크, 가는 선 */
+:root[data-skin="blueprint"] {
+  --bg: #eaf0f7; --surface: #fafcff; --surface-2: #e3ebf5; --ink: #0d2a4a; --ink-2: #33507a; --ink-3: #5b7397;
+  --line: #b8c9de; --accent: #0b5fc0; --accent-ink: #ffffff; --accent-soft: #dbe8fa; --hit: #dcecff; --hit-edge: #0b5fc0;
+  --warn-bg: #fff1d6; --warn-ink: #7a4b00; --ok: #0b7a4b; --canvas: #f4f8fd;
+  --n-equip: #2a78d6; --n-repair: #eb6834; --n-line: #1baf7a; --n-maker: #eda100; --n-state: #e87ba4;
+  --shadow: none; --radius: 2px; --radius-s: 2px; --dot-radius: 0;
+  --font: 'Noto Sans KR', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  --display: 'Noto Sans KR', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace; --label-font: 'IBM Plex Mono', 'Noto Sans KR', ui-monospace, monospace;
+  --grid: rgba(11, 95, 192, .07);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-skin="blueprint"]:not([data-theme="light"]) {
+    --bg: #0a1d33; --surface: #0f2642; --surface-2: #143052; --ink: #dce9f7; --ink-2: #a9c2df; --ink-3: #7d98ba;
+    --line: #29496f; --accent: #6cc4ff; --accent-ink: #04203a; --accent-soft: #123a60; --hit: #133f66; --hit-edge: #6cc4ff;
+    --warn-bg: #3a2c10; --warn-ink: #f2cf7d; --canvas: #0c2139; --grid: rgba(108, 196, 255, .07);
+    --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500; --n-state: #d55181;
+    color-scheme: dark;
+  }
+}
+:root[data-skin="blueprint"][data-theme="dark"] {
+  --bg: #0a1d33; --surface: #0f2642; --surface-2: #143052; --ink: #dce9f7; --ink-2: #a9c2df; --ink-3: #7d98ba;
+  --line: #29496f; --accent: #6cc4ff; --accent-ink: #04203a; --accent-soft: #123a60; --hit: #133f66; --hit-edge: #6cc4ff;
+  --warn-bg: #3a2c10; --warn-ink: #f2cf7d; --canvas: #0c2139; --grid: rgba(108, 196, 255, .07);
+  --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500; --n-state: #d55181;
+  color-scheme: dark;
+}
+:root[data-skin="blueprint"] .card, :root[data-skin="blueprint"] .ask,
+:root[data-skin="blueprint"] .tbl-wrap, :root[data-skin="blueprint"] .ev { border-color: var(--ink-3); }
+:root[data-skin="blueprint"] .answer { position: relative; }
+:root[data-skin="blueprint"] .answer::before {
+  content: 'DWG · ANSWER-SHEET'; position: absolute; top: 10px; right: 14px; font: 10.5px/1 var(--mono); letter-spacing: .14em; color: var(--ink-3);
+}
+:root[data-skin="blueprint"] .answer h3::before { content: '— '; color: var(--accent); }
+:root[data-skin="blueprint"] th { letter-spacing: .06em; }
+:root[data-skin="blueprint"] .cite:not(.kg) { border-radius: 0; }
+
+/* 테마 3 · 보고서: 종이 같은 답변서, 명조 제목, 짙은 녹색 */
+:root[data-skin="report"] {
+  --bg: #efefeb; --surface: #ffffff; --surface-2: #f3f4f0; --ink: #1c1f1b; --ink-2: #474c45; --ink-3: #6e7469;
+  --line: #dfe1da; --accent: #0f6b4f; --accent-ink: #ffffff; --accent-soft: #e2f1ea; --hit: #e6f4ec; --hit-edge: #0f6b4f;
+  --warn-bg: #fdf1dc; --warn-ink: #7a4b00; --ok: #0f6b4f; --canvas: #fbfbf9;
+  --n-equip: #2a78d6; --n-repair: #eb6834; --n-line: #1baf7a; --n-maker: #eda100; --n-state: #e87ba4;
+  --shadow: 0 1px 2px rgba(28, 31, 27, .05), 0 18px 40px rgba(28, 31, 27, .07); --radius: 18px; --radius-s: 12px;
+  --font: 'Gothic A1', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  --display: 'Hahmlet', 'AppleMyungjo', 'Nanum Myeongjo', serif;
+  --label-font: 'Gothic A1', -apple-system, 'Apple SD Gothic Neo', sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-skin="report"]:not([data-theme="light"]) {
+    --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --ink: #eceee7; --ink-2: #bfc4b9; --ink-3: #8f968a;
+    --line: #2e332e; --accent: #5cc79c; --accent-ink: #0b1f17; --accent-soft: #183327; --hit: #1d3a2c; --hit-edge: #5cc79c;
+    --warn-bg: #33290f; --warn-ink: #f2cf7d; --canvas: #161916;
+    --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500; --n-state: #d55181;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 18px 40px rgba(0, 0, 0, .3);
+    color-scheme: dark;
+  }
+}
+:root[data-skin="report"][data-theme="dark"] {
+  --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --ink: #eceee7; --ink-2: #bfc4b9; --ink-3: #8f968a;
+  --line: #2e332e; --accent: #5cc79c; --accent-ink: #0b1f17; --accent-soft: #183327; --hit: #1d3a2c; --hit-edge: #5cc79c;
+  --warn-bg: #33290f; --warn-ink: #f2cf7d; --canvas: #161916;
+  --n-equip: #3987e5; --n-repair: #d95926; --n-line: #199e70; --n-maker: #c98500; --n-state: #d55181;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 18px 40px rgba(0, 0, 0, .3);
+  color-scheme: dark;
+}
+:root[data-skin="report"] .top h1 { font-size: 26px; font-weight: 700; }
+:root[data-skin="report"] .answer { padding: 34px 40px 28px; }
+:root[data-skin="report"] .answer h2 { font-size: 27px; font-weight: 700; line-height: 1.35; }
+:root[data-skin="report"] .answer h3 { font-size: 18px; font-weight: 700; }
+:root[data-skin="report"] .lead { font-size: 17px; line-height: 1.85; }
+:root[data-skin="report"] .answer-head { border-bottom: 2px solid var(--ink); padding-bottom: 16px; }
+:root[data-skin="report"] .kicker { letter-spacing: .2em; }
+:root[data-skin="report"] .cite { font-size: 10.5px; height: 17px; min-width: 17px; line-height: 15px; vertical-align: 6px; }
+
+@media (max-width: 960px) {
+  .work { grid-template-columns: minmax(0, 1fr); }
+  .detail { position: static; }
+  .answer, :root[data-skin="report"] .answer { padding: 20px 18px; }
+}
+@media (max-width: 720px) {
+  .page { padding-inline: 16px; }
+  .stages { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .stage { grid-template-columns: 26px minmax(0, 1fr); padding: 0 0 10px; }
+  .stage::before { left: 12px; right: auto; top: 28px; bottom: 0; width: 2px; height: auto; }
+  .stage::after { left: 12px; top: 28px; width: 2px; height: 0; max-width: none; transition: height .5s ease; }
+  .stage.done::after { width: 2px; height: calc(100% - 28px); }
+  .stage-text { grid-column: 2; grid-row: 1; padding-top: 2px; }
+  .go { flex: 1 1 100%; justify-content: center; }
+  .ev { grid-template-columns: 28px minmax(0, 1fr); }
+  .ev-kind { grid-column: 2; grid-row: auto; justify-self: start; }
+  .kg-stage canvas { height: 340px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; transition-duration: .001s !important; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="top">
+    <div>
+      <p class="eyebrow">CREFLE · KNOWLEDGE RETRIEVAL</p>
+      <h1>OMF 정보 조회</h1>
+    </div>
+    <div class="top-right">
+      <div class="skin-switch" role="group" aria-label="디자인 테마">
+        <button type="button" data-skin="base" aria-pressed="true">기본</button>
+        <button type="button" data-skin="control" aria-pressed="false">관제실</button>
+        <button type="button" data-skin="blueprint" aria-pressed="false">설계 도면</button>
+        <button type="button" data-skin="report" aria-pressed="false">보고서</button>
+      </div>
+      <span class="mock-badge">디자인 시안 · 화면의 답변과 근거는 모두 예시 데이터입니다</span>
+    </div>
+  </header>
+
+  <form class="ask" id="ask-form" novalidate>
+    <div class="ask-row">
+      <textarea id="question" name="question" rows="2" aria-label="질문" placeholder="궁금한 내용을 문장으로 적어 주세요">사출기 IMM-07의 최근 수리 이력과, 설비가 고장 났을 때 긴급 작업지시 처리 정책을 알려줘</textarea>
+      <button class="go" id="go" type="submit">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+        <span id="go-label">검색 시작</span>
+      </button>
+    </div>
+    <p class="field-error" id="q-error" role="alert" hidden>질문을 입력해 주세요.</p>
+    <div class="examples">
+      <span>예시 질문</span>
+      <button type="button">2라인 사출기 중 지금 수리 중인 설비는?</button>
+      <button type="button">긴급 작업지시는 누가 승인해?</button>
+      <button type="button">수리 완료 때 꼭 기록해야 하는 항목은?</button>
+    </div>
+  </form>
+
+  <ol class="stages" id="stages" aria-label="검색 진행 단계"></ol>
+  <p id="stage-live" role="status" aria-live="polite" style="position:absolute;left:-9999px"></p>
+
+  <div class="work">
+    <article class="answer card" id="answer" data-state="done" aria-labelledby="answer-title">
+      <div class="answer-head">
+        <p class="kicker">답변서</p>
+        <h2 id="answer-title"></h2>
+        <p class="answer-meta"><span>문서 근거 3건</span><span>지식 그래프 근거 2건</span><span id="elapsed">조회 6.1초</span></p>
+      </div>
+
+      <div class="skeleton" aria-hidden="true">
+        <div class="sk tall"></div><div class="sk w85"></div><div class="sk"></div><div class="sk w60"></div>
+        <div class="sk w40" style="margin-top:10px"></div><div class="sk w85"></div><div class="sk"></div>
+      </div>
+
+      <div class="answer-body" id="answer-body">
+        <p class="blk lead">IMM-07은 2라인에 설치된 350톤 사출기이고 지금은 <strong>수리 중</strong>입니다<button class="cite kg" data-ev="4">4</button>. 최근 6개월 동안 수리 이력은 3건이며, 가장 최근은 2026-09-18 유압 펌프 교체입니다<button class="cite kg" data-ev="4">4</button>. 설비 고장으로 생산이 멈추면 긴급 작업지시는 생산 관리자 승인을 거쳐 같은 라인의 일반 작업지시보다 먼저 배정됩니다<button class="cite" data-ev="1">1</button>.</p>
+
+        <section class="blk">
+          <h3>설비 현황</h3>
+          <div class="tbl-wrap"><table>
+            <thead><tr><th>항목</th><th>내용</th><th>근거</th></tr></thead>
+            <tbody>
+              <tr><td>설비</td><td>IMM-07 · 사출기 350톤</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td>제조사</td><td>한성기계</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td>설치 라인</td><td>2라인</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td>현재 상태</td><td>수리 중</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td>같은 라인 설비</td><td>사출기 5대 중 가동 3 · 수리 중 1 · 대기 1</td><td><button class="cite kg" data-ev="5">5</button></td></tr>
+            </tbody>
+          </table></div>
+        </section>
+
+        <section class="blk">
+          <h3>최근 수리 이력</h3>
+          <div class="tbl-wrap"><table>
+            <thead><tr><th>수리 일자</th><th>내용</th><th>교체 부품</th><th>근거</th></tr></thead>
+            <tbody>
+              <tr><td class="date">2026-09-18</td><td>유압 펌프 압력 저하</td><td>유압 펌프</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td class="date">2026-07-02</td><td>실린더 2구간 온도 편차</td><td>히터 밴드</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+              <tr><td class="date">2026-03-11</td><td>노즐 누유</td><td>노즐 팁</td><td><button class="cite kg" data-ev="4">4</button></td></tr>
+            </tbody>
+          </table></div>
+          <p class="inline-warn">2026-03-11 건은 지식 그래프에 작업자 정보가 없습니다 (데이터 품질 경고).</p>
+        </section>
+
+        <section class="blk">
+          <h3>설비 고장 시 긴급 작업지시 처리</h3>
+          <ul>
+            <li>고장이 접수되면 설비 상태가 '수리 중'으로 바뀌고, 그 설비에 배정된 작업지시에는 대체 설비 후보가 표시됩니다<button class="cite" data-ev="2">2</button>.</li>
+            <li>긴급 작업지시는 생산 관리자가 승인한 뒤에만 배정 대기열에 들어가며, 같은 라인의 일반 작업지시보다 먼저 배정됩니다<button class="cite" data-ev="1">1</button>.</li>
+            <li>진행 중이던 일반 작업지시는 '보류'로 바뀌고, 긴급 작업지시가 끝나면 자동으로 재개됩니다<button class="cite" data-ev="1">1</button>.</li>
+            <li>수리가 끝나면 수리 일자·내용·교체 부품·작업자를 기록해야 설비 상태가 '가동 중'으로 돌아갑니다<button class="cite" data-ev="3">3</button>.</li>
+          </ul>
+        </section>
+
+        <p class="blk unknown"><strong>확인되지 않은 내용</strong> · IMM-07의 예상 복구 일시는 검색된 근거에서 찾지 못했습니다.</p>
+      </div>
+
+      <p class="writing">답변서를 작성하고 있습니다</p>
+
+      <section class="index" id="index" aria-labelledby="index-title">
+        <div class="index-head">
+          <h3 id="index-title">근거 자료</h3>
+          <span>항목을 선택하면 내용이 열립니다</span>
+        </div>
+        <ul class="ev-list" id="ev-list"></ul>
+      </section>
+    </article>
+
+    <aside class="detail card" id="detail" aria-label="근거 상세" aria-live="polite"></aside>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict'
+
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches
+const $ = (sel, root = document) => root.querySelector(sel)
+const el = (tag, attrs = {}, html = '') => {
+  const node = document.createElement(tag)
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v)
+  node.innerHTML = html
+  return node
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const sleep = (ms) => new Promise((r) => setTimeout(r, REDUCED ? Math.min(ms, 150) : ms))
+
+/* ───────── 예시 데이터 ───────── */
+const TYPES = {
+  equip: { name: '설비', token: '--n-equip' },
+  repair: { name: '수리 이력', token: '--n-repair' },
+  line: { name: '라인', token: '--n-line' },
+  maker: { name: '제조사', token: '--n-maker' },
+  state: { name: '상태', token: '--n-state' },
+}
+
+const EVIDENCE = [
+  {
+    id: 1, kind: 'doc', title: '긴급 작업지시 운영 정책 · 3.2 승인과 배정',
+    path: 'design/wiki/생산실행/작업지시/긴급-작업지시-운영정책.md',
+    headings: ['긴급 작업지시 운영 정책', '3. 발행과 승인', '3.2 승인과 배정'],
+    start: 38, cite: [50, 52],
+    lines: [
+      '## 3. 발행과 승인', '',
+      '긴급 작업지시(긴급 W/O)는 설비 고장, 품질 사고, 고객 긴급 요청으로 계획된 생산을',
+      '바꿔야 할 때만 발행한다.', '',
+      '### 3.1 발행 조건', '',
+      '- 설비 고장으로 해당 라인의 생산이 30분 이상 멈출 것으로 예상되는 경우',
+      '- 발행자는 라인 반장 이상이며, 고장 접수 번호를 반드시 연결한다.', '',
+      '### 3.2 승인과 배정 [확정]', '',
+      '- 긴급 W/O는 생산 관리자가 승인한 뒤에만 배정 대기열에 들어간다.',
+      '- 승인된 긴급 W/O는 같은 라인의 일반 W/O보다 먼저 배정한다.',
+      "- 진행 중이던 일반 W/O는 '보류'로 바꾸고, 긴급 W/O 종료 후 자동으로 재개한다.", '',
+      '### 3.3 종료', '',
+      '- 대체 설비 생산 수량이 목표에 도달하거나 원 설비가 복구되면 종료한다.',
+      '- 종료 시 보류된 일반 W/O의 계획 종료 시각을 다시 계산한다.',
+    ],
+  },
+  {
+    id: 2, kind: 'doc', title: '설비 고장 접수 흐름 · 2. 접수 후 처리',
+    path: 'design/wiki/설비툴/설비-고장-접수-흐름.md',
+    headings: ['설비 고장 접수 흐름', '2. 접수 후 처리'],
+    start: 21, cite: [25, 27],
+    lines: [
+      '## 2. 접수 후 처리', '',
+      '고장 접수는 현장 단말 또는 설비 화면에서 등록한다.', '',
+      "- 접수가 저장되면 설비 상태를 '수리 중'으로 바꾼다.",
+      '- 해당 설비에 배정된 W/O 목록에 대체 설비 후보를 표시한다.',
+      '- 대체 설비 후보는 같은 라인, 같은 형체력 등급의 가동 가능 설비로 한정한다.', '',
+      '## 3. 알림', '',
+      '- 접수 즉시 라인 반장과 설비 담당자에게 알림을 보낸다.',
+      '- 30분 안에 담당자가 지정되지 않으면 생산 관리자에게 다시 알린다.',
+    ],
+  },
+  {
+    id: 3, kind: 'doc', title: '수리 이력 관리 요구사항 · 4. 필수 기록 항목',
+    path: 'design/wiki/설비툴/수리-이력-관리-요구사항.md',
+    headings: ['수리 이력 관리 요구사항', '4. 필수 기록 항목'],
+    start: 57, cite: [61, 62],
+    lines: [
+      '## 4. 필수 기록 항목', '',
+      '수리 완료 처리는 아래 항목이 모두 입력되어야 저장할 수 있다.', '',
+      '- 수리 일자, 수리 내용, 교체 부품, 작업자',
+      "- 완료 처리가 저장되면 설비 상태를 '가동 중'으로 되돌린다.", '',
+      '교체 부품이 없으면 "없음"을 명시적으로 선택한다.', '',
+      '## 5. 조회', '',
+      '- 설비별 수리 이력은 최근 순으로 보여 준다.',
+    ],
+  },
+  {
+    id: 4, kind: 'kg', title: 'IMM-07 설비 정보와 수리 이력', focus: 'imm07',
+    nodes: [
+      { id: 'imm07', type: 'equip', label: 'IMM-07', used: true, props: { 설비종류: '사출기', 형체력: '350톤', 도입일: '2019-03-14', 자산코드: 'A-INJ-0007' } },
+      { id: 'hs', type: 'maker', label: '한성기계', used: true, props: { 구분: '제조사', 설비수: '2라인 3대' } },
+      { id: 'l2', type: 'line', label: '2라인', used: true, props: { 구분: '사출 라인', 설비수: '5대' } },
+      { id: 'fix', type: 'state', label: '수리 중', used: true, props: { 변경일: '2026-10-12', 사유: '고장 접수' } },
+      { id: 'r1', type: 'repair', label: '09-18 유압 펌프', used: true, props: { 수리일자: '2026-09-18', 내용: '유압 펌프 압력 저하', 교체부품: '유압 펌프', 작업자: '설비보전 1조' } },
+      { id: 'r2', type: 'repair', label: '07-02 히터 밴드', used: true, props: { 수리일자: '2026-07-02', 내용: '실린더 2구간 온도 편차', 교체부품: '히터 밴드', 작업자: '설비보전 2조' } },
+      { id: 'r3', type: 'repair', label: '03-11 노즐 팁', used: true, props: { 수리일자: '2026-03-11', 내용: '노즐 누유', 교체부품: '노즐 팁', 작업자: '(없음)' } },
+      { id: 'imm05', type: 'equip', label: 'IMM-05', props: { 설비종류: '사출기', 형체력: '350톤' } },
+      { id: 'imm08', type: 'equip', label: 'IMM-08', props: { 설비종류: '사출기', 형체력: '450톤' } },
+      { id: 'run', type: 'state', label: '가동 중', props: { 구분: '설비 상태' } },
+      { id: 'dk', type: 'maker', label: '대광정밀', props: { 구분: '제조사' } },
+    ],
+    edges: [
+      ['imm07', 'hs', '제조사'], ['imm07', 'l2', '설치 라인'], ['imm07', 'fix', '현재 상태'],
+      ['imm07', 'r1', '수리 이력'], ['imm07', 'r2', '수리 이력'], ['imm07', 'r3', '수리 이력'],
+      ['imm05', 'l2', '설치 라인'], ['imm08', 'l2', '설치 라인'], ['imm08', 'hs', '제조사'],
+      ['imm05', 'dk', '제조사'], ['imm05', 'run', '현재 상태'], ['imm08', 'run', '현재 상태'],
+    ],
+    warn: '수리 이력 1건(2026-03-11 노즐 팁)에 작업자 정보가 없습니다.',
+    sparql: `PREFIX omf: <https://omf.example/ontology#>
+
+SELECT ?date ?desc ?part ?worker WHERE {
+  omf:IMM-07 omf:hasRepair ?repair .
+  ?repair omf:repairDate ?date ;
+          omf:description ?desc ;
+          omf:replacedPart ?part .
+  OPTIONAL { ?repair omf:worker ?worker }
+  FILTER (?date >= "2026-03-01"^^xsd:date)
+}
+ORDER BY DESC(?date)`,
+  },
+  {
+    id: 5, kind: 'kg', title: '2라인 사출기 상태', focus: 'l2',
+    nodes: [
+      { id: 'l2', type: 'line', label: '2라인', used: true, props: { 구분: '사출 라인', 설비수: '5대' } },
+      { id: 'imm05', type: 'equip', label: 'IMM-05', used: true, props: { 형체력: '350톤' } },
+      { id: 'imm06', type: 'equip', label: 'IMM-06', used: true, props: { 형체력: '250톤' } },
+      { id: 'imm07', type: 'equip', label: 'IMM-07', used: true, props: { 형체력: '350톤' } },
+      { id: 'imm08', type: 'equip', label: 'IMM-08', used: true, props: { 형체력: '450톤' } },
+      { id: 'imm09', type: 'equip', label: 'IMM-09', used: true, props: { 형체력: '450톤' } },
+      { id: 'run', type: 'state', label: '가동 중', used: true, props: { 설비수: '3대' } },
+      { id: 'fix', type: 'state', label: '수리 중', used: true, props: { 설비수: '1대' } },
+      { id: 'idle', type: 'state', label: '대기', used: true, props: { 설비수: '1대' } },
+      { id: 'hs', type: 'maker', label: '한성기계', props: { 구분: '제조사' } },
+      { id: 'dk', type: 'maker', label: '대광정밀', props: { 구분: '제조사' } },
+    ],
+    edges: [
+      ['imm05', 'l2', '설치 라인'], ['imm06', 'l2', '설치 라인'], ['imm07', 'l2', '설치 라인'],
+      ['imm08', 'l2', '설치 라인'], ['imm09', 'l2', '설치 라인'],
+      ['imm05', 'run', '현재 상태'], ['imm06', 'idle', '현재 상태'], ['imm07', 'fix', '현재 상태'],
+      ['imm08', 'run', '현재 상태'], ['imm09', 'run', '현재 상태'],
+      ['imm07', 'hs', '제조사'], ['imm08', 'hs', '제조사'], ['imm09', 'hs', '제조사'],
+      ['imm05', 'dk', '제조사'], ['imm06', 'dk', '제조사'],
+    ],
+    warn: null,
+    sparql: `PREFIX omf: <https://omf.example/ontology#>
+
+SELECT ?equip ?state WHERE {
+  ?equip a omf:InjectionMachine ;
+         omf:installedAt omf:Line2 ;
+         omf:currentState ?state .
+}
+ORDER BY ?equip`,
+  },
+]
+
+const STAGES = [
+  { doing: '질문 파악 중', done: '질문 파악', note: '설비 조회 + 정책 문서 질문', ms: 1000 },
+  { doing: '벡터 DB에서 찾는 중', done: '벡터 DB 검색', note: '문서 근거 3건', ms: 1400 },
+  { doing: '지식 그래프에서 찾는 중', done: '지식 그래프 검색', note: '노드 22개 · 관계 27개', ms: 1500 },
+  { doing: '검색된 자료 정리 중', done: '자료 정리', note: '근거 5건 선별', ms: 1000 },
+  { doing: '답변서 작성 중', done: '답변서 작성', note: '완료', ms: 0 },
+]
+
+/* ───────── 진행 단계 ───────── */
+const stagesEl = $('#stages')
+const stageLive = $('#stage-live')
+STAGES.forEach((s) => {
+  stagesEl.append(el('li', { class: 'stage done' },
+    `<span class="dot stage-dot-wrap" aria-hidden="true">✓</span>
+     <div class="stage-text"><p class="stage-title">${s.done}</p><p class="stage-note">${s.note}</p></div>`))
+})
+const setStage = (i, state) => {
+  const li = stagesEl.children[i]
+  const s = STAGES[i]
+  li.className = 'stage' + (state === 'idle' ? '' : ' ' + state)
+  $('.dot', li).textContent = state === 'done' ? '✓' : String(i + 1)
+  $('.stage-title', li).textContent = state === 'done' ? s.done : s.doing
+  $('.stage-note', li).innerHTML = state === 'done' ? s.note
+    : state === 'active' ? '진행 중<span class="dots"><i>.</i><i>.</i><i>.</i></span>' : '대기'
+  if (state === 'active') stageLive.textContent = s.doing
+}
+
+/* ───────── 근거 인덱스 ───────── */
+const evList = $('#ev-list')
+EVIDENCE.forEach((ev) => {
+  const sub = ev.kind === 'doc'
+    ? `${ev.path} · ${ev.cite[0]}–${ev.cite[1]}행`
+    : `노드 ${ev.nodes.length}개 · 관계 ${ev.edges.length}개`
+  const li = el('li')
+  li.append(el('button', { class: 'ev ' + ev.kind, type: 'button', 'data-ev': ev.id, 'aria-pressed': 'false' },
+    `<span class="ev-no">${ev.id}</span><span class="ev-title">${esc(ev.title)}</span>
+     <span class="ev-kind">${ev.kind === 'doc' ? '문서' : '지식 그래프'}</span><span class="ev-sub">${esc(sub)}</span>`))
+  evList.append(li)
+})
+
+/* ───────── 근거 상세 ───────── */
+const detail = $('#detail')
+let graph = null
+
+const showEmpty = (title, text) => {
+  graph?.destroy(); graph = null
+  detail.innerHTML = `<div class="empty"><strong>${title}</strong><span>${text}</span></div>`
+}
+
+const renderDoc = (ev) => {
+  const rows = ev.lines.map((tx, i) => {
+    const no = ev.start + i
+    const hit = no >= ev.cite[0] && no <= ev.cite[1]
+    return `<div class="ln${hit ? ' hit' : ''}"><span class="no">${no}</span><span class="tx">${esc(tx)}</span></div>`
+  }).join('')
+  detail.innerHTML = `
+    <div class="detail-head">
+      <p class="detail-kicker"><b>${ev.id}</b> 문서 원본</p>
+      <h3>${esc(ev.headings[ev.headings.length - 1])}</h3>
+      <p class="crumbs"><code>${esc(ev.path)}</code><br>${ev.headings.map(esc).join(' › ')}</p>
+    </div>
+    <div class="doc-view" tabindex="0" aria-label="문서 원본">${rows}</div>
+    <div class="doc-foot"><i aria-hidden="true"></i> 답변에 인용된 부분 (${ev.cite[0]}–${ev.cite[1]}행)</div>`
+  const box = $('.doc-view', detail)
+  const first = $('.ln.hit', box)
+  if (first) box.scrollTop = Math.max(0, first.offsetTop - box.offsetTop - 80)
+}
+
+const shapeSvg = (type) => {
+  const c = `var(${TYPES[type].token})`
+  const body = {
+    equip: `<circle cx="7" cy="7" r="5.5"/>`,
+    repair: `<rect x="1.5" y="1.5" width="11" height="11" rx="2.5"/>`,
+    line: `<path d="M7 1 12.2 4v6L7 13 1.8 10V4z"/>`,
+    maker: `<path d="M7 1 13 7 7 13 1 7z"/>`,
+    state: `<rect x="0.8" y="3" width="12.4" height="8" rx="4"/>`,
+  }[type]
+  return `<svg viewBox="0 0 14 14" fill="${c}" fill-opacity=".22" stroke="${c}" stroke-width="1.6" aria-hidden="true">${body}</svg>`
+}
+
+const renderNodeCard = (ev, id) => {
+  const box = $('#node-box', detail)
+  if (!box) return
+  const n = ev.nodes.find((x) => x.id === id)
+  if (!n) { box.innerHTML = `<p class="node-hint">노드를 선택하면 속성과 연결 관계를 볼 수 있습니다.</p>`; return }
+  const rel = ev.edges.filter((e) => e[0] === id || e[1] === id).map((e) => {
+    const other = ev.nodes.find((x) => x.id === (e[0] === id ? e[1] : e[0]))
+    return `<dt>${esc(e[2])}</dt><dd>${e[0] === id ? '→' : '←'} ${esc(other.label)}</dd>`
+  }).join('')
+  const props = Object.entries(n.props || {}).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')
+  box.innerHTML = `<div class="node-card">
+      <p class="nm">${shapeSvg(n.type)} ${esc(n.label)} <span class="tp">${TYPES[n.type].name}</span>${n.used ? '<span class="tp">답변에 사용</span>' : ''}</p>
+      <dl>${props}${rel}</dl></div>`
+}
+
+const renderKg = (ev) => {
+  const usedTypes = [...new Set(ev.nodes.map((n) => n.type))]
+  const byId = Object.fromEntries(ev.nodes.map((n) => [n.id, n]))
+  detail.innerHTML = `
+    <div class="detail-head">
+      <p class="detail-kicker"><b>${ev.id}</b> 지식 그래프</p>
+      <h3>${esc(ev.title)}</h3>
+      <p class="crumbs">노드 ${ev.nodes.length}개 · 관계 ${ev.edges.length}개</p>
+    </div>
+    <div class="kg-stage" id="kg-stage">
+      <canvas id="kg-canvas" role="img" aria-label="${esc(ev.title)} 그래프. 표로 보기 버튼으로 같은 내용을 표로 볼 수 있습니다."></canvas>
+      <div class="kg-tools">
+        <button type="button" data-act="replay">다시 재생</button>
+        <button type="button" data-act="out" aria-label="축소">−</button>
+        <button type="button" data-act="in" aria-label="확대">+</button>
+        <button type="button" data-act="fit">화면 맞춤</button>
+      </div>
+      <span class="kg-hint">노드를 끌어 옮기고, 선택하면 연결 관계가 강조됩니다</span>
+    </div>
+    <div class="kg-table" id="kg-table" hidden>
+      <table><thead><tr><th>주어</th><th>관계</th><th>대상</th></tr></thead><tbody>
+      ${ev.edges.map((e) => `<tr><td>${esc(byId[e[0]].label)}</td><td>${esc(e[2])}</td><td>${esc(byId[e[1]].label)}</td></tr>`).join('')}
+      </tbody></table>
+    </div>
+    <div class="legend">
+      ${usedTypes.map((t) => `<span>${shapeSvg(t)}${TYPES[t].name}</span>`).join('')}
+      <span class="used-key"><i class="ring" aria-hidden="true"></i>답변에 사용</span>
+      <button type="button" class="mini" id="kg-toggle" aria-pressed="false">표로 보기</button>
+    </div>
+    <div class="kg-info">
+      <div id="node-box"></div>
+      ${ev.warn ? `<p class="kg-warn"><strong>데이터 품질 경고</strong> · ${esc(ev.warn)}</p>` : ''}
+    </div>
+    <details class="sparql"><summary>실행한 SPARQL 질의</summary><pre>${esc(ev.sparql)}</pre></details>`
+
+  graph = new Graph($('#kg-canvas', detail), ev, (id) => renderNodeCard(ev, id))
+  renderNodeCard(ev, ev.focus)
+
+  $('.kg-tools', detail).addEventListener('click', (e) => {
+    const act = e.target.closest('button')?.dataset.act
+    if (act === 'replay') graph.replay()
+    if (act === 'fit') graph.fit()
+    if (act === 'in') graph.zoom(1.25)
+    if (act === 'out') graph.zoom(0.8)
+  })
+  $('#kg-toggle', detail).addEventListener('click', (e) => {
+    const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'
+    e.currentTarget.setAttribute('aria-pressed', String(on))
+    e.currentTarget.textContent = on ? '그래프로 보기' : '표로 보기'
+    $('#kg-stage', detail).hidden = on
+    $('#kg-table', detail).hidden = !on
+  })
+}
+
+const selectEvidence = (id, { scroll = false } = {}) => {
+  const ev = EVIDENCE.find((x) => x.id === id)
+  if (!ev) return
+  graph?.destroy(); graph = null
+  document.querySelectorAll('.ev').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.ev) === id)))
+  document.querySelectorAll('.cite').forEach((b) => b.classList.toggle('on', Number(b.dataset.ev) === id))
+  if (ev.kind === 'doc') renderDoc(ev); else renderKg(ev)
+  if (scroll && matchMedia('(max-width: 960px)').matches) {
+    detail.scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'start' })
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.cite, .ev')
+  if (btn) selectEvidence(Number(btn.dataset.ev), { scroll: true })
+})
+
+/* ───────── 지식 그래프 (캔버스 물리 시뮬레이션) ───────── */
+class Graph {
+  constructor(canvas, ev, onSelect) {
+    this.canvas = canvas; this.ctx = canvas.getContext('2d'); this.ev = ev; this.onSelect = onSelect
+    this.view = { k: 1, x: 0, y: 0 }; this.auto = true
+    this.hover = null; this.sel = null; this.drag = null; this.alive = true
+    this.readTheme()
+    this.build()
+    this.ro = new ResizeObserver(() => this.resize()); this.ro.observe(canvas)
+    this.mq = matchMedia('(prefers-color-scheme: dark)')
+    this.onTheme = () => this.readTheme(); this.mq.addEventListener('change', this.onTheme)
+    document.fonts?.ready.then(() => this.alive && this.readTheme())
+    this.bind()
+    this.resize()
+    this.loop = this.loop.bind(this); this.raf = requestAnimationFrame(this.loop)
+  }
+
+  readTheme() {
+    const cs = getComputedStyle(document.documentElement)
+    const v = (n) => cs.getPropertyValue(n).trim()
+    this.c = { ink: v('--ink'), ink2: v('--ink-2'), ink3: v('--ink-3'), line: v('--line'), canvas: v('--canvas'), accent: v('--accent') }
+    for (const [k, t] of Object.entries(TYPES)) this.c[k] = v(t.token)
+    this.font = getComputedStyle(document.body).fontFamily
+  }
+
+  build() {
+    const { ev } = this
+    const now = performance.now()
+    this.nodes = ev.nodes.map((n, i) => ({
+      ...n, i, x: (Math.random() - .5) * 8, y: (Math.random() - .5) * 8, vx: 0, vy: 0,
+      r: n.id === ev.focus ? 26 : n.type === 'equip' ? 20 : 17, born: 0, fixed: false,
+    }))
+    const byId = Object.fromEntries(this.nodes.map((n) => [n.id, n]))
+    this.edges = ev.edges.map(([s, t, label], i) => ({ s: byId[s], t: byId[t], label, i }))
+    this.adj = new Map(this.nodes.map((n) => [n.id, new Set()]))
+    this.edges.forEach((e) => { this.adj.get(e.s.id).add(e.t.id); this.adj.get(e.t.id).add(e.s.id) })
+
+    // 중심 노드에서 가까운 순서로 차례차례 등장
+    const depth = new Map([[ev.focus, 0]]); const queue = [ev.focus]; const parent = new Map()
+    while (queue.length) {
+      const id = queue.shift()
+      for (const nb of this.adj.get(id)) if (!depth.has(nb)) { depth.set(nb, depth.get(id) + 1); parent.set(nb, id); queue.push(nb) }
+    }
+    const order = [...this.nodes].sort((a, b) => (depth.get(a.id) ?? 9) - (depth.get(b.id) ?? 9))
+    order.forEach((n, k) => {
+      n.depth = depth.get(n.id) ?? 3
+      n.parent = byId[parent.get(n.id)] || null
+      n.born = REDUCED ? now - 5000 : now + 250 + n.depth * 420 + k * 95
+      n.spawned = REDUCED
+    })
+    this.alpha = 1
+    if (REDUCED) for (let i = 0; i < 320; i++) this.step(now)
+  }
+
+  replay() { this.auto = true; this.build() }
+  fit() { this.auto = true }
+  zoom(f) { this.auto = false; this.view.k = Math.min(2.6, Math.max(.35, this.view.k * f)) }
+  select(id, silent) { this.sel = id; if (!silent) this.onSelect(id) }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    const { clientWidth: w, clientHeight: h } = this.canvas
+    if (!w || !h) return
+    this.w = w; this.h = h; this.dpr = dpr
+    this.canvas.width = Math.round(w * dpr); this.canvas.height = Math.round(h * dpr)
+  }
+
+  step(now) {
+    const live = this.nodes.filter((n) => now >= n.born)
+    for (const n of live) if (!n.spawned) {
+      n.spawned = true
+      if (n.parent) { const a = Math.random() * Math.PI * 2; n.x = n.parent.x + Math.cos(a) * 14; n.y = n.parent.y + Math.sin(a) * 14 }
+      this.alpha = Math.max(this.alpha, .7)
+    }
+    const a = this.alpha
+    for (let i = 0; i < live.length; i++) {
+      const p = live[i]
+      for (let j = i + 1; j < live.length; j++) {
+        const q = live[j]
+        let dx = q.x - p.x, dy = q.y - p.y
+        let d2 = dx * dx + dy * dy
+        if (d2 < 1) { dx = Math.random() - .5; dy = Math.random() - .5; d2 = 1 }
+        const d = Math.sqrt(d2)
+        const f = Math.min(24, (15000 / Math.max(d2, 400)) * a)
+        const fx = (dx / d) * f, fy = (dy / d) * f
+        p.vx -= fx; p.vy -= fy; q.vx += fx; q.vy += fy
+      }
+      p.vx -= p.x * .006 * a; p.vy -= p.y * .017 * a
+    }
+    for (const e of this.edges) {
+      if (now < e.s.born || now < e.t.born) continue
+      const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y
+      const d = Math.sqrt(dx * dx + dy * dy) || 1
+      const f = (d - 138) * .05 * a
+      const fx = (dx / d) * f, fy = (dy / d) * f
+      e.s.vx += fx; e.s.vy += fy; e.t.vx -= fx; e.t.vy -= fy
+    }
+    for (const n of live) {
+      if (n.fixed) { n.vx = n.vy = 0; continue }
+      n.vx = Math.max(-30, Math.min(30, n.vx * .8)); n.vy = Math.max(-30, Math.min(30, n.vy * .8)); n.x += n.vx; n.y += n.vy
+    }
+    this.alpha = Math.max(.02, this.alpha * .985)
+  }
+
+  autoFit(now) {
+    const live = this.nodes.filter((n) => now >= n.born)
+    if (!live.length || !this.w) return
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+    for (const n of live) { x0 = Math.min(x0, n.x - n.r - 46); x1 = Math.max(x1, n.x + n.r + 46); y0 = Math.min(y0, n.y - n.r - 24); y1 = Math.max(y1, n.y + n.r + 34) }
+    const k = Math.min(1.35, (this.w - 32) / Math.max(x1 - x0, 240), (this.h - 140) / Math.max(y1 - y0, 200))
+    const tx = -((x0 + x1) / 2) * k, ty = -((y0 + y1) / 2) * k + 2
+    const s = REDUCED ? 1 : .09
+    this.view.k += (k - this.view.k) * s; this.view.x += (tx - this.view.x) * s; this.view.y += (ty - this.view.y) * s
+  }
+
+  toWorld(px, py) { return { x: (px - this.w / 2 - this.view.x) / this.view.k, y: (py - this.h / 2 - this.view.y) / this.view.k } }
+  hit(px, py) {
+    const p = this.toWorld(px, py); const now = performance.now()
+    for (let i = this.nodes.length - 1; i >= 0; i--) {
+      const n = this.nodes[i]
+      if (now < n.born) continue
+      if ((n.x - p.x) ** 2 + (n.y - p.y) ** 2 <= (n.r + 6) ** 2) return n
+    }
+    return null
+  }
+
+  bind() {
+    const cv = this.canvas
+    const pos = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top] }
+    cv.addEventListener('pointerdown', (e) => {
+      const [x, y] = pos(e); const n = this.hit(x, y)
+      this.drag = { n, x, y, moved: 0 }
+      if (n) n.fixed = true
+      cv.setPointerCapture(e.pointerId); cv.classList.add('grabbing')
+    })
+    cv.addEventListener('pointermove', (e) => {
+      const [x, y] = pos(e)
+      if (!this.drag) { const n = this.hit(x, y); this.hover = n ? n.id : null; cv.style.cursor = n ? 'pointer' : ''; return }
+      const d = this.drag; d.moved += Math.abs(x - d.x) + Math.abs(y - d.y)
+      if (d.n) { const p = this.toWorld(x, y); d.n.x = p.x; d.n.y = p.y; this.alpha = Math.max(this.alpha, .35) }
+      else if (d.moved > 4) { this.auto = false; this.view.x += x - d.x; this.view.y += y - d.y }
+      d.x = x; d.y = y
+    })
+    const up = () => {
+      const d = this.drag; if (!d) return
+      this.drag = null; cv.classList.remove('grabbing')
+      if (d.n) d.n.fixed = false
+      if (d.moved < 5) this.select(d.n ? d.n.id : null)
+    }
+    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up)
+    cv.addEventListener('pointerleave', () => { if (!this.drag) this.hover = null })
+    cv.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      e.preventDefault(); this.zoom(e.deltaY < 0 ? 1.1 : .9)
+    }, { passive: false })
+  }
+
+  path(ctx, n, r) {
+    ctx.beginPath()
+    if (n.type === 'equip') ctx.arc(0, 0, r, 0, Math.PI * 2)
+    else if (n.type === 'repair') ctx.roundRect(-r, -r, r * 2, r * 2, r * .32)
+    else if (n.type === 'state') ctx.roundRect(-r * 1.35, -r * .78, r * 2.7, r * 1.56, r * .78)
+    else if (n.type === 'maker') { ctx.moveTo(0, -r * 1.15); ctx.lineTo(r * 1.15, 0); ctx.lineTo(0, r * 1.15); ctx.lineTo(-r * 1.15, 0); ctx.closePath() }
+    else { for (let i = 0; i < 6; i++) { const a = Math.PI / 6 + (i * Math.PI) / 3; ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a) * r * 1.08, Math.sin(a) * r * 1.08) } ctx.closePath() }
+  }
+
+  draw(now) {
+    const { ctx, c, view } = this
+    if (!this.w) return
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    ctx.clearRect(0, 0, this.w, this.h)
+
+    // 배경 점 격자
+    ctx.fillStyle = c.line
+    const gap = 26 * view.k
+    if (gap > 9) {
+      const ox = ((this.w / 2 + view.x) % gap + gap) % gap, oy = ((this.h / 2 + view.y) % gap + gap) % gap
+      for (let x = ox; x < this.w; x += gap) for (let y = oy; y < this.h; y += gap) ctx.fillRect(x, y, 1.2, 1.2)
+    }
+
+    ctx.translate(this.w / 2 + view.x, this.h / 2 + view.y); ctx.scale(view.k, view.k)
+    const focusId = this.hover ?? this.sel
+    const near = focusId ? this.adj.get(focusId) : null
+    const lit = (id) => !focusId || id === focusId || near.has(id)
+    const ease = (t) => 1 - Math.pow(1 - t, 3)
+    const back = (t) => 1 + 2.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2)
+    const float = (n) => REDUCED || n.fixed ? 0 : Math.sin(now / 1500 + n.i * 1.7) * 2.2
+    const P = (n) => ({ x: n.x + (REDUCED ? 0 : Math.cos(now / 1900 + n.i) * 1.4), y: n.y + float(n) })
+
+    // 관계선
+    for (const e of this.edges) {
+      const t0 = Math.max(e.s.born, e.t.born)
+      if (now < t0) continue
+      const p = ease(Math.min(1, (now - t0) / 520))
+      const from = e.s.born <= e.t.born ? e.s : e.t, to = from === e.s ? e.t : e.s
+      const a = P(from), b = P(to)
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1
+      const ux = dx / d, uy = dy / d
+      const sx = a.x + ux * (from.r + 3), sy = a.y + uy * (from.r + 3)
+      const len = Math.max(0, d - from.r - to.r - 8) * p
+      const ex = sx + ux * len, ey = sy + uy * len
+      const on = focusId ? (e.s.id === focusId || e.t.id === focusId) : false
+      const used = e.s.used && e.t.used
+      ctx.globalAlpha = focusId ? (on ? 1 : .14) : used ? .95 : .5
+      ctx.strokeStyle = on ? c.accent : used ? c.ink3 : c.line
+      ctx.lineWidth = on ? 2.2 : used ? 1.6 : 1.3
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke()
+
+      if (p >= 1) {
+        // 화살촉: 주어 → 대상
+        const tip = e.t === to ? { x: ex, y: ey, ux, uy } : { x: sx, y: sy, ux: -ux, uy: -uy }
+        ctx.fillStyle = ctx.strokeStyle
+        ctx.beginPath(); ctx.moveTo(tip.x + tip.ux * 5, tip.y + tip.uy * 5)
+        ctx.lineTo(tip.x - tip.ux * 4 - tip.uy * 4, tip.y - tip.uy * 4 + tip.ux * 4)
+        ctx.lineTo(tip.x - tip.ux * 4 + tip.uy * 4, tip.y - tip.uy * 4 - tip.ux * 4); ctx.closePath(); ctx.fill()
+
+        // 관계를 따라 흐르는 빛
+        if (!REDUCED && (used || on)) {
+          const dir = e.s === from ? 1 : -1
+          let ph = ((now / 2100 + e.i * .37) % 1); if (dir < 0) ph = 1 - ph
+          const qx = sx + (ex - sx) * ph, qy = sy + (ey - sy) * ph
+          ctx.globalAlpha *= Math.sin(ph * Math.PI)
+          ctx.fillStyle = on ? c.accent : c[e.s.type]
+          ctx.beginPath(); ctx.arc(qx, qy, on ? 3 : 2.4, 0, Math.PI * 2); ctx.fill()
+        }
+
+        // 관계 이름
+        if (view.k > .62 && (!focusId || on)) {
+          ctx.globalAlpha = focusId ? 1 : used ? .9 : .6
+          ctx.font = `500 10.5px ${this.font}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          const mx = (sx + ex) / 2, my = (sy + ey) / 2
+          ctx.lineWidth = 4; ctx.strokeStyle = c.canvas; ctx.lineJoin = 'round'
+          ctx.strokeText(e.label, mx, my); ctx.fillStyle = on ? c.accent : c.ink3; ctx.fillText(e.label, mx, my)
+        }
+      }
+    }
+
+    // 노드
+    for (const n of this.nodes) {
+      if (now < n.born) continue
+      const t = Math.min(1, (now - n.born) / 520)
+      const s = REDUCED ? 1 : Math.max(0, back(t))
+      const p = P(n); const col = c[n.type]; const on = lit(n.id)
+      ctx.save(); ctx.translate(p.x, p.y); ctx.scale(s, s)
+      ctx.globalAlpha = on ? 1 : .2
+
+      if (t < 1 && !REDUCED) { // 등장 파동
+        ctx.globalAlpha = (1 - t) * .5; ctx.strokeStyle = col; ctx.lineWidth = 2
+        ctx.beginPath(); ctx.arc(0, 0, n.r + t * 26, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = on ? 1 : .2
+      }
+      if (n.used) { // 답변에 사용된 노드
+        const pulse = REDUCED ? 0 : Math.sin(now / 700 + n.i) * 1.2
+        ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.globalAlpha *= .55
+        this.path(ctx, n, n.r + 5.5 + pulse); ctx.stroke(); ctx.globalAlpha = on ? 1 : .2
+      }
+      this.path(ctx, n, n.r); ctx.fillStyle = c.canvas; ctx.fill()
+      ctx.globalAlpha *= n.id === this.sel ? .42 : .2; ctx.fillStyle = col; ctx.fill()
+      ctx.globalAlpha = on ? 1 : .2
+      ctx.strokeStyle = col; ctx.lineWidth = n.id === this.sel ? 3.2 : 2; ctx.stroke()
+      ctx.restore()
+
+      ctx.globalAlpha = (on ? 1 : .25) * Math.min(1, t * 1.6)
+      const big = n.id === this.ev.focus
+      ctx.font = `${big ? 700 : 600} ${big ? 13 : 11.5}px ${this.font}`; ctx.textAlign = 'center'; ctx.textBaseline = 'top'
+      const ly = p.y + n.r * (n.type === 'maker' ? 1.15 : n.type === 'state' ? .78 : 1) + 8
+      ctx.lineWidth = 4; ctx.strokeStyle = c.canvas; ctx.lineJoin = 'round'
+      ctx.strokeText(n.label, p.x, ly); ctx.fillStyle = c.ink; ctx.fillText(n.label, p.x, ly)
+    }
+    ctx.globalAlpha = 1
+  }
+
+  loop(now) {
+    if (!this.alive) return
+    this.step(now)
+    if (this.auto) this.autoFit(now)
+    this.draw(now)
+    this.raf = requestAnimationFrame(this.loop)
+  }
+
+  destroy() { this.alive = false; cancelAnimationFrame(this.raf); this.ro.disconnect(); this.mq.removeEventListener('change', this.onTheme) }
+}
+
+/* ───────── 검색 실행 흐름 ───────── */
+const form = $('#ask-form'), input = $('#question'), goBtn = $('#go'), goLabel = $('#go-label')
+const answer = $('#answer'), title = $('#answer-title'), elapsed = $('#elapsed')
+let runToken = 0
+
+title.textContent = input.value.trim()
+
+const run = async () => {
+  const q = input.value.trim()
+  $('#q-error').hidden = !!q
+  if (!q) { input.focus(); return }
+  const token = ++runToken
+  const started = performance.now()
+  goBtn.disabled = true; goLabel.textContent = '검색 중'
+  title.textContent = q
+  answer.dataset.state = 'working'
+  document.querySelectorAll('.blk').forEach((b) => b.classList.remove('in'))
+  document.querySelectorAll('.cite').forEach((b) => b.classList.remove('on'))
+  STAGES.forEach((_, i) => setStage(i, 'idle'))
+  showEmpty('근거를 찾고 있습니다', '답변서가 완성되면 근거를 선택해 내용을 볼 수 있습니다.')
+
+  for (let i = 0; i < STAGES.length - 1; i++) {
+    setStage(i, 'active'); await sleep(STAGES[i].ms)
+    if (token !== runToken) return
+    setStage(i, 'done')
+  }
+
+  setStage(4, 'active')
+  answer.dataset.state = 'streaming'
+  for (const blk of document.querySelectorAll('.blk')) {
+    blk.classList.add('in'); await sleep(520)
+    if (token !== runToken) return
+  }
+  setStage(4, 'done')
+  answer.dataset.state = 'done'
+  elapsed.textContent = `조회 ${((performance.now() - started) / 1000).toFixed(1)}초`
+  stageLive.textContent = '답변서가 완성되었습니다'
+  goBtn.disabled = false; goLabel.textContent = '검색 시작'
+  selectEvidence(4)
+}
+
+form.addEventListener('submit', (e) => { e.preventDefault(); run() })
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run() } })
+document.querySelectorAll('.examples button').forEach((b) => b.addEventListener('click', () => { input.value = b.textContent; input.focus() }))
+
+/* ───────── 디자인 테마 전환 ───────── */
+const SKINS = ['base', 'control', 'blueprint', 'report']
+const setSkin = (name) => {
+  if (!SKINS.includes(name)) name = 'base'
+  if (name === 'base') delete document.documentElement.dataset.skin
+  else document.documentElement.dataset.skin = name
+  document.querySelectorAll('.skin-switch button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.skin === name)))
+  try { localStorage.setItem('omf-mock-skin', name) } catch {}
+  if (location.hash.slice(1) !== name) history.replaceState(null, '', '#' + name)
+  if (graph) { graph.readTheme(); document.fonts?.ready.then(() => graph?.readTheme()) }
+}
+document.querySelectorAll('.skin-switch button').forEach((b) => b.addEventListener('click', () => setSkin(b.dataset.skin)))
+let savedSkin = location.hash.slice(1)
+if (!SKINS.includes(savedSkin)) { try { savedSkin = localStorage.getItem('omf-mock-skin') } catch { savedSkin = null } }
+setSkin(savedSkin || 'base')
+window.addEventListener('hashchange', () => { if (SKINS.includes(location.hash.slice(1))) setSkin(location.hash.slice(1)) })
+
+// 첫 화면은 완성된 예시 상태로 시작
+selectEvidence(4)
+})()
+</script>
+</body>
+</html>
