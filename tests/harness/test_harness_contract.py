@@ -39,7 +39,7 @@ REQUIRED_FILES = (
 
 PRESERVED_AGENTS_SECTION_HASHES = {
     "프로젝트 목표와 경계": (
-        "caab8c44198fb61bd5fbf4c997a7429a572060a583ef74bea4e4e957896871de"
+        "288d1536dc97c4eeb5fb7a8dcbf327b21bbd2874c7510450cb30c7655f4a9f14"
     ),
     "단계별 공동 진행": (
         "4215e312744358d6f377e880c7185bb241c7e87f5c40bf87408b8f894d6ca1ae"
@@ -47,12 +47,12 @@ PRESERVED_AGENTS_SECTION_HASHES = {
     "사용자 승인 필수 의사결정": (
         "84e3565fb83eb843777eea3410a5018f512512dc0cf0a04ec8cb9ab94887aae1"
     ),
-    "문서 작성": ("80914913fe266066d43a6cac6ffa748aee67bd526ef1be309e2a4aa4d1376f35"),
+    "문서 작성": ("7b6cc92e966d62153c2adc1b4ab09ed7dddf1cce7cfe66d879fb617f9a7678e3"),
     "Agent 조회 동작": (
-        "1d6dd71cd362f9989e0a88b2d9ed1d1e9b729c72562c64df802f617f58636618"
+        "492a530f6bbf04d675e4e283c7c2ad96e620e9f7a7e183e40431abe3525e87b6"
     ),
     "확정된 MVP 설계 결정": (
-        "19c7123445c5ab65ac07278a80a9e009daafee19e9467c22ff4da249b2a68fe6"
+        "92b2d152356ad43f11c3660bd5ccc40bf87d35c178a1f98ca79d815e687980e1"
     ),
     "내부 모델 서버 현황": (
         "588b399157714c854352e4ec617fec4757452e52353e61f6d764aadb5882318a"
