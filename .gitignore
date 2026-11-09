@@ -12,3 +12,4 @@
 /web/dist/
 /web/node_modules/.cache/
 /web/.cache/
+__pycache__/
