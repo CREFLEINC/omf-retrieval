@@ -1,0 +1,517 @@
+openapi: 3.1.0
+info:
+  title: OMF Retrieval - 문서 자료 등록 API (spec 001)
+  version: 0.1.0-draft
+  description: |
+    spec `001-data-registration`의 REST 계약 초안이다. 기존 검색 API(`POST /v1/search`,
+    `GET /health/live`, `GET /health/ready`)는 바꾸지 않으며 이 파일에 다시 적지 않는다(FR-035).
+
+    용어
+    - 자료 ID(`material_id`): source 안에서 유일한 자료 식별값. 등록자가 전달한다(FR-037).
+    - revision(`revision_id`): 서버가 발급하는 불변 시점 식별값. UUIDv4 문자열(DR-09 권장안).
+    - 정보 자료(`info`): 이미지·스캔 내용을 사람이 글로 설명한 텍스트 파일(FR-018).
+    - 대상 파일: 묶음에서 정보 자료가 설명하는 파일(이미지, 전체 스캔 PDF, 그림이 든 Excel·PDF).
+    - 효력 있는 원본 읽기 권한: 원본 읽기 권한이 있고 외부 LLM 사용 표시가 `internal`인 상태(FR-031, FR-047).
+    - DR-xx: `research.md`의 결정 요청. 2026-11-10 DR-01~DR-24 모두 사용자 승인.
+
+    공개 노출: 기존처럼 서버는 `/openapi.json`을 노출하지 않는다. 이 파일은 저장소 안 계약 문서이며
+    계약 테스트는 경로·메서드·매개변수 이름·응답 코드·응답 스키마를 앱의 내부 OpenAPI와 대조하고,
+    요청 측 규칙(pattern·길이·개수·필수)은 동작 테스트로 확인한다(research DR-20).
+
+    판정 순서(FR-042, research R-04): ① 인증 → ② source 지정 → ③ 쓰기 권한 → ④ 자료 ID 규칙 →
+    ⑤ 스키마 ID 규칙 → ⑥ 본문 크기·multipart 해석 → ⑦ 구성 1차(파트 개수·이름, 내용 불필요) →
+    ⑧ 파일 형식·내용 확인(`file` 파트 순서대로, 그다음 `info`) → ⑨ 구성 2차(형식 판정 결과로 정보 자료 필요 여부와
+    대상 파일 종류) → ⑩ 텍스트·Markdown 단일 파일의 스키마 지정 금지 → ⑪ 스키마 입력 표(FR-012)·구성·충돌 →
+    ⑫ 스키마 맞음 판정. 앞 단계에서 거부되면 뒤 단계 사유는 나오지 않는다. 예시별 기대 사유는 research R-04 표.
+
+    선언 검증과 422(research R-04): 이 파일의 요청 측(매개변수, requestBody, multipart 필드)은 일부러 문자열·문자열 목록으로만
+    선언하고 pattern·길이·개수·enum·`required`·`additionalProperties`를 두지 않는다(경로 매개변수의 `required: true`는 OpenAPI 필수
+    문법이며 검증 효과가 없다). 응답 스키마에는 `additionalProperties: false`를 두며 이는 응답 형식 고정용이다. 프레임워크 선언 검증이 ① 인증보다 먼저 기존 422
+    `invalid_request`를 내지 않게 하기 위해서다. 규칙은 각 설명의 "핸들러 규칙"에 적었고 위 순서대로 핸들러가 판정한다.
+    기존 앱의 `RequestValidationError` → 422 `invalid_request` 처리기와 `/v1/search` 동작은 바꾸지 않는다.
+
+    응답 내용 비노출(research R-11, FR-034): 원본 읽기 권한이 필요 없는 응답(등록 결과, 거부, 스키마 조회, 현재본 조회)에는
+    파일 안에서 읽은 값(시트 이름, 셀 값, 문서 제목, 글자)을 넣지 않는다. 위치는 페이지 번호·시트 순번만 쓴다.
+  x-rejection-reasons:
+    description: FR-008의 16개 거부 사유와 응답 코드(DR-16 권장안). 모든 거부는 저장 결과를 남기지 않는다(FR-007).
+    reasons:
+      - {fr008: 인증, code: invalid_token, http: 401}
+      - {fr008: 권한, code: write_access_denied, http: 403, note: "없는 source, REST 등록 대상이 아닌 source(omf 포함), 쓰기 권한 없음을 구별하지 않는다(FR-002, US2-5, US2-16)"}
+      - {fr008: 대상 source 미지정, code: source_required, http: 400}
+      - {fr008: 요청 구성, code: invalid_request_composition, http: 400}
+      - {fr008: 자료 ID 누락 또는 규칙 위반, code: invalid_material_id, http: 400}
+      - {fr008: 파일 형식, code: unsupported_file_format, http: 415}
+      - {fr008: 내용 확인 불가, code: unreadable_content, http: 422}
+      - {fr008: 크기, code: file_too_large, http: 413}
+      - {fr008: 스키마 없음, code: schema_missing, http: 422}
+      - {fr008: 스키마 ID 규칙 위반, code: invalid_schema_id, http: 400}
+      - {fr008: 스키마 구성 불완전, code: incomplete_schema, http: 422}
+      - {fr008: 스키마 ID 충돌, code: schema_id_conflict, http: 409}
+      - {fr008: 스키마 불일치, code: schema_mismatch, http: 422}
+      - {fr008: 텍스트 파일 스키마 지정, code: text_schema_not_allowed, http: 400}
+      - {fr008: 정보 자료 없음, code: info_material_missing, http: 422}
+      - {fr008: 정보 자료 형식, code: invalid_info_material_format, http: 415}
+servers:
+  - url: http://localhost:8000
+    description: 로컬 검증. 공유 서버 배포는 001 범위 밖이다.
+security:
+  - bearerAuth: []
+paths:
+  /v1/registrations:
+    post:
+      operationId: registerMaterial
+      summary: 자료 1건(파일 1개 또는 묶음 1개)을 등록하고 revision을 받는다
+      description: |
+        FR-001~FR-022, FR-037~FR-038, FR-042, FR-044. 쓰기 권한이 필요하다.
+
+        요청 본문 처리는 multipart 의존성 결정(DR-05, 승인: `python-multipart`)에 의존한다.
+
+        등록 안내(DR-15 추가 결정): 묶음의 대상 파일은 순서 없는 집합이다. 제출 순서는 저장하지 않으며 revision 동일성에도 쓰지 않는다.
+        여러 쪽으로 된 문서(스캔한 여러 쪽 등)는 이미지 여러 장이 아니라 **PDF 하나로 합쳐** 등록한다. 이는 안내이며 거부 규칙이 아니다
+        (시스템은 이미지가 문서의 쪽인지 사진인지 구별할 수 없다).
+
+        ZIP·압축 파일(DR-03 추가 결정): `.zip`과 모든 압축 파일은 묶음 용기로도 일괄 등록으로도 받지 않는다. `file` 파트면
+        `unsupported_file_format`, `info` 파트면 `invalid_info_material_format`이다.
+
+        요청 구성(FR-044, DR-15 권장안)
+        - 단일 파일: `file` 1개, `info` 없음.
+        - 이미지 묶음: `info` 1개 + `file` 1~20개(이미지·전체 스캔 PDF) + `info_human_authored=true`.
+        - 그림 포함 파일 묶음: `info` 1개 + `file` 1개(그림이 든 Excel·PDF 또는 일부 페이지에만 글자 층이 없는 PDF) + `info_human_authored=true`.
+        - 구성 1차(⑦, 내용 불필요) → `invalid_request_composition`: `file` 0개, `info` 2개 이상, `schema`·`info_human_authored` 파트 2개 이상,
+          알 수 없는 파트 이름, 255자를 넘는 파트 파일 이름, `info` 없이 `file` 2개 이상, `info`와 함께 `file` 21개 이상,
+          `info` 없이 `info_human_authored`만 있음, multipart 해석 불가.
+        - 형식·내용(⑧): `file` 파트를 순서대로 확인해 첫 위반이 `unsupported_file_format` 또는 `unreadable_content`.
+          파일별 확인 순서(research R-04): 빈 파일 → 서명 판정 → 선언 대조 → (xlsx) ZIP 용기 해석 → 항목 수 상한 → OOXML 패키지 판정 → 손상 확인.
+          xlsx 경계(DR-04, 선언 형식이 xlsx인 파일만): ZIP 서명(`PK\x03\x04`)으로 시작하지만 ZIP으로 해석할 수 없음 → `unreadable_content`,
+          ZIP이지만 유효한 OOXML(xlsx) 패키지가 아님 → `unsupported_file_format`. 서명이 없는 알 수 없는 바이트는 선언과 관계없이
+          `unsupported_file_format`, 선언이 `.zip` 등이면 DR-03대로 `unsupported_file_format`이다.
+          안전 상한(DR-04 기본 설정값: 압축 해제 총량 512 MiB, 항목별 압축 비율 100배(양의 정수 설정값, `해제 바이트 ≤ 100 × 압축 바이트`, 0/0 항목 통과), ZIP 항목 10,000개, PDF 2,000쪽, 확인 시간 30초)을
+          넘으면 `unreadable_content`. 상한과 같으면 통과한다.
+          그다음 `info` 파트: 0바이트이거나 UTF-8로 읽어 공백 문자뿐이면 `info_material_missing`(FR-005 빈 파일 사유의 예외, US5-4),
+          그 밖에 `text`·`markdown`이 아니면(손상·알 수 없는 형식 포함) `invalid_info_material_format`.
+        - 구성 2차(⑨, 형식 판정 결과 사용, 위에서부터 첫 해당): `info` 없이 이미지·전체 스캔 PDF 1개 → `info_material_missing`;
+          `info` 있음 + `info_human_authored`가 정확히 `true`가 아님 → `info_material_missing`; 대상 파일이 이미지 묶음·그림 포함 파일 묶음 조건에 맞지 않음(텍스트·Markdown 대상, 그림 없는 Excel,
+          글자 층만 있는 그림 없는 PDF, 두 종류 혼합, 그림 포함 파일 2개 이상) → `invalid_request_composition`.
+
+        스키마 입력(FR-009, FR-012, FR-014)
+        - 텍스트 단일 파일: `schema_id`와 `schema` 모두 없어야 한다. 있으면 `text_schema_not_allowed`. 기본 스키마(`default-text-v1`, DR-07)가 기록된다.
+        - 그 밖: FR-012 표대로. `schema_id` 매개변수가 있으나 빈 문자열이면 `invalid_schema_id`(US3-11).
+
+        동일 재등록(FR-038): 같은 자료 ID의 현재본과 파일 내용·정보 자료·스키마 ID가 모두 같으면 200과 기존 revision을 돌려주고 등록 기록만 더한다.
+      parameters:
+        - name: source
+          in: query
+          required: false
+          description: "대상 source. 핸들러 규칙 ②: 없거나 빈 문자열이면 `source_required`(FR-002). 001에서 성공 가능한 값은 `factory`뿐이다(FR-040)."
+          schema: {type: string}
+        - name: material_id
+          in: query
+          required: false
+          description: |
+            자료 ID. 핸들러 규칙(④, DR-08 권장안): 1~200자, `[A-Za-z0-9._/-]`, 대소문자 구분, `/`로 시작·끝 금지, `//` 금지,
+            `.`·`..` 경로 조각 금지. 없거나 위반이면 `invalid_material_id`(FR-037).
+          schema: {type: string}
+        - name: schema_id
+          in: query
+          required: false
+          description: |
+            재사용하거나 새로 등록할 스키마 ID. 핸들러 규칙(⑤, FR-011): 매개변수가 있으면 `^[A-Za-z0-9_-]{1,20}$`, 대소문자 구분.
+            빈 문자열 포함 위반이면 `invalid_schema_id`.
+          schema: {type: string}
+      requestBody:
+        description: |
+          선언 제약 없음(R-04). 본문이 없거나 multipart로 해석할 수 없으면 핸들러 규칙 ⑥에서, 알 수 없는 파트 이름은 ⑦에서
+          `invalid_request_composition`이다. 그래서 `required`·`additionalProperties`를 선언하지 않는다.
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  description: |
+                    등록할 파일(단일) 또는 묶음의 대상 파일. 파트의 파일 이름과 Content-Type이 호출자의 형식 선언이다(FR-004, DR-03, DR-23).
+                    개수 규칙(1개, 묶음이면 1~20개)은 핸들러 규칙(⑦·⑨)이다.
+                  type: array
+                  items: {type: string, contentMediaType: application/octet-stream}
+                info:
+                  description: 정보 자료(텍스트 파일). 묶음일 때만.
+                  type: string
+                  contentMediaType: text/plain
+                info_human_authored:
+                  description: 정보 자료를 사람이 쓴 설명으로 표시(FR-021). 핸들러 규칙 ⑨ — 묶음이면 정확히 `true`여야 하며 없거나 다른 값이면 `info_material_missing`(US5-7).
+                  type: string
+                schema:
+                  description: 새 스키마 파일. UTF-8 JSON, `format` = `omf-registration-schema/v1`(DR-06 권장안).
+                  type: string
+                  contentMediaType: application/json
+            encoding:
+              file: {contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/pdf, image/png, image/jpeg, text/plain, text/markdown, application/octet-stream'}
+              info: {contentType: 'text/plain, text/markdown'}
+              schema: {contentType: application/json}
+      responses:
+        '201':
+          description: 새 revision을 만들었다.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegistrationResult'}
+        '200':
+          description: 현재본과 같은 내용이라 기존 revision을 돌려주었다(FR-038, US1-12). 등록 기록은 추가되었다.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegistrationResult'}
+        '400': {$ref: '#/components/responses/RegistrationRejected'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RegistrationRejected'}
+        '409': {$ref: '#/components/responses/RegistrationRejected'}
+        '413': {$ref: '#/components/responses/RegistrationRejected'}
+        '415': {$ref: '#/components/responses/RegistrationRejected'}
+        '422': {$ref: '#/components/responses/RegistrationRejected'}
+        '503': {$ref: '#/components/responses/RegistrationUnavailable'}
+
+  /v1/revisions/{revision_id}:
+    get:
+      operationId: getRegistrationRecord
+      summary: revision의 등록 기록을 확인한다
+      description: |
+        FR-024, FR-031, FR-043, FR-047. 그 revision source의 효력 있는 원본 읽기 권한이 필요하다.
+        없는 revision, 삭제된 revision, 권한 없음(검색 권한만, 쓰기 권한만, 표시가 external이거나 없음)은
+        모두 같은 404 `revision_not_found`다(US2-1, US2-6(DR-13), US2-11, US2-21).
+      parameters:
+        - {$ref: '#/components/parameters/RevisionId'}
+      responses:
+        '200':
+          description: 등록 기록
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegistrationRecord'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404': {$ref: '#/components/responses/RevisionNotFound'}
+        '503': {$ref: '#/components/responses/RegistrationUnavailable'}
+
+  /v1/revisions/{revision_id}/files/{file_index}:
+    get:
+      operationId: getOriginalFile
+      summary: revision의 원본 파일(또는 정보 자료)을 받은 그대로 되찾는다
+      description: |
+        FR-023, FR-031, FR-043, FR-047. 권한·없음 처리는 `/v1/revisions/{revision_id}`와 같다.
+        없는 `file_index`도 같은 404다. 표시 변경과 겹친 되찾기는 DR-11(a) 권장안대로 트랜잭션 순서로 결정된다.
+      parameters:
+        - {$ref: '#/components/parameters/RevisionId'}
+        - name: file_index
+          in: path
+          required: true
+          description: 핸들러 규칙. 0~20 정수 문자열이 아니거나 그 revision에 없는 번호면 404 `revision_not_found`(인증 뒤 판정).
+          schema: {type: string}
+      responses:
+        '200':
+          description: 원본 바이트. 등록한 파일과 완전히 같다.
+          headers:
+            X-Content-SHA256:
+              description: 내용 해시(소문자 16진 64자)
+              schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+            X-Content-Type-Options:
+              schema: {type: string, const: nosniff}
+            Content-Disposition:
+              description: "`attachment; filename*=UTF-8''<RFC 5987 인코딩된 제출 파일 이름>`"
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, contentMediaType: application/octet-stream}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404': {$ref: '#/components/responses/RevisionNotFound'}
+        '503': {$ref: '#/components/responses/RegistrationUnavailable'}
+
+  /v1/materials/current:
+    get:
+      operationId: getCurrentRevision
+      summary: source와 자료 ID로 현재본 revision을 확인한다
+      description: |
+        FR-039. 대상 source의 효력 있는 원본 읽기 권한이 필요하다. 권한이 없거나 자료 ID가 없으면 같은 404
+        `material_not_found`다. 자료는 있으나 현재본이 삭제되었으면 200과 `state: no_current_revision`이다(US1-17).
+
+        판정 순서(핸들러): ① 인증 실패 → 401 `invalid_token` → ② `source`·`material_id`가 없거나 빈 문자열 →
+        422 `invalid_request`(기존 오류 형식과 같은 코드·메시지, 프레임워크가 아니라 핸들러가 인증 뒤에 냄) →
+        ③ 권한 없음·없는 source·없는 자료·자료 ID 규칙 위반 → 404 `material_not_found` → ④ 200. 이 경로에는 403이 없다
+        (권한 없음을 404로 숨기기 위해서다).
+      parameters:
+        - {name: source, in: query, required: false, description: 핸들러 규칙 ② 참조, schema: {type: string}}
+        - {name: material_id, in: query, required: false, description: 핸들러 규칙 ② 참조, schema: {type: string}}
+      responses:
+        '200':
+          description: 현재본 상태
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CurrentRevision'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404':
+          description: 없는 자료이거나 권한 없음(구별하지 않음)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {request_id: 7d1c..., code: material_not_found, message: Material not found.}
+        '422': {$ref: '#/components/responses/InvalidRequest'}
+        '503': {$ref: '#/components/responses/RegistrationUnavailable'}
+
+  /v1/schemas/{schema_id}:
+    get:
+      operationId: getSchema
+      summary: 스키마 ID로 등록 당시 스키마 내용을 그대로 받는다
+      description: |
+        FR-016, FR-031, US3-9, US2-10. 어느 source든 활성 쓰기 권한이 하나라도 있어야 한다.
+        권한이 없으면 403 `schema_access_denied`(스키마 존재 여부와 무관), 권한이 있고 ID가 없으면 404 `schema_not_found`.
+        기본 스키마도 같은 방식으로 조회한다.
+      parameters:
+        - name: schema_id
+          in: path
+          required: true
+          description: 핸들러 규칙. 인증·권한 판정 뒤, ID 규칙에 맞지 않으면 없는 ID와 같은 404 `schema_not_found`.
+          schema: {type: string}
+      responses:
+        '200':
+          description: 등록 당시 바이트 그대로의 스키마 파일
+          headers:
+            X-Content-SHA256:
+              schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+          content:
+            application/json:
+              schema: {type: string, contentMediaType: application/json}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: 어느 source에도 쓰기 권한이 없음
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {request_id: 7d1c..., code: schema_access_denied, message: Schema access denied.}
+        '404':
+          description: 쓰기 권한은 있으나 스키마 ID가 없음
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {request_id: 7d1c..., code: schema_not_found, message: Schema not found.}
+        '503': {$ref: '#/components/responses/RegistrationUnavailable'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 기존 `omfr_<key_id>.<secret>` 토큰(FR-027). 없음·틀림·만료·비활성·폐기는 401 `invalid_token`.
+  parameters:
+    RevisionId:
+      name: revision_id
+      in: path
+      required: true
+      description: UUID 형식이 아니어도 404 `revision_not_found`로 같은 응답을 준다(FR-043).
+      schema: {type: string}
+  responses:
+    Unauthenticated:
+      description: 인증 실패(FR-027). 기존 검색 API와 같다.
+      headers:
+        WWW-Authenticate: {schema: {type: string, const: Bearer}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {request_id: 7d1c..., code: invalid_token, message: Authentication failed.}
+    RegistrationRejected:
+      description: 등록 거부. 사유 코드는 `info.x-rejection-reasons`.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RegistrationError'}
+          examples:
+            schemaIdTooLong:
+              summary: SC-009 합격 예시(스키마 ID 21자)
+              value:
+                request_id: 7d1c...
+                code: invalid_schema_id
+                message: "schema_id must be 1-20 characters of A-Z, a-z, 0-9, '-' or '_'; received 21 characters."
+                detail: {field: schema_id, rule: length_and_charset, limit: 20, actual_length: 21}
+            fileTooLarge:
+              value:
+                request_id: 7d1c...
+                code: file_too_large
+                message: Each file must be at most 52428800 bytes and the request at most 104857600 bytes.
+                detail: {field: file, rule: max_bytes, limit: 52428800}
+            writeDenied:
+              value: {request_id: 7d1c..., code: write_access_denied, message: Write access denied for the requested source.}
+    RevisionNotFound:
+      description: 없는 revision, 삭제된 revision, 권한 없음을 구별하지 않는다(FR-043).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {request_id: 7d1c..., code: revision_not_found, message: Revision not found.}
+    InvalidRequest:
+      description: 기존 검증 오류 형식
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {request_id: 7d1c..., code: invalid_request, message: Request validation failed.}
+    RegistrationUnavailable:
+      description: 저장 공간 부족 같은 내부 실패. 부분 결과는 남지 않는다(Edge Case).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {request_id: 7d1c..., code: registration_unavailable, message: Registration is temporarily unavailable.}
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [request_id, code, message]
+      properties:
+        request_id: {type: string}
+        code: {type: string}
+        message: {type: string}
+    RegistrationError:
+      type: object
+      additionalProperties: false
+      required: [request_id, code, message]
+      properties:
+        request_id: {type: string}
+        code:
+          type: string
+          enum: [invalid_token, write_access_denied, source_required, invalid_request_composition, invalid_material_id,
+                 unsupported_file_format, unreadable_content, file_too_large, schema_missing, invalid_schema_id,
+                 incomplete_schema, schema_id_conflict, schema_mismatch, text_schema_not_allowed,
+                 info_material_missing, invalid_info_material_format]
+        message:
+          type: string
+          description: 고칠 방법을 담은 고정 영어 문장(DR-16). 받은 값(파일 이름, ID 문자열, 내용)을 되풀이하지 않는다(FR-034).
+        detail:
+          description: 무엇을 고칠지 기계가 읽는 구조 값. 권한·인증 사유에는 넣지 않는다(존재 여부 노출 방지).
+          type: object
+          additionalProperties: false
+          properties:
+            field: {type: string, enum: [source, material_id, schema_id, file, info, info_human_authored, schema]}
+            rule: {type: string}
+            limit: {type: integer}
+            actual_length: {type: integer}
+            actual_count: {type: integer}
+            file_position: {type: integer, description: 요청 안 `file` 파트 순번(0부터)}
+            expected_target_format: {type: string, enum: [xlsx, pdf, text, image_bundle]}
+            detected_format: {type: string, enum: [xlsx, pdf, png, jpeg, text, markdown, unknown]}
+            schema_mismatch_part:
+              description: |
+                맞지 않은 스키마 쪽 항목 경로. 고정 키 이름과 배열 위치 번호만 쓴다(예 `split_rule.params.sheet`,
+                `mapping.entities[2].attributes[0].source`). 엔티티·속성·시트 이름처럼 사용자가 정의한 이름, 파일 안의 값, 스키마의 값은
+                넣지 않는다(R-11).
+              type: string
+            missing_parts:
+              type: array
+              items: {type: string, enum: [concept, split_rule, mapping, split_rule.target_format, split_rule.kind, split_rule.params]}
+    FileRecord:
+      type: object
+      additionalProperties: false
+      required: [file_index, role, detected_format, byte_size, content_hash]
+      properties:
+        file_index:
+          description: |
+            revision 안 파일 식별 번호. 제출 순서가 아니라 결정적 정렬 순서로 매기며 쪽 순서 같은 의미가 없다(DR-15).
+            바이트가 같은 파일끼리는 multipart 파트 순서로 안정 정렬한다.
+            응답의 `files` 배열도 이 번호 순서이며 그 순서에 의미가 없다.
+          type: integer
+          minimum: 0
+          maximum: 20
+        role: {type: string, enum: [primary, bundle_target, info]}
+        detected_format:
+          description: 형식 판정 결과. 불변이며 revision 동일성 판정에 들어간다(DR-23, R-06).
+          type: string
+          enum: [xlsx, pdf, png, jpeg, text, markdown]
+        pdf_text_layer: {type: [string, 'null'], enum: [full, partial, none, null]}
+        byte_size: {type: integer, minimum: 1}
+        content_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+    BundleLink:
+      type: object
+      additionalProperties: false
+      required: [target_file_index, info_file_index, human_authored_declared]
+      properties:
+        target_file_index: {type: integer}
+        info_file_index: {type: integer}
+        human_authored_declared: {type: boolean, const: true}
+    EmbeddedImageRelation:
+      type: object
+      additionalProperties: false
+      required: [file_index, location_kind, location, relation_kind]
+      properties:
+        file_index: {type: integer}
+        location_kind: {type: string, enum: [pdf_page, xlsx_sheet]}
+        location:
+          description: 내용 비노출 좌표. `pdf_page`면 페이지 번호(1부터), `xlsx_sheet`면 시트 순번(0부터). 시트 이름은 담지 않는다(R-11).
+          type: integer
+          minimum: 0
+        relation_kind: {type: string, enum: [embedded_image, page_without_text_layer]}
+        image_count: {type: [integer, 'null'], minimum: 1}
+    RegistrationResult:
+      type: object
+      additionalProperties: false
+      required: [request_id, outcome, revision_id, source, material_id, sequence, schema_id, files, bundle_links, embedded_image_relations]
+      properties:
+        request_id: {type: string}
+        outcome: {type: string, enum: [created, reused]}
+        revision_id: {type: string, format: uuid}
+        source: {type: string}
+        material_id: {type: string}
+        sequence: {type: integer, minimum: 1}
+        schema_id: {type: string}
+        files: {type: array, items: {$ref: '#/components/schemas/FileRecord'}}
+        bundle_links: {type: array, items: {$ref: '#/components/schemas/BundleLink'}}
+        embedded_image_relations: {type: array, items: {$ref: '#/components/schemas/EmbeddedImageRelation'}}
+    RegistrationRecord:
+      type: object
+      additionalProperties: false
+      required: [request_id, revision_id, source, material_id, sequence, is_current, schema_id, created_at, created_by, inspector_version, files, bundle_links, embedded_image_relations, registrations]
+      properties:
+        request_id: {type: string}
+        revision_id: {type: string, format: uuid}
+        source: {type: string}
+        material_id: {type: string}
+        sequence: {type: integer}
+        is_current: {type: boolean}
+        schema_id: {type: string}
+        created_at: {type: string, format: date-time}
+        created_by: {$ref: '#/components/schemas/ClientRef'}
+        inspector_version: {type: string}
+        files: {type: array, items: {$ref: '#/components/schemas/FileRecord'}}
+        bundle_links: {type: array, items: {$ref: '#/components/schemas/BundleLink'}}
+        embedded_image_relations: {type: array, items: {$ref: '#/components/schemas/EmbeddedImageRelation'}}
+        registrations:
+          description: 이 revision을 만들거나 돌려준 등록 기록 전부(재등록 포함, FR-024)
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [outcome, registered_at, registered_by, submitted_files]
+            properties:
+              outcome: {type: string, enum: [created, reused]}
+              registered_at: {type: string, format: date-time}
+              registered_by: {$ref: '#/components/schemas/ClientRef'}
+              submitted_files:
+                description: |
+                  등록 때 제출된 파일 이름과 `file_index`의 대응. 한 묶음에 바이트가 똑같은 파일이 둘 이상이면 어느 이름이 어느
+                  `file_index`에 붙는지는 그 요청의 multipart 파트 순서로 정한다(정렬 키가 같은 파일끼리의 안정 정렬). 결정적이지만 의미 없는
+                  선택이다(DR-15 추가 결정). 파일 이름은 revision 동일성(`manifest_hash`)에 쓰지 않는다.
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [file_index, submitted_filename]
+                  properties:
+                    file_index: {type: integer}
+                    submitted_filename: {type: string, maxLength: 255}
+    ClientRef:
+      description: 등록자. 토큰·key_id·digest는 넣지 않는다(FR-034).
+      type: object
+      additionalProperties: false
+      required: [client_id, name]
+      properties:
+        client_id: {type: string, format: uuid}
+        name: {type: string}
+    CurrentRevision:
+      type: object
+      additionalProperties: false
+      required: [request_id, source, material_id, state, revision_id]
+      properties:
+        request_id: {type: string}
+        source: {type: string}
+        material_id: {type: string}
+        state: {type: string, enum: [current, no_current_revision]}
+        revision_id: {type: [string, 'null'], format: uuid}
+        sequence: {type: [integer, 'null']}
