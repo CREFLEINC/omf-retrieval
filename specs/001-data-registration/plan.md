@@ -8,6 +8,8 @@
 
 **상태**: 결정 승인 완료. [research.md](./research.md) 3절의 결정 요청 DR-01~DR-24를 사용자가 2026-11-10 모두 승인했다(DR-11은 spec FR-046·FR-047 유지, DR-03·DR-15에는 추가 결정). 이 계획은 승인된 안 기준이며 `[DR-xx]`는 근거 표시다. **tasks 단계(`speckit-tasks`)를 시작할 수 있다.**
 
+**개정(2026-11-10·2026-11-12, 3차)**: tasks 단계 확인 항목 승인 반영(Q-01~Q-08 사용자 승인 2026-11-10, Q-09~Q-11 사용자 승인 2026-11-12) — `manifest_hash` 계산 위치를 application 계층(`application/registration/manifest.py`, 기존 `canonical_json` 재사용, `canonical_json`은 옮기지 않음, 해시 값 불변)으로 정정, U-ARCH-01 위치는 P1 유지(한때 P3으로 옮긴 Q-03 결정은 Q-09로 대체됨, 사용자 승인 2026-11-12: 테스트가 대상 파일 `application/registration/manifest.py`를 명시해 P1 시작 시 부재로 RED, 이후 Phase가 새 application 등록 모듈을 대상 목록에 추가), U-INSP-01에 서명 직후 잘린 PNG 사례, U-ORDER-01에 같은 바이트 파일 번호 사례 추가, C-API-06·C-API-11의 경로 수를 단계별로 정정(P7: 등록 경로 1개 추가·4경로, P8: 5개 추가·8경로, Q-10), I-DB-04에 P3 관리자 저장소 SQL 사례 추가(Q-11)(테스트 ID 추가 없음, 총 65건 유지). Project Structure 문서 구조도의 `tasks.md` 설명을 "이번에 만들지 않음"에서 "speckit-tasks 산출물(2026-11-10 작성, 2026-11-12 개정). 작업 T001~T016"으로 갱신(독립 검증 F-8).
+
 **개정(2026-11-10, 2차)**: DR-04 안전 상한 수치와 xlsx ZIP 경계(선언이 xlsx인 파일만: ZIP 서명(`PK\x03\x04`)으로 시작하지만 ZIP으로 해석 불가 → `unreadable_content`, ZIP이지만 유효 OOXML 아님 → `unsupported_file_format`, 서명 없는 알 수 없는 바이트는 `unsupported_file_format`) 승인 반영(U-INSP-01·02), 같은 바이트 파일의 제출 이름 대응 참고 추가, 의존성 승인 확정 문구 갱신.
 
 **개정(2026-11-10)**: 승인 반영 — DR-03 ZIP·압축 파일 미허용, DR-11 외부 호출자 원본 읽기 예외안 기각 기록, DR-15 이미지 순서 없는 집합·여러 쪽 문서 PDF 합치기 안내, 재검증 Low L-1~L-4(단계표 C-API-09·10, U-ORDER-01을 P6로, C-API-11 정책 실패 분기, C-API-10 표식 위치).
@@ -92,7 +94,8 @@ RDB에 보관되지 않는 문서 자료(Excel `.xlsx`, PDF, 이미지, 텍스�
 
 | 구성 요소 | 계층 | 책임 | DR |
 |---|---|---|---|
-| 등록 규칙(`RegistrationRules`) | domain | 스키마 ID·자료 ID 규칙, 거부 사유 목록(16개)과 코드, 구성 1차·2차 분류, `manifest_hash` 계산 | DR-08, DR-15, DR-16 |
+| 등록 규칙(`RegistrationRules`) | domain | 스키마 ID·자료 ID 규칙, 거부 사유 목록(16개)과 코드, 구성 1차·2차 분류, 파일 번호 결정적 정렬 | DR-08, DR-15, DR-16 |
+| revision 동일성 계산(`manifest_hash`) | application | R-06 `manifest_hash` 계산. 기존 `application/indexing/hashing.py`의 `canonical_json`을 재사용한다(domain이 application을 import하지 않게 application에 둔다. `canonical_json`은 옮기지 않는다) | DR-15, DR-23 |
 | 내용 확인기 포트(`ContentInspector`)와 구현 | application 포트 / infrastructure 구현 | 실제 형식 판정, 선언 대조, 손상·암호·빈 파일, 텍스트 해석, PDF 글자 층, 포함 이미지 위치 | DR-03, DR-04, DR-14, DR-23 |
 | 스키마 검증·사전(`SchemaValidator`, `SchemaDictionary`) | application | v1 스키마 구조 검증, 맞음 판정, 같은 내용 판정, 기본 스키마 멱등 등록 | DR-06, DR-07 |
 | 등록 접근 정책(`RegistrationAccessPolicy`) | application | 쓰기 권한, 효력 있는 원본 읽기 권한, 스키마 조회 권한 판정 | DR-11 |
@@ -299,9 +302,9 @@ SC 대응: SC-001·SC-005·SC-010 → H-01, SC-002·SC-009 → H-02, SC-003·SC-
 | U-RULE-04 | 거부 사유 목록(FR-008, FR-034, DR-16) | 16개 코드가 서로 다르고 계약의 HTTP 상태와 같다 | 메시지 템플릿이 길이·한도만 채운다 | 템플릿에 받은 값(파일 이름·ID·내용) 삽입 자리가 있으면 실패 |
 | U-COMP-01 | 구성 1차(FR-044, research R-04 표 A)[DR-15] | 파일 1개 → 통과. `info`+파일 3개 → 통과 | `info`+파일 20개 → 통과, 21개 → `invalid_request_composition`. 파일 이름 255자 → 통과, 256자 → `invalid_request_composition` | 파일 0개, `info` 없이 파일 2개, `info` 2개, `schema` 2개, 알 수 없는 파트, `info` 없이 `info_human_authored`만 → 모두 `invalid_request_composition`. 1차 위반이면 형식 확인을 호출하지 않음(가짜 확인기 호출 0회) |
 | U-COMP-02 | 구성 2차(FR-018~FR-021, research R-04 표 B)를 형식 판정 결과 값으로 | 이미지 3개+`info`+표시 → 이미지 묶음. 그림 포함 xlsx 1개+`info`+표시 → 그림 포함 파일 묶음. 일부 스캔 PDF+`info`+표시 → 그림 포함 파일 묶음. 그림 포함 xlsx 단독 → 단일 | 표시 값 `True`·`1` → `info_material_missing`(정확히 `true`만) | R-04 예시 표의 ⑨ 행 전부가 표의 기대 코드와 같다: 이미지 단독·전체 스캔 PDF 단독 → `info_material_missing`, 표시 없음+그림 없는 xlsx → `info_material_missing`(B3이 B7보다 먼저), 그림 없는 xlsx·텍스트 대상·그림 없는 텍스트 PDF·혼합 → `invalid_request_composition` |
-| U-ORDER-01 | ⑧ 단계 파트 순서(research R-04) | — | `file` 파트 2개(묶음) 중 두 번째만 손상 → `unreadable_content`, `detail.file_position=1` | `info`+손상 xlsx → `unreadable_content`. PDF `info`+손상 PNG → `unreadable_content`(`file` 먼저). PDF `info`+정상 PNG → `invalid_info_material_format`. 0바이트 `info`+이미지 → `info_material_missing`. 공백·줄바꿈뿐인 `info`(BOM 포함)+이미지 → `info_material_missing`. 0바이트 `info`+손상 PNG → `unreadable_content`(`file` 먼저). 0바이트 `info`·표시 없음+그림 없는 xlsx → `info_material_missing`(⑧-i가 ⑨보다 먼저). `info`+이름만 `.png`인 PDF → `unsupported_file_format` |
+| U-ORDER-01 | ⑧ 단계 파트 순서(research R-04)와 같은 바이트 파일 번호(DR-15 추가 결정, data-model 3.8·3.13) | 바이트가 같은 이미지 2개(제출 이름 `a.png`, `b.png`)+`info`+표시 → 두 파일의 `file_index`가 multipart 파트 순서로 매겨지고 제출 이름도 그 순서로 대응한다. 파트 순서만 바꾼 같은 요청은 `manifest_hash`가 같아 `reused`이고 그 요청의 파트 순서로 제출 이름이 기존 번호에 대응한다 | `file` 파트 2개(묶음) 중 두 번째만 손상 → `unreadable_content`, `detail.file_position=1` | `info`+손상 xlsx → `unreadable_content`. PDF `info`+손상 PNG → `unreadable_content`(`file` 먼저). PDF `info`+정상 PNG → `invalid_info_material_format`. 0바이트 `info`+이미지 → `info_material_missing`. 공백·줄바꿈뿐인 `info`(BOM 포함)+이미지 → `info_material_missing`. 0바이트 `info`+손상 PNG → `unreadable_content`(`file` 먼저). 0바이트 `info`·표시 없음+그림 없는 xlsx → `info_material_missing`(⑧-i가 ⑨보다 먼저). `info`+이름만 `.png`인 PDF → `unsupported_file_format` |
 | U-HASH-01 | `manifest_hash`와 파일 번호(R-06, DR-15 추가 결정) | 같은 파일·형식 판정·스키마 → 같은 값 | 파일 이름만 다름 → 같은 값. 묶음 대상 순서만 다름 → 같은 값이고 각 파일이 받는 `file_index`도 같다(제출 순서와 무관한 결정적 정렬) | 스키마 ID만 다름 → 다른 값. 정보 자료 1바이트 다름 → 다른 값. 같은 바이트의 `text`와 `markdown` 판정 → 다른 값[DR-23] |
-| U-INSP-01 | 형식 판정·선언 대조(FR-003·FR-004)[DR-03·DR-23] | 합성 xlsx·PDF·PNG·JPEG → 각 형식. 같은 UTF-8 바이트를 `a.txt`로 → `text`, `a.md`로 → `markdown` | Content-Type `application/octet-stream` + 맞는 확장자 → 허용. ZIP으로 해석되고 `[Content_Types].xml`에 workbook 주 파트 선언은 있으나 `xl/workbook.xml`이 없는 `.xlsx` → `unsupported_file_format`(유효 OOXML 아님, research DR-04 xlsx ZIP 경계) | PNG를 `.xlsx`로 → `unsupported_file_format`. `a.md` + `text/plain`처럼 확장자와 Content-Type의 텍스트 하위 형식이 다름 → `unsupported_file_format`. `.xlsm`(매크로 content type)·`.xls`(OLE)·`.csv`·GIF → `unsupported_file_format`. ZIP(`.zip`)·7z·tar.gz와 이름만 `.xlsx`인 일반 ZIP(OOXML workbook 파트 없음) → `unsupported_file_format`(DR-03 추가 결정). 알 수 없는 바이트 → 같음 |
+| U-INSP-01 | 형식 판정·선언 대조(FR-003·FR-004)[DR-03·DR-23] | 합성 xlsx·PDF·PNG·JPEG → 각 형식. 같은 UTF-8 바이트를 `a.txt`로 → `text`, `a.md`로 → `markdown` | Content-Type `application/octet-stream` + 맞는 확장자 → 허용. ZIP으로 해석되고 `[Content_Types].xml`에 workbook 주 파트 선언은 있으나 `xl/workbook.xml`이 없는 `.xlsx` → `unsupported_file_format`(유효 OOXML 아님, research DR-04 xlsx ZIP 경계) | PNG를 `.xlsx`로 → `unsupported_file_format`. `a.md` + `text/plain`처럼 확장자와 Content-Type의 텍스트 하위 형식이 다름 → `unsupported_file_format`. `.xlsm`(매크로 content type)·`.xls`(OLE)·`.csv`·GIF → `unsupported_file_format`. ZIP(`.zip`)·7z·tar.gz와 이름만 `.xlsx`인 일반 ZIP(OOXML workbook 파트 없음) → `unsupported_file_format`(DR-03 추가 결정). 알 수 없는 바이트 → 같음. 8바이트 PNG 서명 직후에서 잘린 `.png`(첫 청크 IHDR 없음) → `unsupported_file_format`(research R-04 ⑧-2, 손상 사유 아님) |
 | U-INSP-02 | 내용 확인 불가(FR-005)[DR-04, research R-04 ⑧ 확인 순서] | 정상 표본 → 통과. 기본 설정값 연결 확인: 상한을 주입하지 않은 확인기 설정이 총량 536,870,912바이트(512 MiB)·비율 100·항목 10,000·페이지 2,000·시간 30초다(실제 대용량 파일은 만들지 않음) | 작은 상한을 주입한 설정(예: 총량 4,096바이트, 비율 100, 항목 5, 페이지 3, 시간 30초)으로 각 상한을 확인. 같으면 통과·넘으면 `unreadable_content`: 해제 총량 4,096 / 4,097바이트, 항목별 비율은 두 층으로 정확히 확인: (a) 비율 판정 함수에 정수 입력 (해제 100·압축 1) → 통과, (101, 1) → 거부, (0, 0) → 통과, (1, 0) → 거부. (b) 실제 ZIP fixture: 0바이트 반복 데이터를 deflate로 압축해 항목을 만들고, 해제 길이 d를 늘려 가며 실제 압축 크기 c로 나누어떨어지는 d를 고른 뒤 비율 상한 r = d ÷ c(정수)를 주입 → 통과, r − 1을 주입 → `unreadable_content`(c는 fixture에서 잰 실제 압축 바이트라 경계가 정확). 항목 5 / 6개, PDF 3 / 4쪽. 압축 0바이트·해제 0바이트 항목(빈 파트·디렉터리) → 통과. 확인 시간은 확인기에 가짜 `clock`을 주입해 경과 30.0초 → 통과, 30.0초 초과 → `unreadable_content`(xlsx 항목 사이, PDF 페이지 사이 각각). 선언 `.xlsx`인 OOXML 아닌 ZIP + 항목 6개(상한 5) → `unreadable_content`(항목 수가 패키지 판정보다 먼저) | `file` 파트의 0바이트, IEND 없는 PNG, EOI 없는 JPEG(둘 다 서명 판정은 통과하고 7단계 손상 확인에서 거부), `/Encrypt` PDF, CFB 암호 xlsx, ZIP 서명(`PK\x03\x04`)으로 시작하지만 중앙 디렉터리가 잘려 ZIP으로 해석할 수 없는 `.xlsx`, 압축 0바이트라고 적혔지만 실제로 바이트가 풀리는 항목, `xlsx`로 판정된 뒤 시트 XML이 깨진 파일, 페이지 트리 없는 PDF → `unreadable_content`. 예외: `info` 파트의 0바이트는 `unreadable_content`가 아니라 `info_material_missing`(U-ORDER-01, research R-04 ⑧-i) |
 | U-INSP-03 | 텍스트 해석(US4-2·3) | BOM 있는 UTF-8, CRLF·LF 혼용 → 허용, 확인기가 바이트를 바꾸지 않음 | 1바이트 텍스트 → 허용 | 잘못된 UTF-8 시퀀스, NUL 포함 → `unsupported_file_format` |
 | U-INSP-04 | PDF 글자 층(FR-019·FR-020) | 모든 페이지 글자 → `full` | 1페이지 PDF 글자 없음 → `none`. 3페이지 중 1페이지만 없음 → `partial` + `page_without_text_layer` 1행 | 글자 연산자만 있고 폰트 없는 페이지 → 판정 규칙대로 `none`(규칙을 테스트로 고정) |
@@ -334,8 +337,8 @@ SC 대응: SC-001·SC-005·SC-010 → H-01, SC-002·SC-009 → H-02, SC-003·SC-
 | C-API-03 | FR-043 구별 불가 | 없는 revision, 형식 아닌 id, 삭제된 revision, 검색 권한만, 쓰기 권한만, 표시 `external`, 표시 없음 → 상태·`code`·`message`·헤더 집합이 모두 같다(`request_id` 제외) |
 | C-API-04 | source 구별 불가(FR-002, US2-5, US2-16) | 없는 source, `omf`, 권한 없는 `factory` → 같은 403 응답 |
 | C-API-05 | 원본 응답 헤더(R-07) | `application/octet-stream`, `nosniff`, `X-Content-SHA256`. 파일 이름의 `../`, 줄바꿈, 따옴표, 한글이 RFC 5987로 인코딩되고 헤더 주입이 없다 |
-| C-API-06 | 기존 검색 계약 불변(FR-035)[DR-21] | 등록 서비스를 주입하지 않은 `create_app`은 기존 3경로 그대로(기존 `test_only_three_mvp_routes_are_public` 포함 `test_search_api.py`·`test_web_delivery.py`가 수정 없이 통과). 등록 서비스를 주입하면 5경로가 추가될 뿐 기존 3경로의 응답은 같다. `/health/ready`가 등록 상태와 무관 |
-| C-API-11 | 등록 서비스 주입 시 경로 집합 고정[DR-21] | 검색·등록 서비스를 모두 주입한 `create_app`의 (경로, 메서드) 집합이 정확히 기존 3개 + `POST /v1/registrations`, `GET /v1/revisions/{revision_id}`, `GET /v1/revisions/{revision_id}/files/{file_index}`, `GET /v1/materials/current`, `GET /v1/schemas/{schema_id}` 8개다. 운영 조립(`runtime.py`)이 정상 분기와 검색 정책 resolve 실패 분기(`_UnavailableSearchService`를 쓰는 89~96행) **둘 다**에서 등록 서비스를 주입해 8경로가 되는지 확인(정책 실패 분기에서도 등록 경로가 503이 아니라 동작) |
+| C-API-06 | 기존 검색 계약 불변(FR-035)[DR-21] | 등록 서비스를 주입하지 않은 `create_app`은 기존 3경로 그대로(기존 `test_only_three_mvp_routes_are_public` 포함 `test_search_api.py`·`test_web_delivery.py`가 수정 없이 통과). 등록 서비스를 주입하면 등록 경로가 추가될 뿐(P7: `POST /v1/registrations` 1개, P8부터 5개) 기존 3경로의 응답은 같다. `/health/ready`가 등록 상태와 무관 |
+| C-API-11 | 등록 서비스 주입 시 경로 집합 고정[DR-21] | 단계별 기대: P7에서는 정확히 기존 3개 + `POST /v1/registrations` 4개, P8에서 아래 8개로 확장(Q-10). 최종 기대: 검색·등록 서비스를 모두 주입한 `create_app`의 (경로, 메서드) 집합이 정확히 기존 3개 + `POST /v1/registrations`, `GET /v1/revisions/{revision_id}`, `GET /v1/revisions/{revision_id}/files/{file_index}`, `GET /v1/materials/current`, `GET /v1/schemas/{schema_id}` 8개다. 운영 조립(`runtime.py`)이 정상 분기와 검색 정책 resolve 실패 분기(`_UnavailableSearchService`를 쓰는 89~96행) **둘 다**에서 등록 서비스를 주입해 8경로가 되는지 확인(정책 실패 분기에서도 등록 경로가 503이 아니라 동작) |
 | C-API-07 | 호출자 표시 변경 경로 없음(FR-045, US2-22) | `/v1/clients/me/llm-usage` 등 후보 경로 PUT·POST·PATCH → 404 또는 405, 표시 불변 |
 | C-API-09 | 선언 검증 미발동과 판정 순서(FR-042, research R-04) | 토큰 없이 `material_id`·`schema_id`가 규칙 밖이고 본문이 깨진 등록 요청 → 401(422 아님). 쓰기 권한 없는 토큰 + 같은 요청 → 403 `write_access_denied`. `/v1/materials/current`: 토큰 없음+매개변수 없음 → 401, 토큰 있음+매개변수 없음 → 422 `invalid_request`, 매개변수 있음+권한 없음 → 404 `material_not_found`. 숫자 아닌 `file_index` → 토큰 없으면 401, 있으면 404. 기존 `/v1/search`의 422 `invalid_request` 동작은 불변 |
 | C-API-10 | 응답 내용 비노출(FR-034, research R-11) | 표식 세 종류를 다른 위치에 둔다. M-파일: 스키마가 참조하지 않는 파일 안 값(참조하지 않는 시트의 이름, 참조하지 않는 셀 값, 정보 자료 본문 문장, PDF 본문 글자). M-참조: 파일과 스키마 양쪽에 있는 값(스키마가 가리키는 시트 이름·머리글 셀 값, 정보 자료 제목). M-스키마: 스키마에만 있는 이름(엔티티·속성·관계 이름). 기대: 등록 성공·`schema_mismatch`·그 밖 거부·현재본 조회 응답에 세 표식 모두 0건. 스키마 조회 응답에는 M-파일 0건이고, M-참조·M-스키마는 FR-016상 스키마 바이트에 그대로 있다(예외로 기대). `schema_mismatch_part`는 고정 키와 `[n]` 위치 번호로만 이루어짐. `embedded_image_relations[].location`은 정수 |
@@ -353,7 +356,7 @@ SC 대응: SC-001·SC-005·SC-010 → H-01, SC-002·SC-009 → H-02, SC-003·SC-
 | I-DB-01 | 마이그레이션 | upgrade 뒤 새 테이블 14개와 제약·트리거 존재, 기존 테이블 스키마 기대값(`schema_expectations.py`) 불변. downgrade 뒤 새 테이블만 사라짐. ORM 대응(`orm_parity.py`) 통과 |
 | I-DB-02 | 불변 트리거 | 스키마 UPDATE·DELETE 거부. revision은 `available→deleted`만 허용, 그 외 UPDATE·DELETE 거부. 파일 `content_hash`는 삭제 때 NULL로만. 등록 기록·삭제 기록·표시 변경 기록 UPDATE·DELETE 거부. 권한 회수 컬럼은 한 번만 채움 |
 | I-DB-03 | CHECK 제약 | `schema_id` 21자·`a.b` INSERT 거부. 비기본 행의 `default-` 접두사 거부. 자료 ID 규칙 위반 INSERT 거부 |
-| I-DB-04 | 원본 읽기 권한 INSERT 조건(FR-046) | 표시 `external`·없음 상태에서 직접 INSERT → 트리거 거부 |
+| I-DB-04 | 원본 읽기 권한 INSERT 조건(FR-046) | 표시 `external`·없음 상태에서 직접 INSERT → 트리거 거부. P3 사례(Q-11): 관리자 저장소 SQL(`repository_registration_admin.py`)로 `factory` source를 만들고 권한을 부여하고 외부 LLM 사용 표시를 정한 뒤 DB 상태(`registration_sources`·`client_source_permissions`·`client_llm_usage`·`client_llm_usage_events` 행)가 기대와 같다 |
 | I-REG-01 | 원자성(FR-007, Edge Case) | 원본 바이트 저장 뒤 고장 주입 → 새 테이블 전부 행 0 증가, 새 스키마 없음. 저장 공간 부족 모사(예외 주입) → 503, 기존 revision 영향 없음 |
 | I-REG-02 | 동시성(Edge Case) | 같은 자료 ID 동시 2건 → 둘 다 성공, seq 1·2, 현재본 = 나중 커밋. 같은 새 스키마 ID 다른 내용 동시 → 하나 성공, 하나 `schema_id_conflict`. 같은 내용 → 둘 다 성공·한 행 |
 | I-REG-03 | 재시작 보존(FR-025) | 엔진·앱을 새로 만든 뒤 되찾은 바이트·해시·등록 기록 동일 |
@@ -380,16 +383,16 @@ SC 대응: SC-001·SC-005·SC-010 → H-01, SC-002·SC-009 → H-02, SC-003·SC-
 
 | Phase | 의도(관찰 가능한 결과) | 주요 테스트 | 예상 줄 수 | 선행 | 필요한 DR |
 |---|---|---|---|---|---|
-| P1 | 등록 규칙 순수 함수: ID 규칙, 사유 목록, 구성 1차·2차 분류, 스키마 입력 표 판정, `manifest_hash` | U-RULE-01~04, U-COMP-01·02, U-HASH-01, U-ARCH-01 | ~350 | — | DR-08, DR-15, DR-16, DR-23 |
+| P1 | 등록 규칙 순수 함수: ID 규칙, 사유 목록, 구성 1차·2차 분류, 스키마 입력 표 판정, `manifest_hash`(application `manifest.py`) | U-RULE-01~04, U-COMP-01·02, U-HASH-01, U-ARCH-01 | ~350 | — | DR-08, DR-15, DR-16, DR-23 |
 | P2a | 권한·표시·등록 source 표시 테이블 마이그레이션(위험 격리: 인증 영역) | RED·GREEN: U-MIG-01(정적). 검증 Agent: I-DB-01(해당 테이블), I-DB-02(권한·기록), I-DB-04 | ~250 | P1 | DR-10, DR-11, DR-19, DR-22 |
-| P3 | 관리자 CLI: source 생성, 권한 부여·회수, 표시 변경·자동 회수 | U-ADM-01~03, U-ACC-01·02, C-CLI-01~03, C-CLI-05 | ~400 | P2a | DR-10, DR-11, DR-19 |
+| P3 | 관리자 CLI: source 생성, 권한 부여·회수, 표시 변경·자동 회수 | U-ADM-01~03, U-ACC-01·02, C-CLI-01~03, C-CLI-05. 검증 Agent: I-DB-04(관리자 저장소 SQL 사례, Q-11) | ~400 | P2a | DR-10, DR-11, DR-19 |
 | P2b | 자료·revision·파일·원본 바이트·묶음·관계·등록 기록·삭제 기록·스키마 사전 테이블 마이그레이션 | RED·GREEN: U-MIG-02(정적). 검증 Agent: I-DB-01, I-DB-02, I-DB-03 | ~400 | P2a | DR-01, DR-09, DR-12(M1), DR-14, DR-23 |
 | P4a | 내용 확인기 1: 형식 판정·선언 대조(텍스트·Markdown 구분 포함)·손상·암호·빈 파일·텍스트 해석 | U-INSP-01~03 | ~350 | P1 | DR-03, DR-04, DR-23 |
 | P4b | 내용 확인기 2: PDF 글자 층, 포함 이미지 관계, 실행·OCR 없음 | U-INSP-04~06 | ~300 | P4a | DR-04, DR-14 |
 | P5 | 스키마 검증·맞음 판정·사전·기본 스키마 | U-SCH-01~04 | ~400 | P2b, P4b | DR-06, DR-07 |
 | P6 | 등록 서비스와 저장소: 판정 순서, 동일 재등록, 원자적 저장, 동시성 | U-SVC-01~03, U-ORDER-01, U-RULE-03, I-REG-01~03 | ~400 | P5 | DR-01, DR-15 |
-| P7 | 등록 HTTP 경로: multipart 수신, 크기 계수, 오류 매핑, 독립 조립 | U-HTTP-01, C-API-01(등록 경로)·02·04·06·09(등록 경로)·11 | ~350 | P6 | DR-05, DR-02, DR-16 |
-| P8 | 되찾기·등록 기록·현재본·스키마 조회 경로 | U-RET-01, C-API-01(나머지)·03·05·07·08·09(되찾기·현재본·스키마 경로)·10, I-REG-04 | ~400 | P7, P3 | DR-11(a), DR-13 |
+| P7 | 등록 HTTP 경로: multipart 수신, 크기 계수, 오류 매핑, 독립 조립 | U-HTTP-01, C-API-01(등록 경로)·02·04·06(등록 경로 1개 추가)·09(등록 경로)·11(4경로) | ~350 | P6 | DR-05, DR-02, DR-16 |
+| P8 | 되찾기·등록 기록·현재본·스키마 조회 경로 | U-RET-01, C-API-01(나머지)·03·05·06(5개 추가로 확장)·07·08·09(되찾기·현재본·스키마 경로)·10·11(8경로로 확장), I-REG-04 | ~400 | P7, P3 | DR-11(a), DR-13 |
 | P9 | 완전 삭제·삭제 기록·관리자 기록 조회 | C-CLI-04, I-REG-05 | ~300 | P8 | DR-12 |
 | P10 | 인수 하네스·MVP 회귀·비밀값 검사·저장 위치 점검 | H-01~08, I-REG-06, quickstart 4절 | ~350 | P9 | DR-18 |
 
@@ -415,7 +418,7 @@ specs/001-data-registration/
 ├── contracts/
 │   ├── registration-api.openapi.yaml    # 등록·되찾기 REST 계약(OpenAPI 3.1)
 │   └── admin-cli.md                     # 서버 관리 경로(관리자 CLI) 계약
-└── tasks.md                             # 다음 단계(speckit-tasks), 이번에 만들지 않음
+└── tasks.md                             # speckit-tasks 산출물(2026-11-10 작성, 2026-11-12 개정). 작업 T001~T016
 ```
 
 ### Source Code (repository root)
@@ -428,6 +431,7 @@ src/omf_retrieval/
 │   └── registration.py                      # P1 규칙·사유 목록·구성 분류(신규)
 ├── application/
 │   ├── registration/                        # 신규 패키지
+│   │   ├── manifest.py                      # P1 manifest_hash(기존 canonical_json 재사용)
 │   │   ├── ports.py                         # ContentInspector, BlobStore, 저장소 Protocol
 │   │   ├── schema_dictionary.py             # P5
 │   │   ├── access.py                        # P3·P8 접근 정책
