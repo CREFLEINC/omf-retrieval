@@ -2,6 +2,8 @@
 
 **상태**: 승인(사용자 2026-11-10). DR-17(typer `eval` 하위 명령 + JSON 요청 파일)과 DR-08·DR-09·DR-10·DR-14·DR-19·DR-20·DR-21·DR-23·DR-25 권장안 기준이다. 승인된 결정이 바뀌면 해당 명령을 고친다.
 
+**개정(2026-11-16, `012` 연동 ①~⑧)**: 개발셋 역할(`--role`), 확인 실험(`--purpose holdout_check --track`), 관문 요청의 `holdout`, 확인 규칙 거부 코드 4개, 사전 점검 2a 뒤 거부의 확인 소진 표시, 문서에 없는 질의 합성(`--mode no_answer`, `--per-intent`), 진단·참고 지표 출력 키, 같은 구성·측정 run 공유 규칙을 더했다. 결정 요청 DR-26~DR-28(사용자 승인 2026-11-16, DR-28은 리랭커 교체 건 포함·확인 횟수 시험셋 세대별 변경 포함)과 기술 판단 R-18~R-21에 의존한다. 같은 날 `eval resource show`의 운영 개시 전 예외 출력 예를 보완했다(spec FR-033, research DR-03).
+
 ## 용어
 
 | 용어 | 뜻 |
@@ -17,7 +19,7 @@
 ## 1. 공통 규칙
 
 - 성공 출력은 표준 출력 한 줄 JSON(키 정렬, 공백 없는 구분자). 기존 `client create`와 001 관리자 CLI 관례와 같다.
-- 실패는 표준 오류에 고정 문장 한 줄과 사유 코드(`{"code":"…","message":"…","detail":{…}}`). DB URL, 토큰, 질의문, 원문, 스택 추적을 내지 않는다. `detail`에는 배열 위치·개수·한도·식별값(질의 ID, 스냅숏 ID, run id, 실험 id), 고정 코드(`failure_code`, 세부 `rule`), 재시도 가능 여부(`retryable`), 관문 시도 소비 여부(`attempt_consumed`), 다음 조치 안내(`next_step`)만 넣는다.
+- 실패는 표준 오류에 고정 문장 한 줄과 사유 코드(`{"code":"…","message":"…","detail":{…}}`). DB URL, 토큰, 질의문, 원문, 스택 추적을 내지 않는다. `detail`에는 배열 위치·개수·한도·식별값(질의 ID, 스냅숏 ID, run id, 실험 id), 고정 코드(`failure_code`, 세부 `rule`), 재시도 가능 여부(`retryable`), 관문 시도 소비 여부(`attempt_consumed`), 확인 소진 여부(`holdout_check_consumed`, `holdout_experiment_id`, 개정 추가[DR-28]), 다음 조치 안내(`next_step`)만 넣는다.
 - 변경 명령은 `--actor`(1~100자, 공백만 불가)를 필수로 받는다.
 - 실행 자원 확인(DR-03)은 실험·관문 명령에서만 한다. 데이터 관리 명령은 어느 사내 자원에서도 쓸 수 있으나 평가 DB 거부 목록 확인(DR-02)은 모든 명령이 한다.
 - 네트워크 연결은 평가 DB와(합성 명령만) 허용 목록의 사내 모델 서버뿐이다(research R-11).
@@ -26,7 +28,7 @@
 |---|---|
 | 0 | 성공 |
 | 2 | 인자 오류(typer 기본), 요청 파일 JSON 해석 불가 |
-| 3 | 규칙상 거부(질의 접수 거부, 사전 점검 거부 등). 아무것도 바뀌지 않았고 관문 시도로 세지 않는다 |
+| 3 | 규칙상 거부(질의 접수 거부, 사전 점검 거부 등). 아무것도 바뀌지 않았고 관문 시도로 세지 않는다. 예외[DR-28]: 확인이 필요한 트랙(리랭커 트랙과 리랭커 교체 건)의 관문 시도가 사전 점검 1·2를 통과해 2a에서 확인 기록을 소진한 뒤 거부되면 소진 기록 하나만 남고 `detail.holdout_check_consumed: true`, `detail.holdout_experiment_id`를 함께 낸다 |
 | 4 | 예기치 않은 실패. 트랜잭션은 되돌려졌다. 실험 행은 색인 쪽 필수 검사·모델 적재·예열을 끝낸 뒤 첫 평가셋 질의 직전에 기록되고, 관문 시도는 첫 질의별 결과가 저장될 때부터 센다[DR-24]. 결과 저장 전 오류는 시도로 세지 않고(`detail.attempt_consumed: false`), 그 뒤 오류는 실험이 `failed`로 남고 시도로 센다(`true`) |
 | 5 | 대상 없음(스냅숏, 평가셋, 질의, 실험, 트랙, run, 정책) |
 
@@ -43,7 +45,7 @@
 
 | 명령 | 동작 | 거부 사유 코드 | 대응 |
 |---|---|---|---|
-| `eval set create NAME --kind test\|dev --actor A` | 평가셋 생성. 시험셋이면 세대 1을 연다 | `set_exists`, `invalid_set_name` | FR-001 |
+| `eval set create NAME --kind test\|dev [--role exploration\|holdout] --actor A` | 평가셋 생성. 시험셋이면 세대 1을 연다. 개발셋 역할은 `--role`(생략 시 `exploration`, 불변)[DR-28]. 시험셋에 `--role`을 주면 인자 오류 exit 2 | `set_exists`, `invalid_set_name` | FR-001, `012` 연동 ④ |
 | `eval set list` | 평가셋, 종류, 최신 스냅숏, 시험셋이면 현재 세대 | — | 운영 확인 |
 | `eval query add --set NAME --file F.json --actor A` | 사람 작성 질의 파일 접수(전부 또는 전무). 성공 시 질의 ID 목록과 새 평가셋 스냅숏 | 파일 형식 오류 exit 2. 질의 거부 exit 3 `query_rejected`, `detail.entries[]`에 배열 위치별 사유 코드 목록([query-authoring-format.md](./query-authoring-format.md) 5절). 개발셋에 사람 작성 파일 → `set_kind_mismatch` | FR-003~FR-007, US1 |
 | `eval query remove --set NAME --query QID --reason author_withdrawn\|other [--note N] --actor A` | 질의 제거, 새 스냅숏 | 이미 제거 → exit 3 `already_removed` | FR-009 |
@@ -60,10 +62,11 @@
 | 명령 | 동작 | 거부 사유 코드 | 대응 |
 |---|---|---|---|
 | `eval dev build-from-template --set DEV --template T.json --actor A` | 템플릿 확장으로 질의 생성([query-authoring-format.md](./query-authoring-format.md) 6절). 시험셋과 같은 정규화 질의문은 뺀다. 결과는 같은 접수 규칙으로 검사 | `query_rejected`, `set_kind_mismatch` | FR-007, FR-008 |
-| `eval dev synthesize --set DEV --source-snapshot S --count N --actor A` | (P7, DR-16) 사내 모델 서버로 합성. 허용 목록 밖 호스트면 시작 거부 | `synthesis_host_not_allowed`, `synthesis_unavailable`, `query_rejected` | FR-008, FR-008a, 헌법 VII (3) |
+| `eval dev synthesize --set DEV --source-snapshot S (--count N \| --per-intent 무엇=a,왜=b,어떻게=c) [--mode answerable\|no_answer] [--seed N] --actor A` | (P7, DR-16) 사내 모델 서버로 합성. 허용 목록 밖 호스트면 시작 거부. 개정(P18, R-20): `--mode no_answer`는 원본 자료 스냅숏의 제목 계층 목록만 보내 범위 밖 질문을 만들고 정답 구분 "정답 없음"으로 접수(검색 결과로 거르지 않음). `--per-intent`는 의도별 목표 수. `--count`와 `--per-intent`는 정확히 하나(아니면 exit 2). 기본 모드 `answerable`은 지금 동작 | `synthesis_host_not_allowed`, `synthesis_unavailable`, `query_rejected` | FR-008, FR-008a, 헌법 VII (3), `012` 연동 ⑥ |
 | `eval dev import-synthesized --set DEV --file F.json --actor A` | 사내 모델로 만든 합성 결과 파일을 가져온다. 생성 정보(모델 이름, 서버 호스트)가 없거나 호스트가 허용 목록 밖이면 거부 | `provenance_missing`, `synthesis_host_not_allowed` | FR-008 |
 
-- 출력에 `excluded_as_test_duplicate`(뺀 건수)를 넣는다(US4-6, SC-006).
+- 출력에 `excluded_as_test_duplicate`(뺀 건수)를 넣는다(US4-6, SC-006). 개정[DR-28]: 확인 개발셋에 넣을 때는 탐색 개발셋과 같은 문을 빼고 `excluded_as_exploration_duplicate`, 탐색 개발셋에 넣을 때는 `excluded_as_holdout_duplicate`를 함께 넣는다.
+- `eval dev synthesize` 성공 출력 예(개정, R-20): `{"accepted":100,"by_intent":{"무엇":{"requested":34,"accepted":34,"excluded":0},"왜":{…},"어떻게":{…}},"excluded_as_test_duplicate":0,"mode":"no_answer","review_sample":["Q-001017",…],"set":"dev-explore","shortfall_by_intent":{},"snapshot_id":"dev-explore@4"}`. `review_sample`은 `--seed`로 결정적으로 고른 질의 ID 20개(접수 20개 미만이면 전부)이며 질의문은 출력하지 않는다(개발셋 질의문은 `eval query show`로 본다).
 - 합성 산출물은 평가 DB의 `eval_` 테이블에만 저장한다. 색인·검색 경로는 이 테이블을 읽지 않는다(R-12).
 
 ## 5. 정책과 트랙
@@ -71,7 +74,7 @@
 | 명령 | 동작 | 거부 사유 코드 | 대응 |
 |---|---|---|---|
 | `eval policy register --file P.json --actor A` | 후보 검색 정책 snapshot을 불변 manifest로 등록(설계서 D-11, 기존 저장소 함수). 운영 정책 선택은 바꾸지 않는다. 출력 `config_hash`, `policy_id` | `invalid_policy` | FR-028, D-11 |
-| `eval track list [--set NAME]` | 트랙과 교체 건, 시험셋 지정 시 현재 세대의 사용·남은 시도 수 | — | FR-025, SC-004 |
+| `eval track list [--set NAME]` | 트랙과 교체 건, 시험셋 지정 시 현재 세대의 사용·남은 시도 수. 개정[DR-28]: 확인이 필요한 트랙·교체 건은 `--set`으로 지정한 시험셋의 현재 세대 기준 `holdout_checks_used`(그 세대의 모든 확인), `holdout_checks_free_remaining`(승인 없이 남은 수), `holdout_checks_unconsumed`(그 시험셋의 모든 세대에서 소진되지 않은 `completed` 확인 실험 id 목록. 이전 세대 것도 대조 키가 맞으면 넘겨 쓸 수 있음[결정 2026-11-16])도 출력 | — | FR-025, SC-004, `012` 연동 ④ |
 | `eval track register-swap --module-kind K --description D --approval-ref REF --actor A` | 모듈 교체 건 등록[DR-09] | `invalid_module_kind`, `module_kind_exhausted` | FR-023, FR-025 |
 
 ## 6. 실험 요청 파일(`--spec`)
@@ -84,26 +87,29 @@
     "current":   {"run_id": "…", "policy_config_hash": "…", "reindex_measurement_run_id": "…"},
     "candidate": {"run_id": "…", "policy_config_hash": "…", "reindex_measurement_run_id": "…"}
   },
-  "seed": 20261108
+  "seed": 20261108,
+  "holdout": {"set_snapshot_id": "dev-holdout@2"}
 }
 ```
 
 - `configs`는 정확히 `current`·`candidate` 두 키. 후보가 둘 이상(배열·추가 키)이면 `candidate_limit`(FR-026, US4-2).
 - `seed`는 개발셋 실험에서만 선택 항목(없으면 관문 기준 시드). 관문 시도에서 다른 값이면 `seed_not_allowed`[DR-05].
-- `reindex_measurement_run_id`는 선택 항목. 관문 시도에서 없거나 콜드 빌드 조건(DR-14)을 만족하지 않으면 `cost_measurement_missing`.
+- `reindex_measurement_run_id`는 선택 항목. 관문 시도에서 없거나 콜드 빌드 조건(DR-14)을 만족하지 않으면 `cost_measurement_missing`. 두 구성의 색인 식별값이 같으면 같은 측정 run id를 두 구성에 함께 적을 수 있다(R-19, `012` 연동 ⑧). 출력 `costs.reindex_measurement_shared: true`.
+- `current`와 `candidate`가 같은 구성(같은 run id·정책 `config_hash`)이어도 개발셋 실험은 받는다(단일 구성 진단, R-18, `012` 연동 ⑦). 출력 `metrics.single_config: true`(실험 수준 키, 구성별 `diagnostic` 아님). 관문 시도는 특별 처리 없이 실행되어 시도로 센다(주의).
+- `holdout`(개정, 선택)[DR-28]: 확인이 필요한 트랙의 관문 시도에서 필수. 이 개정의 형식은 `{"set_snapshot_id": "<확인 개발셋 스냅숏>"}`이며 ⑨ 개정이 후보 목록 고정 파일 B 형식을 더한다. 확인이 필요 없는 트랙·개발셋 실험에서는 무시하지 않고 규칙상 거부 exit 3 `holdout_not_allowed`(`detail.rule = holdout_input_unexpected`, 아무것도 바뀌지 않음)로 끝낸다(요청 파일 내용의 규칙 판정이라 exit 3, 독립 검증 발견 F-6).
 
 ## 7. 실험·관문(FR-011~FR-031)
 
 | 명령 | 동작 | 성공 출력 | 거부 사유 코드 | 대응 |
 |---|---|---|---|---|
-| `eval experiment run --spec F.json --actor A [--purpose tuning\|bugfix_check\|transition --approval-ref REF]` | 개발셋 실험(`dev`) 또는 전환 확인(`transition_check`, DR-19). 횟수 제한 없음, 관문 시도로 세지 않음 | `{"experiment_id":…,"kind":"dev","status":"completed","metrics":{…},"mandatory_checks":{…},"costs":{…},"avg_evidence_length":{…},"paired":{…}}` | data-model 4.2의 1~7 | US2, FR-024, DR-20 |
-| `eval gate attempt --spec F.json --track T --actor A` | 관문 시도(`gate`). 사전 점검 1~11 → 색인 쪽 필수 검사·모델 적재·예열(여기까지 오류는 시도로 안 셈) → 실험 행 기록 → 시험셋 두 번 실행(첫 질의별 결과 저장 때 시도 차수 확정, DR-24) → 판정 | 집계 출력: `{"experiment_id":…,"track":"track-2-reranker","generation":1,"attempt_number":2,"remaining_attempts":1,"judgment":"불합격","reasons":{"①":{…},"②":{…},…}}` | data-model 4.2의 1~11. `attempt_limit`이면 `detail.next_step="replenish_test_set"`. `stale_attempt_in_progress`이면 `detail.next_step="eval experiment abandon <id>"` | US3, US4, FR-017~FR-027 |
+| `eval experiment run --spec F.json --actor A [--purpose tuning\|bugfix_check\|transition\|holdout_check] [--track T] [--test-set S] [--approval-ref REF]` | 개발셋 실험(`dev`) 또는 전환 확인(`transition_check`, DR-19). 횟수 제한 없음, 관문 시도로 세지 않음. 개정[DR-28]: 목적 `holdout_check`(확인 실험)는 확인 개발셋, `--track`(리랭커 트랙 또는 리랭커 교체 건), `--test-set`(그 확인을 쓸 시험셋)이 필요하고 (트랙, 시험셋, 현재 세대)별 확인 횟수를 쓰며, 그 세대에서 승인 없이 허용된 수(3)를 넘으면 `--approval-ref`가 필요하다. 새 세대가 열리면 0부터 다시 센다 | `{"experiment_id":…,"kind":"dev","status":"completed","metrics":{…},"mandatory_checks":{…},"costs":{…},"avg_evidence_length":{…},"paired":{…}}`. 개정[DR-27]: `metrics`에 구성별 `diagnostic`(`recall_at_n_candidates`, `candidate_count`, `upper_gap_pp`, `truncated_queries`), 실험 수준 `metrics.single_config`·`reference`(`mrr_at_3`, `ndcg_at_3`)와 `reference.delta`, `costs`에 `rerank_ms`. 확인 실험이면 `holdout_check_number` | data-model 4.2의 1~7·7a. 개정: `holdout_not_allowed`, `holdout_check_limit_exceeded`(실험 행 없음) | US2, FR-024, DR-20, `012` 연동 ②③④⑦ |
+| `eval gate attempt --spec F.json --track T --actor A` | 관문 시도(`gate`). 사전 점검 1~11(개정: 2 다음 2a에서 확인이 필요한 트랙이면 확인 기록 대조·소진[DR-28]) → 색인 쪽 필수 검사·모델 적재·예열(여기까지 오류는 시도로 안 셈) → 실험 행 기록 → 시험셋 두 번 실행(첫 질의별 결과 저장 때 시도 차수 확정, DR-24) → 판정 | 집계 출력: `{"experiment_id":…,"track":"track-2-reranker","generation":1,"attempt_number":2,"remaining_attempts":1,"judgment":"불합격","reasons":{"①":{…},"②":{…},…}}`. 개정: 확인이 필요한 트랙·교체 건이면 `holdout_experiment_id`, 집계 `reference`(MRR@3·nDCG@3 구성별 값과 차이, 판정에 쓰지 않음)[DR-27·DR-28] | data-model 4.2의 1~11과 2a. `attempt_limit`이면 `detail.next_step="replenish_test_set"`. `stale_attempt_in_progress`이면 `detail.next_step="eval experiment abandon <id>"`. 개정: `gate_without_holdout_check`(`detail.rule`), `holdout_check_already_used`. 2a 뒤 거부는 `detail.holdout_check_consumed: true` | US3, US4, FR-017~FR-027, `012` 연동 ④ |
 | `eval experiment show ID` | 실험 기록 요약. 시험셋 실험은 집계 출력만[DR-21] | 위와 같은 형식 + 구성 펼침·측정 환경 | 없음 → exit 5 | FR-028 |
 | `eval experiment export ID --per-query --reason R --actor A` | 질의별 결과 출력. 시험셋이면 `eval_access_log`에 `per_query_export` 1건 기록 | 한 줄 JSON 배열(질의 ID, 구성별 순위·적중·지연·길이) | — | FR-015, DR-21 |
 | `eval experiment reproduce ID --actor A` | 같은 구성·스냅숏·시드로 다시 실행(`reproduction`)하고 원 기록과 대조. 관문 시도로 세지 않음 | `{"experiment_id":…,"reproduces":ID,"match":{"per_query":true,"quality_metrics":true,"mandatory_checks":true,"mismatch_count":0}}` | 원 실험 `failed` → exit 3 `not_reproducible` | FR-025, FR-030, US4-7, US5-2 |
 | `eval experiment abandon ID --reason R --actor A` | [DR-25] `running`으로 남은 중단된 실험 정리. 그 실험의 생존 잠금을 얻을 수 있을 때만(살아 있는 실행 프로세스 없음. 실행기는 행을 만들기 전에 잠금을 얻으므로 시작 직후에도 거부됨) `running → failed`(`abandoned`)로 바꾸고 중단 기록을 남김. 시도 횟수는 DR-24대로(`attempt_number`가 있었으면 셈). 트랜잭션 순서: 생존 키 `try` 트랜잭션 잠금 → 실험 행 `FOR NO KEY UPDATE` → 중단 기록 INSERT → 상태 UPDATE(research DR-25) | `{"experiment_id":…,"status":"failed","failure_code":"abandoned","attempt_counted":false,"remaining_attempts":3}` | 살아 있음 → exit 3 `experiment_alive`. `running`이 아님 → exit 3 `not_running`. PostgreSQL 교착(SQLSTATE `40P01`) → exit 4 `lock_conflict`, `detail.retryable: true`(트랜잭션 되돌림, 상태 변화·중단 기록 없음, 같은 명령을 다시 실행). `--reason`·`--actor` 없음 → exit 2. 없는 실험 → exit 5 | FR-026, FR-029 |
 | `eval gate recompute ID` | 기록된 질의별 결과·관문 기준만으로 지표·부트스트랩·판정·사유를 다시 계산해 대조. 실험을 재실행하지 않는다 | `{"experiment_id":…,"judgment_match":true,"reasons_match":true,"recomputed":{"judgment":…,"reasons":{…}}}` | `gate`가 아님 → exit 3 `not_gate_experiment` | FR-015, US5-1, SC-002 |
-| `eval resource show` | 현재 실행 자원(호스트, GPU UUID)과 허용 여부 | `{"resource_name":…,"allowed":true,"production_match":false,"gpus":[…]}` | — | FR-033, SC-011 |
+| `eval resource show` | 현재 실행 자원(호스트, GPU UUID)과 허용 여부. 운영 개시 전 예외(spec FR-033, research DR-03): 허용 목록 항목에 `pre_launch_exception: true`가 있으면 운영 목록과 겹쳐도 허용하고 그 사실을 출력한다. 표시가 없거나 지워졌으면 운영 목록과 겹칠 때 `allowed: false`. 허용 목록·운영 목록 중 하나라도 비었거나 읽기 실패면 `allowed: false` | 연구 자원: `{"allowed":true,"gpus":[…],"pre_launch_exception":false,"production_match":false,"resource_name":"research-gpu-1"}`. 운영 개시 전 예외 기간의 운영 서버: `{"allowed":true,"gpus":[{"memory_total_mib":…,"name":…,"uuid":"GPU-…"}],"pre_launch_exception":true,"production_match":true,"resource_name":"운영 서버(운영 개시 전 예외)"}`. 표시를 지운 뒤 같은 서버: `{"allowed":false,"pre_launch_exception":false,"production_match":true,"reason":"resource_not_allowed",…}`(진단 명령이라 exit 0) | — | FR-033, SC-011 |
 
 - 관문 시도 출력의 `reasons`는 조건마다 `{"pass":bool,"measured":…,"threshold":…,"note":…}`. 근거 완전성 해당 없음은 `note: "not_applicable"`(spec Edge Case).
 - 실행기가 생존 잠금 연결을 잃으면 다음 결과를 커밋하지 않고 멈춘 뒤 자기 실험을 `failed`(`liveness_lost`)로 바꾸려 시도하고 exit 4로 끝난다[DR-25]. 평가 DB 연결은 트랜잭션 모드 연결 풀러를 거치면 안 된다. 이는 설정 규칙(`OMF_EVAL_DATABASE_URL`은 평가 PostgreSQL 직접 주소, quickstart 5절)이며 시작 시 거부 검사는 없다. 실행 중 전용 연결의 `pg_backend_pid()`가 잠금 획득 때와 달라지면 잠금 상실(`liveness_lost`, exit 4)로 끝낸다(research DR-25).
@@ -112,7 +118,10 @@
 - 실행기는 질의별 결과와 완료 기록을 커밋하기 직전마다 생존 잠금을 확인한다. 완료 직전 확인에서 잠금이 없으면 완료를 커밋하지 않고 `liveness_lost`로 끝난다[DR-25].
 - 실험 중 질의 하나라도 비공개 평가 경로 오류가 나면 대체하지 않고 실험을 `failed`로 끝낸다(R-14). 출력 exit 4, `detail.failure_code`, 관문 시도면 `detail.attempt_consumed`(질의별 결과가 하나라도 저장됐으면 `true`).
 - 어떤 `eval` 명령도 활성 포인터, 운영 정책 설정, `source_profiles`를 바꾸지 않는다(FR-021, FR-032).
+- 개정(`012` 연동 ⑤)[DR-26]: 리랭커 준비 실패 7개 코드(`reranker_not_registered` 등, private-evaluation-path.md 3절)는 사전 점검 7의 거부로 exit 3, 실험 행 없음. 질의 단계의 `rerank_failed`·`rerank_timeout`·`rerank_contract_violation`은 위 질의 오류와 같이 대체 없이 실험 `failed`, exit 4, `detail.failure_code`에 그 코드.
+- 개정(`012` 연동 ④)[DR-28] 확인 규칙 거부 코드(모두 exit 3, 시도로 세지 않음): `holdout_not_allowed`(확인 개발셋을 `holdout_check` 밖 목적에 씀, 탐색 개발셋으로 `holdout_check`, 후보 대조 키를 만들 수 없음, 확인이 필요 없는 요청에 `holdout`을 붙임, 등록됐지만 확인 규칙에 없는 트랙·교체 건으로 `holdout_check`(`track_not_in_holdout_rules`)), `holdout_check_limit_exceeded`(승인 없이 허용된 확인 수 초과, 실험 행 없음), `gate_without_holdout_check`(같은 시험셋의 맞는 미소진 확인 기록 없음(이전 세대 기록 포함[결정 2026-11-16])·요청에 `holdout` 없음·후보 대조 키 없음), `holdout_check_already_used`(맞는 기록이 모두 이미 소진됨, 동시 소진 경쟁에서 짐).
+- 운영 메모(트랙 ②): `012`는 시험셋 질의별 내보내기(`eval experiment export --per-query`)를 하지 않기로 했다(`012` plan `진행 판단 규칙` 6, 사용자 승인 2026-11-13). 이는 트랙의 운영 약속이며 시스템 규칙(FR-024, DR-21: 사유·실행자 기록 뒤 허용)은 바꾸지 않는다.
 
 ## 8. 계약 테스트 대응
 
-`tests/contract/cli/test_eval_commands.py`(신규)가 각 명령의 인자, 성공 출력 키 집합, exit code, 표준 오류에 비밀값·질의문·원문이 없음을 확인한다. 시험셋 열람 기록은 C-CLI-08이 확인한다. 세부 사례는 [plan.md](../plan.md) `테스트 전략`의 C-CLI 항목을 따른다.
+`tests/contract/cli/test_eval_commands.py`(신규)가 각 명령의 인자, 성공 출력 키 집합, exit code, 표준 오류에 비밀값·질의문·원문이 없음을 확인한다. 시험셋 열람 기록은 C-CLI-08이 확인한다. 개정 항목(확인 규칙·`--role`·관문 `holdout`·합성 모드)은 C-CLI-09·10이 확인한다. 세부 사례는 [plan.md](../plan.md) `테스트 전략`의 C-CLI 항목을 따른다.

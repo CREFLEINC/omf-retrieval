@@ -1,8 +1,10 @@
 # Data Model: 평가 하네스 — 평가셋·지표·실험 기록·적용 관문(evaluation-harness)
 
-**작성일**: 2026-11-10 | **입력**: [spec.md](./spec.md), [research.md](./research.md), [plan.md](./plan.md) | **상태**: 결정 요청 DR-01~DR-25 **승인(사용자 2026-11-10, 모두 권장안. DR-02·DR-03은 권장 A)**. `[DR-xx]`는 그 승인 결정에 의존한다는 표시다. 값 입력 대기: 관문 기준 `gpu_memory_limit_mib`(DR-04, 운영 GPU 실측값을 받은 뒤 정함)과 연구 자원 허용 목록(DR-03). 둘 다 결정 미승인이 아니며, 값이 없으면 각각 `gate_setting_missing`·`resource_not_allowed`로 거부한다(fail-closed).
+**작성일**: 2026-11-10 | **입력**: [spec.md](./spec.md), [research.md](./research.md), [plan.md](./plan.md) | **상태**: 결정 요청 DR-01~DR-25 **승인(사용자 2026-11-10, 모두 권장안. DR-02·DR-03은 권장 A)**. `[DR-xx]`는 그 승인 결정에 의존한다는 표시다. 값 입력 대기: 관문 기준 `gpu_memory_limit_mib`(DR-04, 운영 GPU 실측값을 기록한 뒤 정함)과 연구 자원 허용 목록(DR-03). 갱신(사용자 결정 2026-11-13): 운영 서버 값은 첫 접속 때 실측해 기록하며, 운영 개시 전에는 운영 서버를 예외 표시와 함께 허용 목록에 둔다(spec FR-033, 4.2절 순서 1). 둘 다 결정 미승인이 아니며, 값이 없으면 각각 `gate_setting_missing`·`resource_not_allowed`로 거부한다(fail-closed).
 
-이 문서는 개념 수준의 저장 구조다. 테이블·컬럼 이름은 구현 계획의 기준 이름이며 SQL·마이그레이션 코드는 아니다. 저장 위치는 플랫폼 PostgreSQL 스키마의 새 `eval_` 테이블이다[DR-01]. 평가는 연구 자원의 별도 평가 DB에서 실행한다[DR-02]. 마이그레이션은 새 Alembic revision 둘로 만든다: P4a `0006_evaluation_datasets`(3.1~3.9), P4b `0007_evaluation_experiments`(3.10~3.16). 번호는 구현 시점 head에 맞춘다(research R-13).
+**개정(2026-11-16, `012` 연동 ①~⑧)**: 3.3 `dev_role`, 3.12 목적 `holdout_check`·`gate_request_id`, 3.13 후보 목록 적중 위치·후보 수·리랭크 기록, 3.14 진단·참고 지표 키, 새 3.17·3.18(확인 실험·확인 소진), 4.2 사전 점검 2a·7a, 4.5 확인 규칙, 5절 `0008` 마이그레이션을 더했다. 모두 기존 내용을 바꾸지 않는 추가이며 결정 요청 DR-26~DR-28(research.md, **사용자 승인 2026-11-16**, DR-28은 변경 포함: 리랭커 교체 건도 확인 대상, 확인 횟수는 시험셋 세대별)에 의존한다. `[DR-26]`~`[DR-28]` 표시가 그 의존이다. 후보 목록 고정 파일(⑨)은 다음 개정에서 더한다.
+
+이 문서는 개념 수준의 저장 구조다. 테이블·컬럼 이름은 구현 계획의 기준 이름이며 SQL·마이그레이션 코드는 아니다. 저장 위치는 플랫폼 PostgreSQL 스키마의 새 `eval_` 테이블이다[DR-01]. 평가는 연구 자원의 별도 평가 DB에서 실행한다[DR-02]. 마이그레이션은 새 Alembic revision 셋으로 만든다: P4a `0006_evaluation_datasets`(3.1~3.9), P4b `0007_evaluation_experiments`(3.10~3.16), P4c `0008_evaluation_research_linkage`(`012` 연동 추가 열과 3.17·3.18)[DR-27]. 번호는 구현 시점 head에 맞춘다(research R-13).
 
 ## 용어
 
@@ -28,6 +30,9 @@
 | 분수 표기 | 비율을 `{"num": 분자, "den": 분모, "decimal": "0.612500"}`로 저장하는 형식(research R-01). |
 | actor | 변경 명령 실행자가 `--actor`로 밝힌 이름과 운영체제 사용자 이름(001 관리자 CLI와 같은 형식 `"<actor> (os:<user>)"`). 인증된 신원이 아니다. |
 | DR, R-xx | [research.md](./research.md)의 결정 요청과 기술 판단. |
+| 후보 목록, 리랭커, 리랭크 적용 상태, 통과 모듈, 진단 지표, 참고 지표, Recall@N(후보 목록), 탐색·확인 개발셋, 확인 실험, 확인 소진, 후보 대조 키 | research.md 용어표와 같다(`012` 연동 개정 2026-11-16). |
+| 관문 요청 id(`gate_request_id`) | 관문 시도 요청이 사전 점검 2a에 들어올 때 실행기가 만드는 UUID. 확인 소진 기록과 그 요청의 실험 행을 잇는다[DR-28]. |
+| 확인 입력 식별값(`holdout_identity_sha256`) | 확인 실험이 읽은 확인 입력과 현재 구성을 가리키는 SHA-256. 이 개정은 확인 개발셋 스냅숏 종류만 정의한다[DR-28]. |
 
 ## 1. 기존 테이블과의 관계
 
@@ -63,6 +68,8 @@ erDiagram
   eval_experiments ||--o{ eval_access_log : "질의별 결과 내보내기"
   eval_experiments ||--o| eval_experiment_abandonments : "중단 정리 기록"
   eval_queries ||--o{ eval_access_log : "시험셋 질의문 열람"
+  eval_experiments ||--o| eval_holdout_checks : "확인 실험(DR-28)"
+  eval_holdout_checks ||--o| eval_holdout_consumptions : "확인 소진(DR-28)"
 ```
 
 ## 3. 개체 정의
@@ -105,9 +112,10 @@ PK (`snapshot_id`, `source_key`, `material_id`). 불변. OMF 행은 고정 commi
 |---|---|---|
 | `name` | text PK | 1~40자, `[a-z0-9-]` |
 | `kind` | text | `test` 또는 `dev`. CHECK |
+| `dev_role` | text NULL | (`0008` 추가)[DR-28] 개발셋 역할 `exploration`·`holdout`. CHECK: `kind = test`이면 NULL, 값이 있으면 두 값 중 하나. 새로 INSERT하는 `kind = dev` 행은 NOT NULL(BEFORE INSERT 트리거, 생성 명령 기본 `exploration`). `0008` 적용 전에 있던 `kind = dev` 행은 NULL로 남고 **`exploration`으로 읽는다**(유효 역할 = `coalesce(dev_role, 'exploration')`). 이렇게 해서 마이그레이션이 append-only 트리거를 끄거나 기존 행을 UPDATE하지 않는다(독립 검증 발견 F-4) |
 | `created_by`, `created_at` | | |
 
-불변. 한 질의는 한 평가셋에만 속한다(3.5 PK가 평가셋을 포함하고 질의를 다른 평가셋으로 옮기는 경로가 없음).
+불변. 역할도 만들 때 정하고 바꾸지 않는다. 한 질의는 한 평가셋에만 속한다(3.5 PK가 평가셋을 포함하고 질의를 다른 평가셋으로 옮기는 경로가 없음).
 
 ### 3.4 `eval_test_generations` — 시험셋 세대[DR-08]
 
@@ -198,6 +206,7 @@ PK (`set_name`, `query_id`, `ordinal`). CHECK: 종류별로 해당 컬럼만 NOT
 | `accepted_count` | integer | 접수 건수(전부 또는 전무[DR-10]이므로 0이면 거부된 제출) |
 | `rejected_reasons` | jsonb | 거부 시 배열 위치별 사유 코드 목록(질의문 등 내용은 담지 않음) |
 | `resulting_snapshot_id` | text NULL FK → 3.8 | 접수 시 만든 스냅숏 |
+| `excluded_counts` | jsonb NULL | (`0008` 추가)[DR-28] 접수 때 자동으로 뺀 질의 수 `{"test_duplicate":n,"exploration_duplicate":n,"holdout_duplicate":n}`(정수 ≥ 0, 질의문 없음). 행 INSERT 때만 채우며 append-only와 맞는다. `0008` 이전 행은 NULL. 사람 작성 시험셋 제출(제외 없음, 거부만 있음)은 NULL |
 | `submitted_by`, `created_at` | | |
 
 불변. SC-003 검토 증거(작성자별 거부 0건 확인)에 쓴다.
@@ -225,7 +234,7 @@ UNIQUE (`name`, `version`). 불변. 실행기가 코드 상수에서 멱등 등�
 | `intent_drop_max_pp_exclusive`, `secondary_drop_max_pp_exclusive` | 5, 2 (미만 통과) | FR-018 ④ |
 | `latency_p95_increase_max_ms` | 200 (이하 통과) | FR-018 ⑤ |
 | `reindex_max_seconds` | 28800 (이하 통과) | FR-018 ⑤ |
-| `gpu_memory_limit_mib` | **미정**(운영 GPU 실측 총 메모리 −10%)[DR-04] | FR-018 ⑤ |
+| `gpu_memory_limit_mib` | **미정**(운영 GPU 실측 총 메모리 −10%. 총 메모리는 운영 서버 첫 접속 때 실측해 기록, 사용자 결정 2026-11-13)[DR-04] | FR-018 ⑤ |
 | `no_evidence_rate_not_lower` | true | FR-018 ⑤ |
 | `bootstrap` | `{"method":"percentile","resamples":10000,"seed":20261108,"rng":"sha256-counter-v1","quantile":"nearest-rank"}`[DR-05] | FR-018 ③ |
 | `metric_definition_version` | `metrics-v1`(DR-11의 1~7)[DR-06·DR-11] | FR-011~014a |
@@ -255,19 +264,20 @@ UNIQUE (`name`, `version`). 불변. 실행기가 코드 상수에서 멱등 등�
 |---|---|---|
 | `id` | uuid PK | 실행기가 클라이언트에서 만든 UUIDv4(생존 잠금 키의 재료)[DR-25] |
 | `kind` | text | `dev`, `gate`, `reproduction`, `transition_check`. CHECK |
-| `purpose` | text | `tuning`, `improvement`, `bugfix_check`, `reproduction`, `transition`. 관문 시도는 `improvement`만[DR-20] |
+| `purpose` | text | `tuning`, `improvement`, `bugfix_check`, `reproduction`, `transition`, `holdout_check`(`0008` 추가, `dev`이고 평가셋 역할 `holdout`일 때만, 트리거로 확인[DR-28]). 관문 시도는 `improvement`만[DR-20] |
 | `set_snapshot_id` | text FK → 3.8 | `gate`이면 시험셋 스냅숏, `dev`이면 개발셋 스냅숏 |
 | `set_name` | text FK → 3.3 | `set_snapshot_id`의 평가셋(트리거로 일치 확인). 시도 횟수 집계 키 |
 | `source_snapshot_id` | text FK → 3.1 | |
 | `current_config`, `candidate_config` | jsonb | 구성마다 `run_id`, 색인 식별값과 snapshot 원문, 정책 `config_hash`와 snapshot 원문, 질의 임베딩 기술자, 재색인 측정 run id(R-08, DR-14) |
 | `seed` | bigint | `gate`이면 관문 기준의 시드만 허용(트리거·사전 점검)[DR-05] |
 | `criteria_hash` | char(64) NULL FK → 3.10 | `gate`·`reproduction`(관문 시도 재현)이면 필수 |
-| `track_id` | text NULL FK → 3.11 | `gate`이면 필수 |
+| `track_id` | text NULL FK → 3.11 | `gate`이면 필수. 목적 `holdout_check`이면 필수(확인 횟수의 주체, 연구 트랙 또는 리랭커 교체 건)[DR-28] |
 | `generation` | integer NULL | `gate`이면 시험셋 세대 |
 | `attempt_number` | integer NULL | `gate` 행은 NULL로 INSERT하고, **첫 시험셋 질의별 결과(3.13)를 저장하는 트랜잭션에서 한 번만** 값을 정한다(트랙별 advisory lock 아래, 그 행의 `generation`에서 값 있는 시도 수 + 1. 실행 중 새 세대가 열려도 행의 세대를 쓴다)[DR-24]. 값이 있는 `gate` 행만 시도로 센다. CHECK `attempt_number >= 1`. 상한은 설정값(3.10 `max_attempts_per_track`)이라 CHECK에 고정하지 않고, 값을 정하는 UPDATE 때 트리거가 `criteria_hash`가 가리키는 기준 행의 `settings.max_attempts_per_track` 이하인지 확인한다(시드 확인과 같은 방식). 사전 점검(4.2의 9)이 먼저 같은 값으로 거부한다 |
 | `reproduces_experiment_id` | uuid NULL FK → 3.12 | `reproduction`이면 필수 |
+| `gate_request_id` | uuid NULL | (`0008` 추가)[DR-28] 확인이 필요한 트랙의 `gate` 행이면 필수: 사전 점검 2a가 만든 관문 요청 id(3.18). 그 밖 NULL. UNIQUE(값이 있을 때) |
 | `approval_ref` | text NULL | `bugfix_check`·`transition_check` 필수 |
-| `resource_name` | text | 허용 목록의 연구 자원 이름[DR-03] |
+| `resource_name` | text | 허용 목록의 연구 자원 이름[DR-03]. 운영 개시 전 예외로 운영 서버에서 실행한 실험(허용 항목에 `pre_launch_exception: true`)은 "운영 서버(운영 개시 전 예외)"(spec FR-033 조건 ③, 사용자 결정 2026-11-13) |
 | `environment` | jsonb | 호스트, GPU 이름·UUID·총 메모리, CPU, 드라이버, Python·torch·sentence-transformers 버전, 장치 문자열, 측정 방식 설명(R-16) |
 | `status` | text | `running` → `completed` 또는 `failed` |
 | `failure_code` | text NULL | 고정 코드(원문·질의문 없음). 중단 정리면 `abandoned`, 실행기가 생존 잠금을 잃고 스스로 끝내면 `liveness_lost`[DR-25] |
@@ -288,21 +298,25 @@ UNIQUE (`name`, `version`). 불변. 실행기가 코드 상수에서 멱등 등�
 | `query_id` | text | 실험 스냅숏의 구성원 |
 | `status` | text | `ok`, `no_evidence` |
 | `latency_ms` | integer | ≥ 0(R-16) |
-| `evidence` | jsonb | 순위 1~20 근거 항목 배열. 항목마다 `rank`, `parent_id`, `matches[]`(`chunk_id`, `line_start`, `line_end`, `length_cp`), `origins[]`(`source_key`, `material_id`, `revision`, `file_index`), `rrf_score`(분수 아님, 기록용) |
+| `evidence` | jsonb | 순위 1~20 근거 항목 배열. 항목마다 `rank`, `parent_id`, `matches[]`(`chunk_id`, `line_start`, `line_end`, `length_cp`, 그리고 `012` 연동 ③의 `rerank_score`(0~1 실수 또는 null), `rerank_rank`(정수 또는 null), `reranked`(참·거짓)[DR-27]), `origins[]`(`source_key`, `material_id`, `revision`, `file_index`), `rrf_score`(분수 아님, 기록용). 리랭커가 없으면 리랭크 필드는 null·null·거짓 |
 | `hit_ranks` | integer[] | 적중한 근거 항목 순위 목록(정답 있음 질의만) |
 | `hit_answer_ordinals_top5` | integer[] | 상위 5개에서 적중한 정답 근거 `ordinal` 목록 |
 | `top5_length_cp` | integer[] | 상위 5개 근거 항목 길이(코드 포인트)[DR-06] |
+| `candidate_hit_position` | integer NULL | (`0008` 추가)[DR-27] 후보 목록에서 정답 근거와 겹치는 첫 후보의 위치(1부터, 그 구성이 쓴 순서). 정답 없음 질의·겹침 없음이면 NULL(research R-21) |
+| `candidate_count` | integer NULL | (`0008` 추가)[DR-27] 그 질의의 결합 결과 후보 수(잘리기 전 전체 수, 경로 결과의 `candidate_total`). 100을 넘으면 그 질의의 후보 목록은 앞 100개로 잘렸고 적중 위치도 그 안에서만 찾는다(DR-26 3, R-21). 정답 없음 질의도 기록 |
+| `rerank_status` | text NULL | (`0008` 추가)[DR-27] 리랭크 적용 상태. CHECK 다섯 값(`applied`, `not_applied_error`, `not_applied_timeout`, `passthrough`, `skipped_no_candidates`). 평가 실행기는 `applied`·`passthrough`·`skipped_no_candidates`만 쓴다(미적용은 오류로 끝남, DR-26 4) |
+| `rerank_ms` | integer NULL | (`0008` 추가)[DR-27] 리랭크 소요 시간 ms(올림, ≥ 0). `passthrough`·`skipped_no_candidates`면 0 |
 
-PK (`experiment_id`, `config_role`, `pass_number`, `query_id`). 불변. 원문(`excerpt`)은 저장하지 않는다(길이만). 질의마다 두 구성의 결과를 한 트랜잭션으로 저장·커밋한다(실험 끝에 몰아 저장하지 않음). `gate`의 첫 질의 저장 트랜잭션이 `attempt_number`도 정한다[DR-24]. 실패한 실험의 일부 결과도 남는다. **결과 가드**[DR-25]: BEFORE INSERT 트리거가 부모 3.12 행을 `FOR SHARE`로 읽어 `status = 'running'`이 아니면 거부한다(정리·실패 뒤 좀비 쓰기 차단). 실행기의 쓰기 트랜잭션은 부모 행을 **가장 먼저** `FOR NO KEY UPDATE`로 잠근 뒤 이 표에 INSERT하므로 가드의 `FOR SHARE`가 잠금 승격을 일으키지 않는다. 순서: 부모 행 잠금 → (`gate` 첫 결과만) 트랙 잠금·`attempt_number` → INSERT → 생존 잠금 자기 확인 → 커밋(research DR-25 `트랜잭션 안 순서`). 재계산(SC-002)은 이 표와 3.10·3.12만으로 한다.
+PK (`experiment_id`, `config_role`, `pass_number`, `query_id`). 불변. 원문(`excerpt`)은 저장하지 않는다(길이만). 후보 목록 자체도 저장하지 않는다(적중 위치·후보 수만)[DR-27]. 질의마다 두 구성의 결과를 한 트랜잭션으로 저장·커밋한다(실험 끝에 몰아 저장하지 않음). `gate`의 첫 질의 저장 트랜잭션이 `attempt_number`도 정한다[DR-24]. 실패한 실험의 일부 결과도 남는다. **결과 가드**[DR-25]: BEFORE INSERT 트리거가 부모 3.12 행을 `FOR SHARE`로 읽어 `status = 'running'`이 아니면 거부한다(정리·실패 뒤 좀비 쓰기 차단). 실행기의 쓰기 트랜잭션은 부모 행을 **가장 먼저** `FOR NO KEY UPDATE`로 잠근 뒤 이 표에 INSERT하므로 가드의 `FOR SHARE`가 잠금 승격을 일으키지 않는다. 순서: 부모 행 잠금 → (`gate` 첫 결과만) 트랙 잠금·`attempt_number` → INSERT → 생존 잠금 자기 확인 → 커밋(research DR-25 `트랜잭션 안 순서`). 재계산(SC-002)은 이 표와 3.10·3.12만으로 한다.
 
 ### 3.14 `eval_experiment_results` — 지표·필수 검사·비용·판정(FR-028)
 
 | 컬럼 | 형식 | 규칙 |
 |---|---|---|
 | `experiment_id` | uuid PK FK → 3.12 | 실험이 `completed`로 바뀌는 트랜잭션에서 상태 전이 **전에** 한 번 INSERT. 3.13과 같은 결과 가드 트리거(부모가 `running`일 때만)[DR-25]. 완료 트랜잭션 순서: 부모 행 `FOR NO KEY UPDATE` → 이 행 INSERT → 생존 잠금 자기 확인(상실이면 커밋 없이 `liveness_lost`) → `completed` UPDATE → 커밋 |
-| `metrics` | jsonb | 구성별 Recall@5, MRR@20, 근거 완전성(또는 `"not_applicable"`), 의도별 Recall@5, `no_evidence` 비율, 반환 근거 평균 길이(전체·정답 있음). 모두 분수 표기 |
+| `metrics` | jsonb | 구성별 Recall@5, MRR@20, 근거 완전성(또는 `"not_applicable"`), 의도별 Recall@5, `no_evidence` 비율, 반환 근거 평균 길이(전체·정답 있음). 모두 분수 표기. `012` 연동 추가 키(관문 판정·관문 기준 해시에 쓰지 않음)[DR-27]: `diagnostic.recall_at_n_candidates`(`"5"`·`"10"`·`"20"`·`"30"`·`"50"`·`"max"` → 분수), `diagnostic.candidate_count`(`min`·`median`·`max`), `diagnostic.upper_gap_pp`(분수), `diagnostic.truncated_queries`, `reference.mrr_at_3`(분수), `reference.ndcg_at_3`(`{"value","decimal","precision"}`, binary64). 실험 수준(구성별 아님) 키: `reference.delta`(후보 − 현재), `single_config`(R-18), `reference_metrics_version`(`reference-v1`). 정답 있는 질의 0개면 해당 값 `"not_applicable"` |
 | `mandatory_checks` | jsonb | 구성별 5종 각각 `pass`·`fail`·`not_run`과 위반 수·대표 위반 좌표(원문 없음) |
-| `costs` | jsonb | 구성별 지연 p95(ms), 재색인 소요 시간(초 또는 `not_measured`), GPU 메모리 최대(MiB 또는 `not_measured`), 측정 방법 |
+| `costs` | jsonb | 구성별 지연 p95(ms), 재색인 소요 시간(초 또는 `not_measured`), GPU 메모리 최대(MiB 또는 `not_measured`), 측정 방법. `012` 연동 추가: 구성별 `rerank_ms`(`p95`·`p99`, nearest-rank)[DR-27], 측정 run 공유 표시 `reindex_measurement_shared`(R-19) |
 | `paired` | jsonb | 불일치율(분수), 부트스트랩 하한·상한(분수), 재표본 수, 시드 |
 | `judgment` | text NULL | `gate`: `적용 권고`, `불합격`, `유의한 차이 없음(현재 유지)`. 그 밖: NULL |
 | `reasons` | jsonb NULL | 조건 ①~⑤마다 통과 여부, 측정값, 기준값(FR-020) |
@@ -337,6 +351,38 @@ CHECK: `kind`별 필수 컬럼(위)과 나머지 NULL. 불변. 개발셋 결과�
 
 불변. `eval experiment abandon`만 INSERT한다. 같은 트랜잭션에서 3.12 행을 `failed`(`abandoned`)로 바꾼다. 생존 잠금이 없다는 확인은 명령이 같은 트랜잭션에서 `pg_try_advisory_xact_lock`으로 하며 DB 제약으로 강제되지는 않는다(그래서 확인 여부 컬럼을 두지 않는다). 명령 트랜잭션 순서: 생존 키 `try` 트랜잭션 잠금 → 3.12 행 `FOR NO KEY UPDATE` → 이 행 INSERT → `failed`(`abandoned`) UPDATE → 커밋. PostgreSQL이 교착(SQLSTATE `40P01`)을 보고하면 되돌리고 exit 4 `lock_conflict`(재시도 가능, 상태 변화·기록 없음).
 
+### 3.17 `eval_holdout_checks` — 확인 실험 기록[DR-28](`0008` 추가)
+
+| 컬럼 | 형식 | 규칙 |
+|---|---|---|
+| `experiment_id` | uuid PK FK → 3.12 | 목적 `holdout_check`인 `dev` 실험. 실험 행 INSERT와 같은 트랜잭션에서 INSERT |
+| `track_id` | text FK → 3.11 | 확인 규칙(4.5)에 있는 트랙 또는 리랭커 교체 건 |
+| `test_set_name`, `generation` | text FK → 3.3(`kind = test`), integer | 이 확인을 쓸 관문 시도의 시험셋(`--test-set`)과 INSERT 시점의 그 시험셋 현재 세대(3.4). 확인 횟수를 세는 범위 |
+| `check_number` | integer | (`track_id`, `test_set_name`, `generation`) 안 1부터. 그 범위의 확인 잠금 아래 (기존 행 수 + 1). UNIQUE (`track_id`, `test_set_name`, `generation`, `check_number`). 새 세대가 열리면 1부터 다시 |
+| `approval_ref` | text NULL | `check_number`가 확인 규칙의 승인 없이 허용된 수(v1은 세대마다 3)를 넘으면 필수(트리거로 확인) |
+| `rule_version` | text | 확인 규칙 버전(`holdout-v1`) |
+| `key_kind` | text | 대조 키 종류(`reranker-v1`) |
+| `current_policy_config_hash` | char(64) | 대조 키 ①: 현재 구성의 정책 `config_hash` |
+| `reranker_settings_hash` | char(64) | 대조 키 ②: 후보 정책의 리랭커 기술자 설정 정규화 해시 |
+| `candidate_depth` | integer | 대조 키 ③: 후보 깊이(≥ 1) |
+| `holdout_identity_kind` | text | `set_snapshot`(이 개정). ⑨ 개정이 `frozen_file`을 더한다. CHECK |
+| `holdout_identity_sha256` | char(64) | 확인 입력 식별값. `set_snapshot`이면 `SHA-256(canonical_json({"kind","set_snapshot_id","members_hash","current_run_id","current_policy_config_hash"}))` |
+| `created_at` | timestamptz | |
+
+불변. 실험이 `failed`로 끝나도 행은 남고 확인 횟수로 센다. 관문 시도 대조에는 부모 3.12가 `completed`이고 `test_set_name`이 관문 요청의 시험셋과 같은 행을 쓴다. 이전 세대에 만들어진 미소진 행도 대조 키가 맞으면 새 세대 관문 시도에 쓸 수 있고(넘겨 쓰기), 그 행은 만들어진 세대의 확인 횟수로만 센다(새 세대 횟수에 다시 더하지 않음)[결정 2026-11-16].
+
+### 3.18 `eval_holdout_consumptions` — 확인 소진 기록[DR-28](`0008` 추가)
+
+| 컬럼 | 형식 | 규칙 |
+|---|---|---|
+| `holdout_experiment_id` | uuid PK FK → 3.17 | 한 확인 기록은 한 번만 소진(제약 이름 `eval_holdout_consumptions_pkey`. 위반 `23505` → `holdout_check_already_used`) |
+| `gate_request_id` | uuid UNIQUE | 사전 점검 2a가 만든 관문 요청 id. 그 요청이 실험 행을 만들면 3.12 `gate_request_id`가 같은 값 |
+| `track_id` | text FK → 3.11 | 관문 요청의 트랙(3.17과 같아야 함, 트리거로 확인) |
+| `set_name`, `generation` | text, integer NULL | 관문 요청의 시험셋과 사전 점검 2a가 정한 세대(요청이 시험셋이 아니면 `set_name`만, 세대 NULL). 시험셋이면 3.17의 `test_set_name`과 같고 3.17의 `generation` 이상이어야 하며(트리거, 넘겨 쓰면 더 큼[결정 2026-11-16]), 그 요청의 3.12 행 `generation`도 이 값이다 |
+| `consumed_by`, `consumed_at` | | actor, 시각 |
+
+불변. 연결된 관문 시도 차수는 `gate_request_id`로 3.12를 조인해 `attempt_number`를 읽는다(이 행을 고치지 않음). 실험 행이 없거나 `attempt_number`가 NULL이면 "판정 없이 끝난 시도"이고 확인은 소진된 상태다.
+
 ## 4. 규칙
 
 ### 4.1 질의 생명주기와 스냅숏
@@ -359,19 +405,21 @@ revision 완전 삭제 감지(접수·제거·실험 사전 점검 때 확인)
 
 | 순서 | 확인 | 거부 코드 |
 |---|---|---|
-| 1 | 실행 자원이 허용 목록에 있고 운영 목록에 없음[DR-03] | `resource_not_allowed` |
+| 1 | 실행 자원이 허용 목록에 있고 운영 목록에 없음[DR-03]. 예외: 허용 목록 항목에 운영 개시 전 예외 표시(`pre_launch_exception: true`, 기본 false)가 있으면 운영 목록과 겹쳐도 통과하고 `resource_name`을 "운영 서버(운영 개시 전 예외)"로 기록한다. 허용 목록·운영 목록 중 하나라도 비었거나 읽기 실패면 거부(spec FR-033, 사용자 결정 2026-11-13) | `resource_not_allowed` |
 | 2 | 평가 DB가 운영 DB 거부 목록에 없음[DR-02]. 풀러 경유 여부는 시작 시 검사하지 않는다(설정 규칙과 실행 중 `pg_backend_pid()` 불변 확인으로 다룸, research DR-25) | `production_database_refused` |
+| 2a | (`gate`, `0008` 추가)[DR-28] 트랙이 있음. 확인 규칙(4.5)상 확인이 필요한 트랙이면: 요청 파일의 `holdout` 있음, 두 정책 manifest를 읽기 전용으로 resolve해 후보 대조 키를 만듦, 관문 요청의 현재 구성으로 확인 입력 식별값을 계산, 관문 요청 시험셋의 현재 세대를 정함, 키가 같고 시험셋이 같으며 부모 실험이 `completed`인 미소진 3.17 행이 있음(이전 세대 행 포함[결정 2026-11-16], 여럿이면 (`generation`, `check_number`)가 가장 작은 것). 있으면 3.18 행을 INSERT·커밋해 **소진**한다. 이 뒤의 어떤 거부·오류도 소진을 되돌리지 않는다(`detail.holdout_check_consumed: true`). 확인이 필요 없는 트랙은 아무것도 하지 않는다(요청에 `holdout`이 있으면 `holdout_not_allowed`, `holdout_input_unexpected`). 1·2에서 거부되면 소진하지 않는다 | `unknown_track`, `policy_not_found`, `holdout_not_allowed`, `gate_without_holdout_check`(`detail.rule`: `holdout_input_missing`·`candidate_key_unavailable`·`no_matching_check`), `holdout_check_already_used`(맞는 기록이 모두 소진됨, 또는 동시 소진의 `23505`) |
 | 3 | 요청 구성이 정확히 둘(현재 1, 후보 1)이고 같은 평가셋 스냅숏·원본 자료 스냅숏을 씀 | `candidate_limit`, `comparison_mismatch` |
 | 4 | 평가셋 스냅숏의 모든 질의의 확인 기준 = 실험 원본 자료 스냅숏[DR-12] | `basis_snapshot_mismatch` |
 | 5 | 두 run이 `ready`·`active`·`previous`이고 원본 자료 스냅숏으로 만든 것(R-10) | `run_not_evaluable`, `run_snapshot_mismatch` |
 | 6 | 정책이 등록된 manifest이고 run의 문서 임베딩과 질의 임베딩이 호환(설계서 D-02 대조) | `policy_not_found`, `policy_index_incompatible` |
-| 7 | 모델 레지스트리에 두 구성의 질의 임베딩 모델이 있고 로컬 준비됨(설계서 D-05) | `model_not_registered`, `model_not_prepared` |
+| 7 | 모델 레지스트리에 두 구성의 질의 임베딩 모델이 있고 로컬 준비됨(설계서 D-05). 정책에 리랭커 기술자가 있으면 `012` 레지스트리로 리랭커를 준비함(`012` 연동 ⑤, P19)[DR-26] | `model_not_registered`, `model_not_prepared`, 리랭커 준비 7개(`reranker_not_registered`, `reranker_model_not_approved`, `reranker_role_not_allowed`, `reranker_model_not_prepared`, `reranker_model_integrity_failed`, `reranker_remote_code_refused`, `reranker_settings_invalid`) |
+| 7a | (`dev`, `0008` 추가)[DR-28] 확인 개발셋(`dev_role = holdout`)은 목적 `holdout_check`로만, 목적 `holdout_check`는 확인 개발셋으로만. `holdout_check`이면 트랙(또는 교체 건)이 등록되어 있고(아니면 `unknown_track`) 확인 규칙에 있고(아니면 `holdout_not_allowed`, `track_not_in_holdout_rules`), `--test-set`이 시험셋이며, 후보 대조 키를 만들 수 있고, 그 시험셋 현재 세대의 다음 확인 번호가 승인 없이 허용된 수 이하이거나 `--approval-ref`가 있음. 확인 실험이 아닌 개발셋 실험 요청에 `holdout`이 있으면 거부. 재현(`reproduction`)은 원 실험을 따르며 확인 횟수로 세지 않음 | `holdout_not_allowed`(`detail.rule`: `purpose_not_allowed`·`set_role_mismatch`·`candidate_key_unavailable`·`holdout_input_unexpected`·`track_not_in_holdout_rules`), `unknown_track`, `not_test_set`, `holdout_check_limit_exceeded` |
 | 8 | (`gate`) 평가셋이 시험셋이고 스냅숏 `scale_ok`(FR-002). 시험셋 스냅숏 구성원과 모든 개발셋 현재 구성원 사이에 같은 정규화 질의문 없음(SC-006) | `not_test_set`, `test_set_scale`, `dev_test_overlap` |
 | 9 | (`gate`) 트랙이 있고 현재 세대 시도 수(4.3) < 관문 기준 `settings.max_attempts_per_track`(v1.0은 3), 진행 중 시도 없음(FR-025·FR-026). 같은 트랙에 `running` 행이 있으면 주 연결의 짧은 트랜잭션에서 `pg_try_advisory_xact_lock`(그 실험의 생존 키)으로 생존을 판정하고 바로 되돌림. 못 얻으면 살아 있음, 얻으면 중단됨[DR-25] | `unknown_track`, `attempt_limit`(+ 보충 안내), `attempt_in_progress`(살아 있음), `stale_attempt_in_progress`(잠금 없음, `detail.next_step`에 `eval experiment abandon <id>`) |
 | 10 | (`gate`) 관문 기준 설정값이 모두 정해짐, 시드가 기준 시드, 두 정책 `calibrated` | `gate_setting_missing`, `seed_not_allowed`, `policy_not_calibrated` |
 | 11 | (`gate`) 두 구성의 재색인 측정 run이 콜드 빌드 조건을 만족[DR-14] | `cost_measurement_missing` |
 
-`dev`는 8~11을 하지 않는다. 모두 통과하면 색인 쪽 필수 검사를 계산하고 두 구성의 모델 적재·예열 질의를 끝낸 뒤, 첫 평가셋 질의 직전에 실험 행을 INSERT·커밋한다. `gate`는 첫 질의별 결과를 저장할 때 시도로 센다[DR-24]. 사전 점검 거부, 그 전 단계 오류, 첫 결과 저장 전 오류는 시도로 세지 않는다(spec Edge Case).
+`dev`는 2a·8~11을 하지 않고, `gate`는 7a를 하지 않는다. 2a 뒤의 거부는 확인 소진만 남기고 그 밖은 바꾸지 않는다[DR-28]. 모두 통과하면 색인 쪽 필수 검사를 계산하고 두 구성의 모델 적재·예열 질의를 끝낸 뒤, 첫 평가셋 질의 직전에 실험 행을 INSERT·커밋한다. `gate`는 첫 질의별 결과를 저장할 때 시도로 센다[DR-24]. 사전 점검 거부, 그 전 단계 오류, 첫 결과 저장 전 오류는 시도로 세지 않는다(spec Edge Case).
 
 ### 4.3 시도 횟수
 
@@ -396,11 +444,34 @@ revision 완전 삭제 감지(접수·제거·실험 사전 점검 때 확인)
 
 판정은 운영 설정·활성 포인터를 바꾸지 않는다(FR-021). 실행기에는 그런 쓰기 경로가 없다.
 
+### 4.5 확인 개발셋 규칙[DR-28]
+
+```text
+확인 규칙 holdout-v1(코드 상수, 승인 참조 user-decision-2026-11-13·user-decision-2026-11-16)
+  track-2-reranker, swap-reranker-*(module_kind = reranker): 확인 필요, 시험셋 세대마다 승인 없이 3회, 대조 키 reranker-v1
+  그 밖 트랙·교체 건: 확인 필요 없음(013·014가 정하면 목록에 추가)
+
+확인 실험(dev, 목적 holdout_check, 확인 개발셋, --test-set S)
+  → 3.17 행(check_number = (트랙, S, S의 현재 세대)의 기존 수 + 1, 실패해도 셈)
+관문 시도(확인 필요 트랙·교체 건)
+  → 사전 점검 1·2 통과 뒤 2a에서 같은 S의 맞는 미소진 3.17 행 1건(이전 세대 행 포함)을 3.18로 소진(1·2 거부는 소진 없음)
+  - 대조 키 = (현재 정책 config_hash, 리랭커 설정 해시, 후보 깊이) + holdout_identity_sha256
+  - 1:1: 한 확인은 한 관문 요청에만. 같은 후보로 다시 시도하려면 새 확인
+  - 소진 뒤 판정 없이 끝나도(사전 점검 거부·첫 결과 전 오류) 확인은 소진, 시도 차수는 DR-24대로
+  - 색인 run이 바뀌면 확인 입력 식별값이 달라 이전 확인과 맞지 않음
+  - 새 시험셋 세대가 열리면 확인 횟수는 0부터. 이전 세대의 미소진 확인도 대조 키가 맞으면 새 세대 관문 시도에 쓸 수 있고, 새 세대 횟수에 다시 더하지 않음[결정 2026-11-16]
+```
+
+- 확인 횟수는 (트랙 또는 교체 건, 시험셋, 시험셋 세대)마다 모든 확인 개발셋을 합쳐 센다(사용자 결정 2026-11-16 (c)). 관문 시도 횟수(4.3)와 따로 세지만 같은 세대 단위로 다시 시작한다.
+- 확인 개발셋과 탐색 개발셋 사이에도 같은 정규화 질의문을 두지 않는다. 한쪽에 질의를 넣을 때 다른 역할 개발셋의 현재 구성원과 같으면 자동으로 빼고 뺀 수를 접수 기록(3.9 `excluded_counts`)과 출력에 남긴다(`excluded_as_exploration_duplicate`, `excluded_as_holdout_duplicate`, 사용자 결정 2026-11-16 (d)).
+- 시험셋에는 역할이 없고, 시험셋 규칙(FR-024·DR-21)은 바뀌지 않는다.
+
 ## 5. 마이그레이션 분할
 
 | revision(계획 이름) | 내용 | down_revision | Phase |
 |---|---|---|---|
 | `0006_evaluation_datasets` | 3.1~3.9 테이블, CHECK, append-only 트리거, 평가셋 종류–출처 구분 대조 트리거 | `0005_material_registration` | P4a |
 | `0007_evaluation_experiments` | 3.10~3.16 테이블, 상태 전이 제한 트리거(중단 정리 전이 포함), 3.13·3.14 결과 가드 트리거, 시도 유일·진행 중 유일 부분 인덱스(진행 중 유일 인덱스 이름 `eval_experiments_running_track_uq` 고정, 3.12), 연구 트랙 3행 | `0006_evaluation_datasets` | P4b |
+| `0008_evaluation_research_linkage`[DR-27] | `eval_` 테이블에만 추가: 3.3 `dev_role`(기본값 없는 NULL 허용 열, CHECK, 새 `kind = dev` 행 NOT NULL INSERT 트리거. 기존 행 UPDATE·트리거 해제 없음), 3.9 `excluded_counts`(기본값 없는 NULL 허용 jsonb, 키·값 형식 CHECK), 3.12 `gate_request_id`(부분 UNIQUE)와 목적 CHECK에 `holdout_check`, 목적–역할 대조 트리거, 3.13 선택 열 4개(`rerank_status` CHECK), 3.17·3.18 테이블(append-only, 승인 참조 트리거, 트랙·세대 일치 트리거) | `0007_evaluation_experiments` | P4c |
 
-downgrade는 각자 만든 테이블만 지운다. 기존 테이블과 001 테이블에는 alter·drop·UPDATE·DELETE가 없다(U-MIG-01·02).
+downgrade는 각자 만든 테이블만 지운다(`0008`은 자기가 더한 열·제약·트리거와 3.17·3.18만 지운다). 기존 테이블과 001 테이블에는 alter·drop·UPDATE·DELETE가 없다(U-MIG-01·02·03). `0008`의 ALTER는 002의 `eval_` 테이블에만 한다.
